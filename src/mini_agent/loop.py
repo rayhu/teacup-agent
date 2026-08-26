@@ -26,6 +26,7 @@ from typing import Any, Callable
 from mini_agent import context as ctx
 from mini_agent import persist
 from mini_agent import plan as plan_mod
+from mini_agent import subagent as subagent_mod
 from mini_agent import tools as tools_mod
 from mini_agent.memory import Memory, NullMemory
 from mini_agent.model import Model, ToolCall, chat_tool_result
@@ -306,20 +307,30 @@ def execute_calls(
 
     if to_run:
         # The time brake reaches tools too: if less time remains than the per-call
-        # timeout, the remaining time wins.
+        # timeout, the remaining time wins. A tool may also declare its own limit —
+        # a subagent legitimately runs longer than a page fetch.
         left = state.time_left()
-        deadline = tool_timeout if left is None else min(tool_timeout, max(1.0, left))
         with ThreadPoolExecutor(max_workers=len(to_run)) as pool:
             futures = {}
+            limits = {}
             for i, call in to_run:
+                spec = tools_mod.REGISTRY.get(call.name)
+                limit = (spec.timeout if spec and spec.timeout else tool_timeout)
+                if left is not None:
+                    limit = min(limit, max(1.0, left))
                 emit("tool_call", name=call.name, arguments=call.arguments, step=state.step)
-                futures[pool.submit(tools_mod.execute, call.name, call.arguments)] = i
+                future = pool.submit(tools_mod.execute, call.name, call.arguments)
+                futures[future] = i
+                # An absolute deadline, so waiting on them one after another does not
+                # add the timeouts together.
+                limits[i] = (time.monotonic() + limit, limit)
             for future, i in futures.items():
+                deadline_at, limit = limits[i]
                 try:
-                    results[i] = future.result(timeout=deadline)
+                    results[i] = future.result(timeout=max(0.0, deadline_at - time.monotonic()))
                 except FuturesTimeout:
                     results[i] = (
-                        f"ERROR: the tool did not return within {deadline:.0f}s and the "
+                        f"ERROR: the tool did not return within {limit:.0f}s and the "
                         "call was abandoned. This does **not** mean the operation "
                         "failed or the information does not exist; retry with a "
                         "smaller request."
@@ -367,6 +378,9 @@ def run(
     run_dir: str | pathlib.Path | None = None,  # persistence + externalization dir
     resume: AgentState | None = None,  # continue from a previously saved state
     plan: bool = False,  # decompose the goal into a checklist first (one extra call)
+    subagents: bool = False,  # offer the delegate tool (a child run with its own context)
+    subagent_max_steps: int = 4,
+    exclude_tools: list[str] | None = None,  # names the model must not see this run
     approve: Callable[[ToolCall, Any], bool] = deny_all,  # approval policy
     today: str | None = None,
     clock: Callable[[], float] = time.monotonic,
@@ -437,8 +451,45 @@ def run(
     if set_key:
         set_key("mini-agent-" + hashlib.sha256(state.messages[0]["content"].encode()).hexdigest()[:16])
 
-    specs = tools_mod.specs()
+    if subagents:
+        # Registered per run, not globally: an unbound tool schema would sit in the
+        # context prefix of every request for a capability the run cannot use.
+        subagent_mod.enable(
+            state,
+            model,
+            max_steps=subagent_max_steps,
+            approve=approve,
+            run_dir=run_dir,
+            tool_timeout=tool_timeout,
+            on_event=on_event,
+        )
 
+    hidden = set(exclude_tools or [])
+    specs = [s for s in tools_mod.specs() if s["function"]["name"] not in hidden]
+
+    try:
+        return _loop(
+            state, model, specs, emit, clock, started_at, context_limit,
+            tool_timeout, run_dir, approve,
+        )
+    finally:
+        if subagents:
+            subagent_mod.disable()
+
+
+def _loop(
+    state: AgentState,
+    model: Model,
+    specs: list[dict[str, Any]],
+    emit: Callable[..., None],
+    clock: Callable[[], float],
+    started_at: float,
+    context_limit: int,
+    tool_timeout: float,
+    run_dir: pathlib.Path | None,
+    approve: Callable[[ToolCall, Any], bool],
+) -> AgentState:
+    """The loop itself. Split out only so run() can guarantee the teardown above."""
     while True:
         # ---- guards: steps / budget / time ---------------------------------
         state.elapsed = clock() - started_at

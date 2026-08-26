@@ -132,6 +132,14 @@ def _printer(quiet: bool):
                 f"{data['requested']} tool calls; running the first {data['cap']}, "
                 "the rest go back to the next turn"
             )
+        elif event == "planned" and data.get("subagent"):
+            print(f"    [sub{data['subagent']}] checklist: " + "; ".join(data["items"]))
+        elif event == "tool_call" and data.get("subagent"):
+            print(f"    [sub{data['subagent']}] -> {data['name']}({data['arguments'][:60]})")
+        elif event == "answer" and data.get("subagent"):
+            print(f"    [sub{data['subagent']}] returned {len(data['text'])} chars to the parent")
+        elif data.get("subagent"):
+            return  # the child's other chatter stays out of the parent's log
         elif event == "planned":
             print("  [checklist] " + " | ".join(f"{i}. {t}" for i, t in enumerate(data["items"], 1)))
         elif event == "completion_check":
@@ -252,6 +260,19 @@ def main(argv: list[str] | None = None) -> int:
         "off to disable. Each server's tools join the registry as server__tool",
     )
     p.add_argument(
+        "--subagents",
+        action="store_true",
+        help="offer the delegate tool: a subtask runs as a child agent with its own "
+        "context and returns only its conclusion, so the bulk it read never enters "
+        "this context. Off by default (it adds a tool schema and can spend budget)",
+    )
+    p.add_argument(
+        "--subagent-steps",
+        type=int,
+        default=4,
+        help="step ceiling for one subagent run, default 4",
+    )
+    p.add_argument(
         "--plan",
         choices=["auto", "on", "off"],
         default="auto",
@@ -354,6 +375,8 @@ def _run_agent(args, the_model, run_dir, resumed):
         approve=_make_approver(args.approve, args.quiet),
         max_tool_calls_per_step=args.max_tool_calls,
         plan=_resolve_plan(args.plan, args.live),
+        subagents=args.subagents,
+        subagent_max_steps=args.subagent_steps,
         on_event=_printer(args.quiet),
     )
 

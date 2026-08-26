@@ -26,6 +26,7 @@ class Tool:
     parameters: dict[str, Any]  # JSON Schema
     fn: Callable[..., str]
     requires_approval: bool = False  # True = a human must say yes before running
+    timeout: float | None = None  # override the loop's per-call timeout, in seconds
 
 
 REGISTRY: dict[str, Tool] = {}
@@ -35,6 +36,7 @@ def tool(
     description: str,
     parameters: dict[str, Any],
     requires_approval: bool = False,
+    timeout: float | None = None,
 ):
     """Decorator: register a plain function as a model-callable tool.
 
@@ -46,7 +48,7 @@ def tool(
 
     def deco(fn: Callable[..., str]) -> Callable[..., str]:
         REGISTRY[fn.__name__] = Tool(
-            fn.__name__, description, parameters, fn, requires_approval
+            fn.__name__, description, parameters, fn, requires_approval, timeout
         )
         return fn
 

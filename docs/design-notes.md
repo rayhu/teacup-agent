@@ -428,3 +428,80 @@ prompt caching is void.
 ```bash
 uv run mini-agent --live --max-tool-calls 2 "research OpenAI's funding and competition"
 ```
+
+---
+
+## Subagents
+
+Compaction summarises and therefore discards. Externalizing keeps the text but still
+spends the excerpt. A subagent avoids the cost entirely: it reads five pages in a context
+of its own and hands back three sentences, and the parent never pays for the pages
+because it never sees them.
+
+```bash
+uv run mini-agent --live --subagents "research X across several sources and summarise"
+```
+
+```
+[step 1] -> delegate({"task": "read the spec page and summarise the versioning rules"})
+    [sub1] -> fetch__fetch({"url": ...})
+    [sub1] returned 412 chars to the parent
+```
+
+One parent step buys a whole child run. That is the trade: a step is cheap, a context
+window is not.
+
+**What the child gets**: a blank context (it cannot see the conversation, so the task
+must be self-contained), every tool except `delegate`, a slice of the parent's *remaining*
+budget (40% by default, read at call time so a nearly-broke parent cannot fund an
+expensive child), its own step ceiling (`--subagent-steps`, default 4), and whatever wall
+clock the parent has left.
+
+**What comes back**: the answer only. Everything the child read stays in the child.
+
+**What that costs, and how it is paid for.** The parent cannot audit a conclusion it
+cannot see, so the child is not invisible, only out of context:
+
+- the child's full trace and its own `state.json` are written to
+  `runs/<timestamp>/sub01/`, so a review can open exactly what it read;
+- its events are forwarded to the terminal with a `[sub1]` marker;
+- every dollar and token it spends is charged to the parent, because they were the
+  parent's to begin with.
+
+**Guards.** A child cannot delegate further: `delegate` is left out of the tool list it is
+given, and one level is enforced there rather than by a depth counter, because a recursion
+here is a recursion that spends money. A child that ends without an answer becomes an
+`ERROR:` result the parent can read and route around, the same as any other tool failure.
+
+**Two implementation details worth knowing.** The tool is registered per run rather than
+globally, since an unbound schema would sit in the context prefix of every request for a
+capability the run cannot use. And `Tool.timeout` exists because of this feature: a child
+run is not a page fetch, and the loop's 30-second default would kill it mid-thought.
+
+### Measured, including the part that is not a win
+
+Same task (read two spec pages, answer in three bullets), gpt-5-mini, MCP `fetch`:
+
+| | flat run | with two subagents |
+| --- | --- | --- |
+| Raw characters entering the **parent** context from tools | 4,700 | **916** |
+| Parent `context_tokens` at the end | 6,515 | **4,333** |
+| Total input tokens (parent + children) | 28,866 | **38,465** |
+| Cost | $0.0110 | **$0.0148** |
+
+The mechanism does exactly what it claims: the children read 6,314 characters between
+them and handed back 296 and 524 characters, so the parent's context ended a third
+smaller. **And the run cost 35% more.** Isolation is not free. Each child carries its own
+system prompt and re-reads material the parent would have had anyway, so total tokens go
+up even as the parent's context goes down.
+
+That trade only pays off when the parent would otherwise **carry** the bulk for the rest
+of the run: context spent on turn 2 is context still being resent on turn 12. On a
+two-page task that ends immediately afterwards, delegation is a net loss. On a long
+investigation across ten sources, it is the difference between finishing and running out
+of window. Use it for reading-heavy subtasks inside long runs, not as a default.
+
+**One more finding, from the same experiment.** In the first attempt the tool was
+available and the model simply never called it: `subagents: 0`. That is the same failure
+family as the email that never got sent. An available tool is not a used tool, and the
+number that proves a feature works has to come from a run that actually used it.

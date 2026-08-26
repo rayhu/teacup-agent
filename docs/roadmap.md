@@ -2,10 +2,10 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#9 are done (except the fine-grained permissions part of #6).
+**Progress**: #1-#10 are done (except the fine-grained permissions part of #6).
 Five items that were never on the roadmap were added after reviewing real runs
 (see "Field patches" at the end).
-Next up: #11 (a better search backend), then #10 (subagents).
+Next up: #11 (a better search backend), the last unstarted item.
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/mini_agent/loop.py) is "old technology".
@@ -406,7 +406,7 @@ around); remote servers over Streamable HTTP work by URL but OAuth is untested.
 
 ---
 
-### 10. Subagents / context isolation
+### 10. Subagents / context isolation — DONE (2026-08-26)
 
 **Now**: everything shares one context.
 
@@ -416,6 +416,44 @@ This is also the most effective form of context compression.
 
 **Definition of done**: for a task that needs five sources, the main context uses
 significantly fewer tokens than the single-context version with no loss of quality.
+
+**What shipped**: [`subagent.py`](../src/mini_agent/subagent.py) plus `--subagents`, off by
+default. `loop.run(subagents=True)` registers a `delegate` tool for the duration of the
+run; calling it starts a child `loop.run()` with a blank context, a slice of the parent's
+remaining budget, its own step ceiling, and every tool except `delegate` itself.
+
+**Design decisions**:
+- One level of delegation, enforced by omitting the tool from the child's list rather than
+  by a depth counter: a recursion here is a recursion that spends money.
+- The child is out of context but not invisible: its trace and `state.json` land in
+  `runs/<timestamp>/sub01/`, its events are forwarded with a `[sub1]` marker, and its cost
+  and tokens are charged to the parent.
+- Budget share is read at call time, so a parent that has already spent most of its budget
+  cannot fund an expensive child.
+- The tool is registered per run, not globally, so its schema is not in the prefix of
+  every request for runs that cannot use it.
+- `Tool.timeout` was added for this: a child run is not a page fetch, and the loop's
+  30-second per-call default would kill it. Per-call deadlines are now absolute, so
+  waiting on parallel calls one after another no longer adds their timeouts together.
+
+**Verified**: 11 tests plus an eval case. The sharpest one gives a fake tool that returns
+9,000 characters: the child reads it, the parent's context never contains a byte of it,
+and the child's `state.json` on disk does.
+
+**Measured** (gpt-5-mini, two spec pages via MCP fetch): raw characters entering the
+parent context fell from 4,700 to 916 and its final `context_tokens` from 6,515 to 4,333,
+while total input tokens rose from 28,866 to 38,465 and cost from $0.0110 to $0.0148.
+Isolation is not free: each child carries its own system prompt and re-reads material the
+parent would have had anyway. The trade pays only when the parent would otherwise carry
+that bulk for the rest of a long run, since context spent on turn 2 is still being resent
+on turn 12. See [design-notes.md](design-notes.md#measured-including-the-part-that-is-not-a-win).
+
+**Also learned**: on the first attempt the model never called the tool at all
+(`subagents: 0`) even though it was available. An available tool is not a used tool, the
+same lesson as the email that never got sent.
+
+**Left open**: several subagents in parallel (they run one per tool call today, so the
+per-turn cap applies), and passing curated context down instead of a blank slate.
 
 ---
 

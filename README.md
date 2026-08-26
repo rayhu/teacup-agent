@@ -80,7 +80,7 @@ NOTES.md                the original study notes this grew from
 | Model | `model.py` | Responses API (default) and Chat Completions with cache-aware pricing, plus an offline scripted model | Claude, local models, multi-model routing |
 | State | `state.py` | steps, budget, time, status machine, tool trace; saved every step and resumable | distributed or concurrent runs |
 | Tools | `tools.py`, `mcp_tools.py` | six built-ins (search, calculate, read file, remember, checklist, send mail) plus anything an MCP server exposes | more servers |
-| Control Loop | `loop.py` | four brakes, parallel tool execution, retries, a completion check | subagents, delegated planning |
+| Control Loop | `loop.py` | four brakes, parallel tools, retries, a completion check, delegation to subagents | parallel subagents, delegated planning |
 | Memory | `memory.py` | JSON file with dedupe, keeping the last N facts | vector store, summarization, relevance recall |
 | Evals | `evals.py`, `trajectory.py` | offline protocol cases plus real-trajectory scoring | fixed task suites, cross-version regression |
 
@@ -104,6 +104,8 @@ Each of these earned its place by fixing a run that had gone wrong. The stories 
 - **Persistence**: every step is written to `runs/<timestamp>/state.json`, and `--resume`
   continues from there.
 - **MCP**: point at a server and its tools join the registry, namespaced and gated.
+- **Subagents**: delegate a reading-heavy subtask to a child agent with its own context;
+  only its conclusion comes back, so the bulk never enters this context.
 
 ## The three traps in the control loop
 
@@ -125,7 +127,7 @@ defensive programming. It is the reason the loop exists.
 The core is not dated. An agent in 2026 is still this loop. The engineering around it has
 come a long way: Responses API, prompt caching, context management, parallel execution,
 persistence and resume, an approval gate, trajectory scoring and MCP are all in place.
-Subagents with isolated context and a serious search backend are not.
+A serious search backend is the one thing left.
 
 See [docs/roadmap.md](docs/roadmap.md) for what is missing, why it matters, and what order
 to add it in.

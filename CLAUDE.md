@@ -90,6 +90,10 @@ These were each paid for with a failed run. Do not quietly reverse one.
    only half finished.
 6. **Keep the context prefix stable.** Per-turn notes are appended at the end, never
    spliced into the system prompt, or prompt caching dies.
+7. **Keep Python modules focused and cohesive.** As a guideline, prefer
+   modules under ~500 lines. When a module grows beyond ~700 lines,
+   consider splitting it by responsibility rather than mechanically
+   splitting by size.
 
 ## Code conventions
 
@@ -103,7 +107,7 @@ These were each paid for with a failed run. Do not quietly reverse one.
 
 ## Where the SDLC paper lands
 
-`docs/The New SDLC With Vibe Coding.pdf` (Google, May 2026) is the method behind the
+`The New SDLC With Vibe Coding` (Google, May 2026) is the method behind the
 above. The parts that bind:
 
 - **Agent = Model + Harness.** The model is ~10% of behaviour; the harness — instructions,

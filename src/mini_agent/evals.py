@@ -36,6 +36,7 @@ class Case:
     max_tool_calls: int = 3
     time_budget: float | None = None
     context_limit: int = 30_000
+    subagents: bool = False
     plan: bool = False
     plan_items: list[str] | None = None
     clock_values: list[float] | None = None  # fake clock, makes the time brake repeatable
@@ -284,6 +285,22 @@ CASES: list[Case] = [
             and s.status == "done"
         ),
     ),
+    Case(
+        name="delegation: a child's reading never lands in the parent's messages",
+        script=[
+            assistant_calls([("delegate", {"task": "CHILD: look up cuda"})]),
+            assistant_says("answered from the subagent's conclusion"),
+        ],
+        subagents=True,
+        budget=1.0,
+        check=lambda s: (
+            s.subagent_runs == 1
+            and tool_results_follow_their_call(s)
+            # the child ran with its own context; the parent holds one tool result
+            and sum(m["role"] == "tool" for m in s.messages) == 1
+            and s.status == "done"
+        ),
+    ),
 ]
 
 
@@ -299,6 +316,7 @@ def run_case(case: Case) -> tuple[bool, AgentState]:
         max_tool_calls_per_step=case.max_tool_calls,
         time_budget=case.time_budget,
         context_limit=case.context_limit,
+        subagents=case.subagents,
         plan=case.plan,
         run_dir=None,  # evals never write to disk
         # A fresh iterator per run, so a case can be executed repeatedly.

@@ -59,6 +59,7 @@ class AgentState:
     salvaged: bool = False  # True = answer rescued by the forced wrap-up turn
     todo: list[TodoItem] = field(default_factory=list)
     completion_checked: bool = False  # the "anything left undone?" push-back fired
+    subagent_runs: int = 0  # how many subagents this run delegated to
     trace: list[ToolTrace] = field(default_factory=list)
 
     # ---- the loop's guards ----------------------------------------------
@@ -101,6 +102,7 @@ class AgentState:
             "cache_hit": self.cache_hit_rate(),
             "status": self.status,
             "salvaged": self.salvaged,
+            "subagents": self.subagent_runs,
             "todo_done": f"{sum(t.done for t in self.todo)}/{len(self.todo)}"
             if self.todo
             else "n/a",
