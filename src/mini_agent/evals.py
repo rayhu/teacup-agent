@@ -107,7 +107,7 @@ CASES: list[Case] = [
     ),
     Case(
         name="未知工具：不应崩溃，而是告诉模型可用工具",
-        script=[assistant_calls([("send_email", {"to": "x"})]), assistant_says("换个方式")],
+        script=[assistant_calls([("teleport", {"to": "火星"})]), assistant_says("换个方式")],
         check=lambda s: "未知工具" in s.trace[0].result and s.status == "done",
     ),
     Case(
@@ -215,6 +215,28 @@ CASES: list[Case] = [
             and tool_results_follow_their_call(s)  # 没有悬空的 tool_call_id
             and any("强制收尾阶段" in str(m.get("content", "")) for m in s.messages)
         ),
+    ),
+    Case(
+        name="确认门：无人值守时危险操作必须被拒绝，且不能真的执行",
+        script=[
+            assistant_calls([("send_email", {"to": "a@b.c", "subject": "s", "body": "b"})]),
+            assistant_says("邮件没发成，需要你自己来发。"),
+        ],
+        check=lambda s: (
+            s.trace[0].skip_reason == "denied"
+            and not s.trace[0].executed
+            and "没有执行" in s.trace[0].result
+            and tool_results_follow_their_call(s)  # 被拒绝的调用也要有结果消息
+            and s.status == "done"
+        ),
+    ),
+    Case(
+        name="确认门：只读工具不该被拦",
+        script=[
+            assistant_calls([("calculate", {"expression": "1+1"})]),
+            assistant_says("2"),
+        ],
+        check=lambda s: s.trace[0].executed and s.trace[0].result == "2",
     ),
 ]
 

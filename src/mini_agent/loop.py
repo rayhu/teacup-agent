@@ -57,6 +57,8 @@ SYSTEM_PROMPT = """你是一个会使用工具的自主 Agent，运行在**无�
 - 需要外部信息时就调用工具，不要凭空编造；一轮可以同时发起多个工具调用，但每轮最多执行 {max_tool_calls} 个，
   超出的会被拒绝执行并要求你下一轮重发 —— 所以请先挑最关键的几个。
 - 工具返回以 ERROR: 开头时，说明调用有问题，请修正参数后重试，不要放弃。
+- 少数工具（有外部副作用、无法撤销，比如发邮件）执行前需要人工批准，可能被拒绝。
+  被拒绝时**不要重复发起同一个调用** —— 换一种做法，或在最终答案里说明这一步需要用户自己来做。
 - 不再调用工具 = 你认为任务已完成，这是循环的终止信号 —— 别用它来提问。
 - 遇到值得长期保留的事实（用户偏好、稳定结论），用 remember 工具记下来。
 
@@ -170,6 +172,20 @@ def complete_with_retries(
             (sleep or time.sleep)(delay)  # 调用时才取，测试才拦得住
 
 
+DENIED = (
+    "ERROR: 该操作需要人工批准，本次未获批准，**没有执行**。"
+    "请不要重复发起同一个调用；换一种不需要批准的方式，或在最终答案里说明这一步需要用户自己来做。"
+)
+
+
+def deny_all(call: ToolCall, tool: Any) -> bool:
+    """默认策略：无人值守时，需要批准的操作一律拒绝。
+
+    「没人看着就默认放行」是最危险的默认值 —— 出事的恰恰是没人看着的那次。
+    """
+    return False
+
+
 EXTERNALIZE_OVER = 2000  # 超过这么多字符的工具结果就写盘，上下文里只留摘要 + 路径
 
 
@@ -180,6 +196,7 @@ def execute_calls(
     emit: Callable[..., None],
     tool_timeout: float,
     run_dir: pathlib.Path | None = None,
+    approve: Callable[[ToolCall, Any], bool] = deny_all,
 ) -> None:
     """并行执行一轮里的所有工具调用，然后**按原顺序**回填。
 
@@ -198,12 +215,23 @@ def execute_calls(
         f"ERROR: 本轮工具调用数已达上限（{cap} 个），该调用未执行。"
         "请先看已返回的结果，若仍有必要，下一轮再发起（可合并成更少的查询）。"
     )
-    to_run = [
-        (i, c) for i, c in enumerate(calls) if not (cap > 0 and i >= cap)
-    ]
-    results: dict[int, str] = {
-        i: throttled_msg for i in range(len(calls)) if cap > 0 and i >= cap
-    }
+    results: dict[int, str] = {}
+    reasons: dict[int, str] = {}
+    to_run: list[tuple[int, ToolCall]] = []
+    for i, call in enumerate(calls):
+        if cap > 0 and i >= cap:
+            results[i], reasons[i] = throttled_msg, "throttled"
+            continue
+        # 批准检查必须在**提交线程池之前**、而且串行做 —— 它要么问人，要么直接拒绝
+        spec = tools_mod.REGISTRY.get(call.name)
+        if spec is not None and spec.requires_approval:
+            emit("approval_required", name=call.name, arguments=call.arguments, step=state.step)
+            if not approve(call, spec):
+                results[i], reasons[i] = DENIED, "denied"
+                emit("denied", name=call.name, step=state.step)
+                continue
+            emit("approved", name=call.name, step=state.step)
+        to_run.append((i, call))
 
     if to_run:
         # 时间刹车也管得住工具：剩余时间比单次超时还短时，以剩余时间为准
@@ -228,7 +256,7 @@ def execute_calls(
 
     for i, call in enumerate(calls):  # 严格按原顺序回填
         result = results[i]
-        executed = not (cap > 0 and i >= cap)
+        executed = i not in reasons
         if executed:
             emit("tool_result", name=call.name, result=result, step=state.step)
             # 外置：大块结果写盘，上下文里只留开头 + 路径（模型可用 read_file 取回）。
@@ -244,6 +272,7 @@ def execute_calls(
                 arguments=call.arguments,
                 result=result,
                 executed=executed,
+                skip_reason=reasons.get(i, ""),
             )
         )
         state.messages.append(result_item(model, call, result))
@@ -261,6 +290,7 @@ def run(
     context_limit: int = 30_000,  # 上下文超过这么多 token 就压缩
     run_dir: str | pathlib.Path | None = None,  # 落盘与外置目录；None = 都不做
     resume: AgentState | None = None,  # 从上次落盘的状态接着跑
+    approve: Callable[[ToolCall, Any], bool] = deny_all,  # 危险操作的批准策略
     today: str | None = None,
     clock: Callable[[], float] = time.monotonic,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
@@ -377,7 +407,7 @@ def run(
             break
 
         # ---- 4. 并行执行所有工具调用，按原顺序回填（坑 2）------------------
-        execute_calls(state, reply.tool_calls, model, emit, tool_timeout, run_dir)
+        execute_calls(state, reply.tool_calls, model, emit, tool_timeout, run_dir, approve)
 
         # ---- 5. 落盘：每步都存，崩了才有得恢复 -----------------------------
         # elapsed 用本轮开头量的那个值，不再多问一次时钟（省掉一处非确定性）

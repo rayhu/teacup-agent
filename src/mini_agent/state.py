@@ -22,7 +22,8 @@ class ToolTrace:
     name: str
     arguments: str
     result: str
-    executed: bool = True  # False = 被每轮上限拦下，没有真正执行
+    executed: bool = True  # False = 没有真正执行
+    skip_reason: str = ""  # "throttled" | "denied"
 
 
 @dataclass

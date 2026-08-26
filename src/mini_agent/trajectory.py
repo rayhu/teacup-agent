@@ -36,6 +36,12 @@ def mechanical(state: AgentState) -> dict[str, Any]:
     executed = [t for t in state.trace if t.executed]
     failed = [t for t in executed if t.result.startswith("ERROR:")]
 
+    # 被拒绝后又原样重发同一个调用 —— 说明模型没读懂拒绝，是个该抓的坏模式
+    denied_keys = {(t.name, t.arguments) for t in state.trace if t.skip_reason == "denied"}
+    retried_after_denial = sum(
+        1 for t in state.trace if (t.name, t.arguments) in denied_keys and t.executed
+    )
+
     # 重复调用：同一个工具 + 同样的参数被发了不止一次，纯浪费
     seen: dict[tuple[str, str], int] = {}
     for t in executed:
@@ -56,7 +62,9 @@ def mechanical(state: AgentState) -> dict[str, Any]:
         "tool_calls": len(executed),
         "failed_tool_calls": len(failed),
         "duplicate_tool_calls": duplicates,
-        "throttled": sum(1 for t in state.trace if not t.executed),
+        "throttled": sum(1 for t in state.trace if t.skip_reason == "throttled"),
+        "denied": sum(1 for t in state.trace if t.skip_reason == "denied"),
+        "retried_after_denial": retried_after_denial,
         "compactions": state.compactions,
         "salvaged": state.salvaged,
         "elapsed_s": round(state.elapsed, 1),

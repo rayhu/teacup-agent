@@ -55,7 +55,7 @@ docs/roadmap.md              —— 这份实现距离当前生产级别的 agen
 | Model | `model.py` | Responses API（默认）+ Chat Completions + 缓存计价，另有离线脚本模型 | Claude / 本地模型 / 多模型路由 |
 | State | `state.py` | dataclass：步数、预算、时间、状态机、留痕；每步落盘可恢复 | 分布式/并发运行 |
 | 上下文 | `context.py` | 大结果外置 + 超限压缩（保护工具调用配对） | 按相关性召回、分层摘要 |
-| Tools | `tools.py` | search_web（**真实联网**，DuckDuckGo 免 key）、calculate、read_file、remember | 浏览器、SQL、代码执行、发邮件 |
+| Tools | `tools.py` | search_web（**真实联网**）、calculate、read_file、remember、send_email（需批准） | 浏览器、SQL、代码执行、MCP |
 | Control Loop | `loop.py` | 单层循环 + 四道守卫 + 工具并行执行 + 模型调用重试 | 计划-执行分离、子 Agent、人工确认 |
 | Memory | `memory.py` | JSON 文件 + 去重 + 只留最近 N 条 | 向量库、摘要压缩、按相关性召回 |
 | Evals | `evals.py` + `trajectory.py` | 13 条离线协议用例 + 真实轨迹打分 | 固定任务集、跨版本回归对比 |
@@ -99,6 +99,33 @@ MINI_AGENT_SEARCH=offline uv run mini-agent                      # 强制离线
 
 同一任务实测（gpt-5-mini）：responses 的上下文里多出一条 `reasoning` 项，会随下一轮请求发回去；
 chat 那边没有对应物。OpenAI 迁移文档称同 prompt 下 SWE-bench 高约 3%。
+
+## 人机确认门
+
+只读工具直接跑；**有外部副作用、无法撤销**的工具（示例里是 `send_email`）执行前要过一道门：
+
+```python
+@tool(description="...", parameters={...}, requires_approval=True)
+def send_email(to, subject, body): ...
+```
+
+`--approve` 三种策略：
+
+| 值 | 行为 |
+| --- | --- |
+| `auto`（默认） | 有终端就问你（打印工具名、参数、说明，等 y/N）；**没终端就一律拒绝** |
+| `deny` | 一律拒绝 |
+| `allow` | 一律放行（明确的 yolo 模式） |
+
+**「没人看着就默认放行」是最危险的默认值** —— 出事的恰恰是没人看着的那次（CI、定时任务、后台跑批）。
+所以 auto 在检测不到 TTY 时选择拒绝，而不是选择方便。
+
+被拒绝的调用**同样要有结果消息**（和限流一样，否则协议断裂），内容告诉模型：
+没有执行、别重发、换个做法或在答案里说明这一步要用户自己来。
+只读工具**绝不设这个标记** —— 问多了会麻木，麻木了就会闭眼点同意，反而更危险。
+
+轨迹评测里 `denied` 和 `throttled` 分开统计，还有一个 `retried_after_denial`：
+被拒绝后又原样重发同一个调用，说明模型没读懂拒绝。
 
 ## 两种评测，别混为一谈
 

@@ -25,11 +25,13 @@ def test_counts_duplicate_and_failed_tool_calls():
             ToolTrace(1, "search_web", '{"q":"x"}', "结果"),
             ToolTrace(2, "search_web", '{"q":"x"}', "结果"),  # 一模一样，纯浪费
             ToolTrace(2, "search_web", '{"q":"y"}', "ERROR: 检索失败"),
-            ToolTrace(2, "calculate", "{}", "未执行", executed=False),  # 被限流
+            ToolTrace(2, "calculate", "{}", "未执行", executed=False, skip_reason="throttled"),
+            ToolTrace(3, "send_email", "{}", "未执行", executed=False, skip_reason="denied"),
         ],
     )
     m = tj.mechanical(st)
     assert m["tool_calls"] == 3 and m["throttled"] == 1
+    assert m["denied"] == 1  # 被拒绝和被限流要分开数
     assert m["duplicate_tool_calls"] == 1
     assert m["failed_tool_calls"] == 1
     assert m["answer_citations"] == 2

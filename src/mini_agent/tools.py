@@ -25,16 +25,27 @@ class Tool:
     description: str
     parameters: dict[str, Any]  # JSON Schema
     fn: Callable[..., str]
+    requires_approval: bool = False  # True = 执行前必须有人点头
 
 
 REGISTRY: dict[str, Tool] = {}
 
 
-def tool(description: str, parameters: dict[str, Any]):
-    """装饰器：把一个普通函数登记成模型可调用的工具。"""
+def tool(
+    description: str,
+    parameters: dict[str, Any],
+    requires_approval: bool = False,
+):
+    """装饰器：把一个普通函数登记成模型可调用的工具。
+
+    requires_approval=True 用于**有外部副作用、且难以撤销**的操作：发邮件、下单、删数据。
+    只读工具不该设 —— 每次都问会让人麻木，麻木了就会闭眼点同意，反而更危险。
+    """
 
     def deco(fn: Callable[..., str]) -> Callable[..., str]:
-        REGISTRY[fn.__name__] = Tool(fn.__name__, description, parameters, fn)
+        REGISTRY[fn.__name__] = Tool(
+            fn.__name__, description, parameters, fn, requires_approval
+        )
         return fn
 
     return deco
@@ -302,3 +313,30 @@ def remember(fact: str) -> str:
         return "ERROR: 当前没有可用的长期记忆"
     _memory.remember(fact)
     return f"已记住：{fact}"
+
+
+@tool(
+    description=(
+        "给某人发一封邮件。**这是有外部副作用、无法撤销的操作，执行前需要人工批准。**"
+        "演示实现：不真发，只把内容追加到项目下的 outbox.jsonl。"
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "to": {"type": "string", "description": "收件人邮箱"},
+            "subject": {"type": "string", "description": "主题"},
+            "body": {"type": "string", "description": "正文"},
+        },
+        "required": ["to", "subject", "body"],
+    },
+    requires_approval=True,
+)
+def send_email(to: str, subject: str, body: str) -> str:
+    """你原始笔记里工具清单的最后一个就是它 —— 也正是第一个必须加确认门的。
+
+    只读工具错了顶多浪费一次调用；这个错了，信已经发出去了。
+    """
+    record = {"to": to, "subject": subject, "body": body}
+    with open("outbox.jsonl", "a", encoding="utf-8") as f:
+        f.write(json.dumps(record, ensure_ascii=False) + "\n")
+    return f"已发送给 {to}，主题《{subject}》（演示实现：实际写入了 outbox.jsonl）"

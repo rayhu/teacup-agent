@@ -8,6 +8,7 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import sys
 import pathlib
 import time
 from typing import Any
@@ -38,6 +39,34 @@ def _offline_model() -> model_mod.ScriptedModel:
     )
 
 
+def _make_approver(policy: str, quiet: bool):
+    """危险操作的批准策略。
+
+    默认 auto：有终端就问人，没终端（CI、后台任务）就一律拒绝 ——
+    「没人看着就默认放行」是最危险的默认值。
+    """
+
+    def approve(call, spec) -> bool:
+        if policy == "deny":
+            return False
+        if policy == "allow":  # 明确要求的 yolo 模式
+            if not quiet:
+                print(f"  🔓 --approve allow：直接放行 {call.name}")
+            return True
+        if not sys.stdin.isatty():  # auto 且没有终端可问
+            return False
+        print(f"\n  ⚠ 需要你批准一个有副作用的操作：{call.name}")
+        print(f"    参数：{call.arguments}")
+        print(f"    说明：{spec.description[:120]}")
+        try:
+            answer = input("    允许执行吗？[y/N] ").strip().lower()
+        except (EOFError, KeyboardInterrupt):
+            return False
+        return answer in ("y", "yes")
+
+    return approve
+
+
 def _printer(quiet: bool):
     def on_event(event: str, data: dict[str, Any]) -> None:
         if quiet:
@@ -52,6 +81,10 @@ def _printer(quiet: bool):
                 f"  [step {data['step']}] ⚠ 模型一次要了 {data['requested']} 个工具调用，"
                 f"只执行前 {data['cap']} 个，其余退回下一轮"
             )
+        elif event == "denied":
+            print(f"  ⛔ {data['name']} 需要人工批准，未获批准，已拒绝执行")
+        elif event == "approved":
+            print(f"  ✅ {data['name']} 已获批准")
         elif event == "compacted":
             print(f"  🗜 上下文压缩：省下约 {data['saved_tokens']} tokens，现约 {data['now']}")
         elif event == "externalized":
@@ -122,6 +155,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--memory", default="memory.json", help="长期记忆文件路径")
     p.add_argument(
+        "--approve",
+        choices=["auto", "deny", "allow"],
+        default="auto",
+        help="有副作用的工具（如 send_email）怎么处理："
+        "auto（默认，有终端就问你、没终端就拒绝）/ deny 一律拒绝 / allow 一律放行",
+    )
+    p.add_argument(
         "--resume",
         default=None,
         help="从某个 runs/<时间戳>/state.json（或它所在目录）接着跑",
@@ -175,6 +215,7 @@ def main(argv: list[str] | None = None) -> int:
         context_limit=args.context_limit,
         run_dir=run_dir,
         resume=resumed,
+        approve=_make_approver(args.approve, args.quiet),
         max_tool_calls_per_step=args.max_tool_calls,
         on_event=_printer(args.quiet),
     )
