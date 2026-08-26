@@ -50,6 +50,8 @@ def _printer(quiet: bool):
                 f"  [step {data['step']}] ⚠ 模型一次要了 {data['requested']} 个工具调用，"
                 f"只执行前 {data['cap']} 个，其余退回下一轮"
             )
+        elif event == "retry":
+            print(f"  ↻ 模型调用失败（{data['error']}），{data['delay']}s 后重试第 {data['attempt']} 次")
         elif event == "salvaged":
             print("  ♻ 资源耗尽，已强制收尾：下面的答案基于已获得的信息，未再检索")
         elif event == "stopped":
@@ -94,6 +96,12 @@ def main(argv: list[str] | None = None) -> int:
         default=None,
         help="检索模式；默认 --live 时用 auto（真联网），离线 demo 用 offline（零网络请求）",
     )
+    p.add_argument(
+        "--tool-timeout",
+        type=float,
+        default=30.0,
+        help="单个工具调用的超时（秒），默认 30。超时会给模型一条 ERROR 结果，循环继续",
+    )
     p.add_argument("--memory", default="memory.json", help="长期记忆文件路径")
     p.add_argument("-q", "--quiet", action="store_true", help="只打印最终答案")
     args = p.parse_args(argv)
@@ -118,6 +126,7 @@ def main(argv: list[str] | None = None) -> int:
         max_steps=args.max_steps,
         budget=args.budget,
         time_budget=args.deadline if args.deadline > 0 else None,  # 0 = 不限
+        tool_timeout=args.tool_timeout,
         max_tool_calls_per_step=args.max_tool_calls,
         on_event=_printer(args.quiet),
     )

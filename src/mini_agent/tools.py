@@ -13,6 +13,7 @@ import operator
 import os
 import pathlib
 import re
+import threading
 import time
 from dataclasses import dataclass
 from typing import Any, Callable
@@ -121,17 +122,26 @@ def _search_corpus(query: str) -> str:
 
 # 检索后端的限流保护。实测：连续快速发 4-5 个查询就会被 DuckDuckGo 掐断，
 # 而 agent 恰好最爱一轮甩好几个查询。这里做两件事：请求间隔 + 失败退避重试。
-_MIN_INTERVAL = 1.5  # 秒，两次真实检索之间的最小间隔
+# 实测（三个并行检索）：间隔 1.5s 要 8.3s，间隔 0 只要 4.7s —— 限流间隔才是瓶颈，不是网络。
+# 折中到 0.5s：6 个检索连发零失败，耗时 8.9s；万一真被限流，还有退避重试兜底。
+_MIN_INTERVAL = 0.5  # 秒，两次真实检索之间的最小间隔
 _RETRIES = 3
 _last_search_at = 0.0
+_throttle_lock = threading.Lock()  # 工具会被并行执行，这个全局量必须加锁
 
 
 def _throttle() -> None:
+    """给真实检索之间垫上最小间隔。
+
+    锁保证「等待 + 记账」是原子的：并行的三个检索会被排开成 0s / 1.5s / 3.0s 起跑，
+    而不是同时冲出去撞限流。注意起跑被排开不等于失去并行 —— 各自的网络往返仍然重叠。
+    """
     global _last_search_at
-    wait = _MIN_INTERVAL - (time.monotonic() - _last_search_at)
-    if wait > 0:
-        time.sleep(wait)
-    _last_search_at = time.monotonic()
+    with _throttle_lock:
+        wait = _MIN_INTERVAL - (time.monotonic() - _last_search_at)
+        if wait > 0:
+            time.sleep(wait)
+        _last_search_at = time.monotonic()
 
 
 def _search_web_backend(query: str, max_results: int) -> str:

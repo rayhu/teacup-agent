@@ -14,6 +14,8 @@ from __future__ import annotations
 
 import time
 from datetime import date
+from concurrent.futures import ThreadPoolExecutor
+from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable
 
 from mini_agent import tools as tools_mod
@@ -121,6 +123,110 @@ def result_item(model: Model, call: ToolCall, result: str) -> dict[str, Any]:
     return fn(call, result) if fn else chat_tool_result(call, result)
 
 
+def is_retryable(error: Exception) -> bool:
+    """限流(429)、服务端错误(5xx)、以及没有状态码的网络类错误值得重试。
+
+    4xx（参数错、鉴权错）重试多少次都是同样的结果，只是白烧时间。
+    """
+    status = getattr(error, "status_code", None) or getattr(error, "status", None)
+    if status is None:
+        return True
+    return status == 429 or status >= 500
+
+
+def complete_with_retries(
+    model: Model,
+    messages: list[dict[str, Any]],
+    tools: list[dict[str, Any]],
+    emit: Callable[..., None],
+    attempts: int = 3,
+    sleep: Callable[[float], None] | None = None,
+):
+    """模型调用的退避重试。
+
+    重试**不算一个 step** —— 步数衡量的是「模型做了几次决策」，
+    一次 429 不该消耗 agent 的思考额度。
+    """
+    for attempt in range(attempts):
+        try:
+            return model.complete(messages, tools)
+        except Exception as e:
+            if attempt == attempts - 1 or not is_retryable(e):
+                raise
+            delay = 2**attempt
+            emit("retry", error=f"{type(e).__name__}: {e}", attempt=attempt + 1, delay=delay)
+            (sleep or time.sleep)(delay)  # 调用时才取，测试才拦得住
+
+
+def execute_calls(
+    state: AgentState,
+    calls: list[ToolCall],
+    model: Model,
+    emit: Callable[..., None],
+    tool_timeout: float,
+) -> None:
+    """并行执行一轮里的所有工具调用，然后**按原顺序**回填。
+
+    两条必须守住的不变量（并行最容易打破的正是它们）：
+    1. 回填顺序与 tool_calls 顺序一致，且每个 id 恰好一条结果；
+    2. 被限流拦下的调用不执行，但同样要有结果消息。
+
+    超时说明：Python 杀不掉一个卡住的线程。超时后我们给模型一条 ERROR 结果继续往下走，
+    那个线程被丢在后台自生自灭（daemon）。这是权衡，不是疏漏 —— 真要硬隔离得上子进程。
+    """
+    cap = state.max_tool_calls_per_step
+    if cap > 0 and len(calls) > cap:
+        emit("throttled", requested=len(calls), cap=cap, step=state.step)
+
+    throttled_msg = (
+        f"ERROR: 本轮工具调用数已达上限（{cap} 个），该调用未执行。"
+        "请先看已返回的结果，若仍有必要，下一轮再发起（可合并成更少的查询）。"
+    )
+    to_run = [
+        (i, c) for i, c in enumerate(calls) if not (cap > 0 and i >= cap)
+    ]
+    results: dict[int, str] = {
+        i: throttled_msg for i in range(len(calls)) if cap > 0 and i >= cap
+    }
+
+    if to_run:
+        # 时间刹车也管得住工具：剩余时间比单次超时还短时，以剩余时间为准
+        left = state.time_left()
+        deadline = tool_timeout if left is None else min(tool_timeout, max(1.0, left))
+        with ThreadPoolExecutor(max_workers=len(to_run)) as pool:
+            futures = {}
+            for i, call in to_run:
+                emit("tool_call", name=call.name, arguments=call.arguments, step=state.step)
+                futures[pool.submit(tools_mod.execute, call.name, call.arguments)] = i
+            for future, i in futures.items():
+                try:
+                    results[i] = future.result(timeout=deadline)
+                except FuturesTimeout:
+                    results[i] = (
+                        f"ERROR: 工具执行超过 {deadline:.0f} 秒未返回，已放弃本次调用。"
+                        "这**不代表**该操作失败或该信息不存在，可换个更小的请求重试。"
+                    )
+                    future.cancel()
+                except Exception as e:  # execute() 内部已兜底，这里是最后一道
+                    results[i] = f"ERROR: {type(e).__name__}: {e}"
+
+    for i, call in enumerate(calls):  # 严格按原顺序回填
+        result = results[i]
+        executed = not (cap > 0 and i >= cap)
+        if executed:
+            emit("tool_result", name=call.name, result=result, step=state.step)
+        state.trace.append(
+            ToolTrace(
+                step=state.step,
+                name=call.name,
+                arguments=call.arguments,
+                result=result,
+                executed=executed,
+            )
+        )
+        state.messages.append(result_item(model, call, result))
+
+
 def run(
     goal: str,
     model: Model,
@@ -129,6 +235,7 @@ def run(
     budget: float = 0.05,
     max_tool_calls_per_step: int = 3,
     time_budget: float | None = 600.0,  # 默认 10 分钟；None = 不限
+    tool_timeout: float = 30.0,  # 单个工具调用的超时（秒）
     today: str | None = None,
     clock: Callable[[], float] = time.monotonic,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
@@ -192,7 +299,7 @@ def run(
         # 最后一轮不给工具：措辞可以被无视，空的工具清单不能。
         available = [] if state.step >= state.max_steps else specs
         try:
-            reply = model.complete(state.messages, available)
+            reply = complete_with_retries(model, state.messages, available, emit)
         except Exception as e:  # 网络/额度等外部故障，如实记录而不是假装成功
             state.status = "error"
             state.answer = f"模型调用失败：{type(e).__name__}: {e}"
@@ -213,37 +320,8 @@ def run(
             emit("answer", text=reply.text, step=state.step)
             break
 
-        # ---- 4. 每个 tool_call 都要执行并回填----------------------
-        # 限流：只执行前 N 个，但**超出的那些也必须回一条 tool 消息**。
-        # 少回一条，下一轮 API 就会因为 tool_call_id 没有对应结果而 400 ——
-        # 所以这里是「拒绝执行」，不是「忽略」。
-        cap = state.max_tool_calls_per_step
-        if cap > 0 and len(reply.tool_calls) > cap:
-            emit("throttled", requested=len(reply.tool_calls), cap=cap, step=state.step)
-
-        for index, call in enumerate(reply.tool_calls):
-            throttled = cap > 0 and index >= cap
-            if throttled:
-                result = (
-                    f"ERROR: 本轮工具调用数已达上限（{cap} 个），该调用未执行。"
-                    "请先看已返回的结果，若仍有必要，下一轮再发起（可合并成更少的查询）。"
-                )
-            else:
-                emit("tool_call", name=call.name, arguments=call.arguments, step=state.step)
-                result = tools_mod.execute(call.name, call.arguments)
-                emit("tool_result", name=call.name, result=result, step=state.step)
-            state.trace.append(
-                ToolTrace(
-                    step=state.step,
-                    name=call.name,
-                    arguments=call.arguments,
-                    result=result,
-                    executed=not throttled,
-                )
-            )
-            # 工具结果的形状由模型后端决定：Chat 是 role="tool" 消息，
-            # Responses 是 {"type": "function_call_output", ...}。
-            state.messages.append(result_item(model, call, result))
+        # ---- 4. 并行执行所有工具调用，按原顺序回填（坑 2）------------------
+        execute_calls(state, reply.tool_calls, model, emit, tool_timeout)
         # 回到循环顶部，把工具结果一起交回模型 —— 这就是「Agent」和「一次函数调用」的区别
 
     state.elapsed = clock() - started_at

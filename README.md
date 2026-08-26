@@ -52,7 +52,7 @@ docs/roadmap.md              —— 这份实现距离当前生产级别的 agen
 | Model | `model.py` | Responses API（默认）+ Chat Completions，另有离线脚本模型 | Claude / 本地模型 / 多模型路由 |
 | State | `state.py` | dataclass：步数、预算、状态机、留痕 | 落盘 checkpoint、可恢复运行 |
 | Tools | `tools.py` | search_web（**真实联网**，DuckDuckGo 免 key）、calculate、read_file、remember | 浏览器、SQL、代码执行、发邮件 |
-| Control Loop | `loop.py` | 单层循环 + 步数/预算/每轮工具数三道守卫 | 计划-执行分离、子 Agent、人工确认 |
+| Control Loop | `loop.py` | 单层循环 + 四道守卫 + 工具并行执行 + 模型调用重试 | 计划-执行分离、子 Agent、人工确认 |
 | Memory | `memory.py` | JSON 文件 + 去重 + 只留最近 N 条 | 向量库、摘要压缩、按相关性召回 |
 | Evals | `evals.py` | 7 条离线用例断言循环行为 | 加入真实任务集与打分模型 |
 
@@ -95,6 +95,22 @@ MINI_AGENT_SEARCH=offline uv run mini-agent                      # 强制离线
 
 同一任务实测（gpt-5-mini）：responses 的上下文里多出一条 `reasoning` 项，会随下一轮请求发回去；
 chat 那边没有对应物。OpenAI 迁移文档称同 prompt 下 SWE-bench 高约 3%。
+
+## 工具并行执行
+
+模型一轮发起的多个工具调用会**并行执行**（线程池），然后**严格按原顺序**回填。
+并行最容易打破的正是消息协议的两条不变量，所以两条都有用例锁着：
+回填顺序与 `tool_calls` 一致、每个 id 恰好一条结果。
+
+`--tool-timeout`（默认 30 秒）给单个调用兜底：超时返回一条 `ERROR:` 结果，循环继续，
+而不是整轮卡死。诚实说明：Python 杀不掉卡住的线程，超时后那个线程被丢在后台自生自灭 ——
+真要硬隔离得上子进程。剩余时间比超时值还短时，以剩余时间为准（时间刹车也管得住工具）。
+
+**实测**（三个真实检索）：串行 5.05s → 并行 3.64s，**1.39x**。
+提速有限的原因值得记一笔：瓶颈不是网络而是**我们自己的检索限流间隔**。
+间隔 1.5s 时并行 8.3s、间隔 0 时 4.7s —— 限流把并行度吃掉了。
+折中到 0.5s（6 个检索连发零失败），剩下的失败交给退避重试兜底。
+换成正经的检索 API（roadmap #11）后这一项才会真正放开。
 
 ## 四道刹车
 
