@@ -82,6 +82,13 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("--budget", type=float, default=0.05, help="预算上限（美元）")
     p.add_argument(
+        "--deadline",
+        type=float,
+        default=600.0,
+        help="墙上时间上限（秒），默认 600（10 分钟）；填 0 表示不限。"
+        "检索限流/重试/网络慢只烧时间不烧钱，靠这道刹车拦",
+    )
+    p.add_argument(
         "--search",
         choices=["auto", "web", "offline"],
         default=None,
@@ -110,6 +117,7 @@ def main(argv: list[str] | None = None) -> int:
         memory=Memory(args.memory),
         max_steps=args.max_steps,
         budget=args.budget,
+        time_budget=args.deadline if args.deadline > 0 else None,  # 0 = 不限
         max_tool_calls_per_step=args.max_tool_calls,
         on_event=_printer(args.quiet),
     )

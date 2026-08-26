@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import time
 from datetime import date
 from typing import Any, Callable
 
@@ -42,7 +43,7 @@ SYSTEM_PROMPT = """你是一个会使用工具的自主 Agent，运行在**无�
 自动模式的硬约束：
 - **没有人会回答你的提问。** 不要请求许可、不要问「是否需要我继续」、不要把待办清单
   交回给用户 —— 你自己想做的下一步，直接做。
-- 每轮开头会告诉你剩余步数和预算。资源还够就继续查证；快用完了就立刻收尾。
+- 每轮开头会告诉你剩余步数、预算和时间。**任何一项**见底都要立刻收尾，别只盯着最宽松的那个。
 - 绝不能空手而归：即使信息不全，也要给出「目前能得出的最佳结论 + 置信度 + 待核实项」，
   而不是一份行动计划。
 
@@ -63,22 +64,26 @@ def status_note(state: AgentState) -> dict[str, Any]:
     prompt caching（roadmap #2）就废了。追加在末尾则不影响前缀。
     """
     left = state.max_steps - state.step  # 本轮之后还剩几轮
+    time_left = state.time_left()
+    # 时间和步数谁更紧张就听谁的 —— 第三次实测里模型被「预算还剩 91%」误导，
+    # 忽略了步数已经见底。多个刹车并存时，必须把**最紧的那个**摆到台面上。
+    tight_on_time = time_left is not None and time_left <= max(15.0, (state.time_budget or 0) * 0.25)
+
     if left <= 0:
         urgency = (
             "⚠ **这是最后一轮**，工具已被收走。立刻基于已有信息给出最终结论 —— "
             "包括已确认的结论、置信度、以及未能核实的项。绝不能空手而归。"
         )
-    elif left <= 2:
-        urgency = f"⚠ 只剩 {left} 轮，请开始收尾：最多再查一轮，然后必须给出结论。"
+    elif left <= 2 or tight_on_time:
+        why = f"只剩 {left} 轮" if left <= 2 else f"只剩 {time_left:.0f} 秒"
+        urgency = f"⚠ {why}，请开始收尾：最多再查一轮，然后必须给出结论。"
     else:
         urgency = "资源充足就继续查证，不足就立刻给出最终结论。"
-    return {
-        "role": "system",
-        "content": (
-            f"[运行状态] 第 {state.step}/{state.max_steps} 轮；"
-            f"预算剩余 ${state.remaining_budget:.4f}。{urgency}"
-        ),
-    }
+
+    resources = f"第 {state.step}/{state.max_steps} 轮；预算剩余 ${state.remaining_budget:.4f}"
+    if time_left is not None:
+        resources += f"；剩余时间 {time_left:.0f} 秒"
+    return {"role": "system", "content": f"[运行状态] {resources}。{urgency}"}
 
 
 def finalize(state: AgentState, model: Model, emit: Callable[..., None]) -> None:
@@ -123,10 +128,20 @@ def run(
     max_steps: int = 8,
     budget: float = 0.05,
     max_tool_calls_per_step: int = 3,
+    time_budget: float | None = 600.0,  # 默认 10 分钟；None = 不限
     today: str | None = None,
+    clock: Callable[[], float] = time.monotonic,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> AgentState:
-    """跑一次任务，返回终态（含答案、留痕、花费）。"""
+    """跑一次任务，返回终态（含答案、留痕、花费、耗时）。
+
+    time_budget 是**墙上时间**上限（秒），默认 600（10 分钟），None = 不限。它和预算刹车互补：
+    钱衡量的是模型算力，时间衡量的是人的等待 —— 检索限流、退避重试、网络慢
+    都只烧时间不烧钱，只有时间刹车拦得住。
+
+    注意：时间只在**两轮之间**检查，单个工具调用卡死仍会超时（那需要给工具本身
+    加超时，属于 roadmap #5 并行执行时一起做的事）。
+    """
     memory = memory or NullMemory()
     tools_mod.bind_memory(memory)  # 让 remember 工具能写到这份记忆里
 
@@ -142,7 +157,9 @@ def run(
         max_steps=max_steps,
         remaining_budget=budget,
         max_tool_calls_per_step=max_tool_calls_per_step,
+        time_budget=time_budget,
     )
+    started_at = clock()
     state.messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": goal},
@@ -156,7 +173,8 @@ def run(
     specs = tools_mod.specs()
 
     while True:
-        # ---- 守卫：步数 / 预算 -------------------------------------------
+        # ---- 守卫：步数 / 预算 / 时间 --------------------------------------
+        state.elapsed = clock() - started_at
         if not state.can_continue():
             state.status = state.stop_reason()
             emit("stopped", reason=state.status)
@@ -228,6 +246,7 @@ def run(
             state.messages.append(result_item(model, call, result))
         # 回到循环顶部，把工具结果一起交回模型 —— 这就是「Agent」和「一次函数调用」的区别
 
+    state.elapsed = clock() - started_at
     if state.status != "done" and not state.answer:
         state.answer = f"（未得出最终答案，停止原因：{state.status}）"
     return state

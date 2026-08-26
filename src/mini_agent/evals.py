@@ -26,6 +26,8 @@ class Case:
     max_steps: int = 8
     budget: float = 0.05
     max_tool_calls: int = 3
+    time_budget: float | None = None
+    clock_values: list[float] | None = None  # 假时钟读数，让时间刹车可复现
 
 
 def tool_results_follow_their_call(state: AgentState) -> bool:
@@ -155,6 +157,24 @@ CASES: list[Case] = [
         budget=0.03,
         check=lambda s: s.status == "out_of_budget" and s.salvaged and s.answer,
     ),
+    Case(
+        name="时间刹车：墙上时间用光同样要停并收尾",
+        script=[
+            assistant_calls([("calculate", {"expression": "1+1"})]),
+            assistant_calls([("calculate", {"expression": "1+1"})]),
+            assistant_says("时间到，先给结论：1+1=2。"),
+        ],
+        time_budget=10.0,
+        # 假时钟：跑完两轮后第三次检查已超时（读数依次被 run() 取用）
+        clock_values=[0.0, 1.0, 2.0, 12.0, 12.0, 12.0],
+        check=lambda s: (
+            s.status == "out_of_time"
+            and s.step == 2  # 钱和步数都还有富余，是时间把它拦下的
+            and s.remaining_budget > 0
+            and s.salvaged
+            and s.answer
+        ),
+    ),
 ]
 
 
@@ -168,6 +188,9 @@ def run_case(case: Case) -> tuple[bool, AgentState]:
         max_steps=case.max_steps,
         budget=case.budget,
         max_tool_calls_per_step=case.max_tool_calls,
+        time_budget=case.time_budget,
+        # 每次跑都新建一个迭代器，用例可以重复执行
+        **({"clock": iter(case.clock_values).__next__} if case.clock_values else {}),
     )
     return case.check(state), state
 

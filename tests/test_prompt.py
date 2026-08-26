@@ -78,3 +78,42 @@ def test_salvage_turn_runs_after_resources_exhausted():
     assert state.answer and not state.answer.startswith("（未得出最终答案")
     assert model.tool_specs[-1] == []  # 收尾轮也不给工具
     assert "[强制收尾]" in state.messages[-2]["content"]
+
+
+# --- 时间预算 ----------------------------------------------------------------
+
+
+def test_status_note_shows_time_left_and_urges_when_tight():
+    model = ScriptedModel([assistant_says("好")])
+    state = loop.run(
+        "测试目标",
+        model,
+        memory=NullMemory(),
+        today="2026-08-26",
+        time_budget=60.0,
+        clock=iter([0.0, 55.0, 55.0]).__next__,
+    )
+    note = [m for m in state.messages if str(m.get("content", "")).startswith("[运行状态]")][0]
+    assert "剩余时间 5 秒" in note["content"]
+    assert "请开始收尾" in note["content"]  # 步数还很富余，是时间在催
+
+
+def test_time_brake_stops_run_with_budget_and_steps_left():
+    """钱和步数都还有富余，时间照样能把它拦下来。"""
+    state = loop.run(
+        "测试目标",
+        ScriptedModel(
+            [
+                assistant_calls([("calculate", {"expression": "1+1"})]),
+                assistant_says("超时前的结论：1+1=2。"),
+            ]
+        ),
+        memory=NullMemory(),
+        today="2026-08-26",
+        time_budget=10.0,
+        clock=iter([0.0, 1.0, 30.0, 30.0]).__next__,
+    )
+    assert state.status == "out_of_time"
+    assert state.remaining_budget > 0 and state.step < state.max_steps
+    assert state.salvaged and state.answer  # 超时也不空手而归
+    assert state.snapshot()["elapsed_s"] == 30.0
