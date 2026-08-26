@@ -106,6 +106,8 @@ Each of these earned its place by fixing a run that had gone wrong. The stories 
 - **Persistence**: every step is written to `runs/<timestamp>/state.json`, and `--resume`
   continues from there.
 - **MCP**: point at a server and its tools join the registry, namespaced and gated.
+- **A deny-list on `read_file`**: "inside the project" was never the same as "safe to
+  read", since the project is where the secrets are.
 - **Subagents**: delegate a reading-heavy subtask to a child agent with its own context;
   only its conclusion comes back, so the bulk never enters this context.
 - **Skills**: a procedure's one-line description is always loaded, its body only when the

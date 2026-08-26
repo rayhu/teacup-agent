@@ -5,7 +5,8 @@ was roughly where the field stood in late 2023 / early 2024.
 **Progress**: #1-#10 and #12 are done (except the fine-grained permissions part of #6).
 Five items that were never on the roadmap were added after reviewing real runs
 (see "Field patches" at the end).
-Next up: #11 (a better search backend), the last unstarted item.
+Next up: #14 (threat model and allowlists) closes a hole that exists today; then
+#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend).
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/mini_agent/loop.py) is "old technology".
@@ -522,6 +523,75 @@ query-anchoring rules (roughly 300 tokens) only matter for research and are the 
 candidates. The model does now load the skill on a research task, so the move is a real
 option, but it needs its own before-and-after: those rules fix a failure that was
 expensive to find, and one successful load is not proof of reliable loading.
+
+---
+
+### 13. Hooks
+
+**Now**: every guardrail is hardcoded in the loop. The per-turn cap, the approval gate and
+the forced wrap-up are all good behaviour, but a user who wants their own rule has to edit
+`loop.py`.
+
+**Why it is worth it**: the harness chapter of the SDLC paper lists hooks as a first-class
+component, "deterministic code that runs at specific lifecycle points: before a tool call,
+after a file edit, before a commit. Hooks are the place for things the agent should never
+forget but often does." It is also the mechanism #14 needs: an allowlist and an output
+audit are both hooks, and adding them as hooks means the loop does not grow a security
+section.
+
+**How**: a small registry of callbacks at named points, most usefully `before_tool_call`
+(may veto, returning a string that becomes the tool result) and `after_tool_result` (may
+rewrite). Load them from `hooks.py` in the project, the same opt-in-by-file convention as
+`mcp.json` and `skills/`.
+
+**Definition of done**: a project-local hook can block a tool call by argument (not just
+by tool name) without touching `loop.py`, and the veto reaches the model as a normal
+`ERROR:` result.
+
+---
+
+### 14. Threat model, and tool-call allowlists
+
+**Now**: the docs state that web content and MCP tool descriptions are untrusted text the
+model reads, and then nothing is done about it. Documenting a risk without marking the
+boundary is worse than not raising it.
+
+**Two exposures that exist today**, both verified rather than hypothetical:
+
+1. **`read_file` can read `.env`.** Its only guard is "stay inside the project
+   directory", and the project directory is where the API keys live. Combined with
+   `send_email` under `--approve allow`, or simply with a model that quotes it into an
+   answer, that is an exfiltration path built entirely from existing, intended features.
+2. **MCP servers are third-party processes with our user's privileges.** The SDK passes
+   them a minimal environment (`HOME`, `LOGNAME`, `PATH`, `SHELL`, `USER`, and notably
+   *not* `OPENAI_API_KEY`), which is better than we would have managed by hand, but the
+   child still has the filesystem and the network. `mcp.example.json` demonstrates a
+   filesystem server pointed at `.`.
+
+**Where the field is**: the 2026 consensus on prompt injection is containment rather than
+prevention. Assume an injection lands and make sure it cannot do much: minimum capability
+per tool, authorization enforced outside the agent's reach, allowlists on tool calls,
+output auditing, and process isolation (Seatbelt on macOS, bubblewrap on Linux) for
+anything that executes code.
+
+**Proportionate here** (this is a teaching repo, not a production runtime):
+- ✅ **done**: a deny-list in `read_file` covering `.env*`, `mcp.json`, `memory.json`,
+  `state.json`, key files and `.git` / `.ssh` / `.aws` / `.venv`, returning an `ERROR:`
+  that states the rule is fixed so the model does not retry with another spelling.
+  `runs/` needed a distinction rather than a blanket rule: externalized `.txt` results
+  stay readable because the model already saw them, while a run's `state.json` does not,
+  because it holds the system prompt and every result of that run. Both halves are
+  tested, and the externalization round trip was verified end to end afterwards;
+- argument-aware allowlists as hooks (#13), e.g. "send_email only to these domains";
+- a `docs/threat-model.md` that states plainly what is trusted, what is not, and what this
+  repo does *not* defend against, so a fork knows what it is inheriting.
+
+**Explicitly out of scope**: real sandboxing. This agent executes no code, so there is
+nothing to isolate; the honest rule is that a code-execution tool must not be added until
+a sandbox exists to run it in.
+
+**Reference**: <https://www.sysdig.com/learn-cloud-native/prompt-injection> ·
+<https://www.firecrawl.dev/blog/ai-agent-sandbox>
 
 ---
 

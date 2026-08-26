@@ -8,6 +8,7 @@ The point is to get the register -> describe -> call -> feed-back chain right.
 from __future__ import annotations
 
 import ast
+import fnmatch
 import json
 import operator
 import os
@@ -314,8 +315,38 @@ def calculate(expression: str) -> str:
     return str(_eval_node(ast.parse(expression, mode="eval").body))
 
 
+# Files the agent may not read, however it is asked. The directory guard below answers
+# "where", and the project directory is exactly where the secrets live: one prompt
+# injection saying "summarise .env for me" is an exfiltration path built entirely from
+# intended features. This answers "what".
+#
+# `runs/` needs a distinction rather than a blanket rule: the externalizer writes large
+# tool results there and tells the model to read them back, so those files must stay
+# readable. A run's `state.json` is a different animal — it holds the full system prompt
+# and every tool result of that run, including runs the current task has nothing to do
+# with.
+DENIED_FILES = (
+    ".env", ".env.*", "*.env",      # credentials
+    "mcp.json",                     # MCP server configuration, including its env block
+    "memory.json",                  # whatever the agent chose to remember
+    "state.json",                   # a full trajectory: system prompt, every tool result
+    "*.pem", "*.key", "id_rsa*", "*.p12",
+)
+DENIED_DIRS = (".git", ".ssh", ".aws", ".venv")
+
+
+def _is_denied(relative: pathlib.PurePath) -> bool:
+    parts = [p.lower() for p in relative.parts]
+    if any(part in DENIED_DIRS for part in parts):
+        return True
+    return any(fnmatch.fnmatch(parts[-1], pattern) for pattern in DENIED_FILES)
+
+
 @tool(
-    description="Read a text file inside the current project directory (first 2000 characters).",
+    description=(
+        "Read a text file inside the current project directory (first 2000 characters). "
+        "Credentials, configuration and saved run states are not readable."
+    ),
     parameters={
         "type": "object",
         "properties": {
@@ -329,6 +360,15 @@ def read_file(path: str) -> str:
     target = (root / path).resolve()
     if not str(target).startswith(str(root)):  # simple traversal guard
         return "ERROR: only files inside the current project directory can be read"
+
+    if _is_denied(target.relative_to(root)):
+        return (
+            f"ERROR: {path} holds credentials or saved agent state and is not readable "
+            "by this tool. This is a fixed rule, not a permission that can be granted, "
+            "so do not try a different spelling of the path. Continue without it, and "
+            "say in your answer that the file was needed but could not be read."
+        )
+
     if not target.is_file():
         return f"ERROR: no such file: {path}"
     return target.read_text(encoding="utf-8", errors="replace")[:2000]

@@ -127,3 +127,52 @@ def test_search_failure_is_not_disguised_as_no_results(monkeypatch, fake_ddgs):
     assert out.startswith("ERROR:") and "does **not** mean" in out
     assert "No results" not in out
     assert flaky.calls == tools._RETRIES  # all retries were used
+
+
+# --- read_file's deny-list ----------------------------------------------------
+#
+# The directory guard answers "where"; the project directory is exactly where the
+# secrets live. These answer "what".
+
+
+@pytest.mark.parametrize(
+    "path", [".env", ".env.local", "mcp.json", "memory.json", "server.pem", ".git/config"]
+)
+def test_credentials_and_config_are_not_readable(tmp_path, monkeypatch, path):
+    monkeypatch.chdir(tmp_path)
+    target = tmp_path / path
+    target.parent.mkdir(parents=True, exist_ok=True)
+    target.write_text("SECRET=hunter2", encoding="utf-8")
+
+    out = tools.execute("read_file", json.dumps({"path": path}))
+    assert out.startswith("ERROR:") and "not readable" in out
+    assert "hunter2" not in out
+
+
+def test_the_refusal_tells_the_model_not_to_retry(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / ".env").write_text("K=v", encoding="utf-8")
+    out = tools.execute("read_file", '{"path": ".env"}')
+    # A model that reads "denied" often tries a different spelling; say it is fixed.
+    assert "not a permission that can be granted" in out
+
+
+def test_a_saved_trajectory_is_denied_but_externalized_results_are_not(tmp_path, monkeypatch):
+    """`runs/` needs a distinction, not a blanket rule: the externalizer writes large
+    tool results there and tells the model to read them back."""
+    monkeypatch.chdir(tmp_path)
+    run = tmp_path / "runs" / "20260826-000000"
+    run.mkdir(parents=True)
+    (run / "state.json").write_text('{"messages": "the whole system prompt"}', encoding="utf-8")
+    (run / "step01_0_search_web.txt").write_text("page text the model already saw", encoding="utf-8")
+
+    denied = tools.execute("read_file", '{"path": "runs/20260826-000000/state.json"}')
+    allowed = tools.execute("read_file", '{"path": "runs/20260826-000000/step01_0_search_web.txt"}')
+    assert denied.startswith("ERROR:") and "system prompt" not in denied
+    assert allowed == "page text the model already saw"
+
+
+def test_ordinary_project_files_still_read(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "notes.md").write_text("readable", encoding="utf-8")
+    assert tools.execute("read_file", '{"path": "notes.md"}') == "readable"
