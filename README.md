@@ -1,15 +1,18 @@
 # mini-agent
 
-A small AI agent with nothing stubbed out, built to turn one formula into code you can
-run:
+A minimal but complete AI agent, built to be easy to fork, improve and share.
 
 ```
 Agent = Model + State + Tools + Control Loop + Memory/Evals
 ```
 
-Every part does real work, and each is kept to a few dozen lines so you can replace them
-one at a time. The control loop is about 40 lines and fits on one screen. That is the
-point of the project.
+Nothing is stubbed out: every part does real work, and each is kept to a few dozen lines
+so you can replace them one at a time. The control loop is about 40 lines and fits on one
+screen, which is the point of the whole project — a harness you can read before you trust
+it.
+
+MIT licensed. Fork it, take the parts you want, and see
+[CONTRIBUTING.md](CONTRIBUTING.md) for where the seams are.
 
 ## Quick start
 

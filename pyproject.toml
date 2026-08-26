@@ -1,15 +1,30 @@
 [project]
 name = "mini-agent"
 version = "0.1.0"
-description = "A minimal but complete AI agent: Model + State + Tools + Control Loop + Memory/Evals"
+description = "A minimal but complete AI agent, easy to fork, improve and share: Model + State + Tools + Control Loop + Memory/Evals"
 readme = "README.md"
 requires-python = ">=3.11"
+license = "MIT"
+license-files = ["LICENSE"]
+authors = [{ name = "Ray Hu" }]
+keywords = ["ai-agent", "llm", "agentic-ai", "mcp", "model-context-protocol", "openai"]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "Programming Language :: Python :: 3.11",
+    "Topic :: Scientific/Engineering :: Artificial Intelligence",
+]
 dependencies = [
     "openai>=1.60",
     "python-dotenv>=1.0",
     "ddgs>=9.0",          # key-less web search backend (DuckDuckGo)
     "mcp>=2.1",           # MCP client (SDK v2, speaks the 2026-07-28 stateless spec)
 ]
+
+[project.urls]
+Homepage = "https://github.com/rayhu/mini-agent"
+Repository = "https://github.com/rayhu/mini-agent"
+Roadmap = "https://github.com/rayhu/mini-agent/blob/main/docs/roadmap.md"
 
 [project.scripts]
 mini-agent = "mini_agent.cli:main"
