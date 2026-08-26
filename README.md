@@ -41,6 +41,7 @@ src/mini_agent/
 ├── persist.py  落盘/恢复    —— 每步写 runs/<时间戳>/state.json，可 --resume 接着跑
 ├── loop.py     Control Loop —— LLM → tool call → tool result → LLM
 ├── evals.py    Evals        —— 用脚本模型体检循环本身，零 key 零成本
+├── trajectory.py  轨迹评测   —— 给真实运行打分：机械指标 + LLM 评委
 └── cli.py                   —— 命令行入口
 tests/                       —— pytest：evals 用例 + 工具/记忆单测
 NOTES.md                     —— 你原来的学习笔记，逐段标注了对应实现
@@ -57,7 +58,7 @@ docs/roadmap.md              —— 这份实现距离当前生产级别的 agen
 | Tools | `tools.py` | search_web（**真实联网**，DuckDuckGo 免 key）、calculate、read_file、remember | 浏览器、SQL、代码执行、发邮件 |
 | Control Loop | `loop.py` | 单层循环 + 四道守卫 + 工具并行执行 + 模型调用重试 | 计划-执行分离、子 Agent、人工确认 |
 | Memory | `memory.py` | JSON 文件 + 去重 + 只留最近 N 条 | 向量库、摘要压缩、按相关性召回 |
-| Evals | `evals.py` | 7 条离线用例断言循环行为 | 加入真实任务集与打分模型 |
+| Evals | `evals.py` + `trajectory.py` | 13 条离线协议用例 + 真实轨迹打分 | 固定任务集、跨版本回归对比 |
 
 ## search_web 的三种模式
 
@@ -98,6 +99,33 @@ MINI_AGENT_SEARCH=offline uv run mini-agent                      # 强制离线
 
 同一任务实测（gpt-5-mini）：responses 的上下文里多出一条 `reasoning` 项，会随下一轮请求发回去；
 chat 那边没有对应物。OpenAI 迁移文档称同 prompt 下 SWE-bench 高约 3%。
+
+## 两种评测，别混为一谈
+
+| | `evals.py` | `trajectory.py` |
+| --- | --- | --- |
+| 用什么模型 | 假的（按剧本） | 真轨迹（`runs/*/state.json`） |
+| 测什么 | **机器有没有坏**：消息协议、刹车、压缩切点 | **这次跑得好不好**：达成度、依据、效率、诚实 |
+| 成本 | 零 | 机械指标零成本；LLM 评委按次收费 |
+| 判据 | 必须 13/13 全绿 | 分数是相对的，用来比较两次改动 |
+
+```bash
+uv run python -m mini_agent.trajectory runs/20260826-xxxx           # 机械指标，免费
+uv run python -m mini_agent.trajectory runs/* --judge --out r.json  # 加 LLM 评委
+```
+
+**机械指标**（确定性，先看这些）：步数、工具调用数、失败数、**重复调用数**、被限流数、
+压缩次数、耗时、token、缓存命中、是否真的交付了结论、**是否反过来问用户**
+（第一次实测失败就栽在这儿）、引用条数、以及 **`unsupported_citations`：
+答案里出现、但任何工具结果里都没出现过的链接** —— 这是「编造引用」的确定性检测。
+
+**LLM 评委**：outcome / grounding / efficiency / honesty 各 0-5 分，外加一句总评和「最该改的一点」。
+解析不出 JSON 就如实报错，不假装打了分。
+
+一次真实对照很说明问题：评委给某次运行的 grounding 打了 3 分，理由是「引用了 4 个来源但轨迹里
+只有一次检索，缺少证据」。而机械检查显示 `unsupported_citations = 0` —— 4 条链接全都出现在
+那次检索的结果里。**评委只看到截断后的 300 字符摘要，机械检查看的是全文。**
+所以两者的顺序是：先信确定性指标，再听评委的定性判断。
 
 ## 落盘与恢复
 
