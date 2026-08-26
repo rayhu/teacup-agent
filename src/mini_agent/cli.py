@@ -61,6 +61,22 @@ def _offline_model() -> model_mod.ScriptedModel:
 
 
 DEFAULT_MCP_CONFIG = "mcp.json"
+DEFAULT_SKILLS_DIR = "skills"
+
+
+def _resolve_skills(flag: str | None, root: pathlib.Path | None = None) -> str | None:
+    """Which skills directory to load, if any.
+
+    Same convention as mcp.json: a `skills/` directory in the project is itself the
+    opt-in, since its metadata costs prefix tokens and its contents are instructions the
+    model will follow.
+    """
+    if flag == "off":
+        return None
+    if flag:
+        return flag
+    default = (root or pathlib.Path.cwd()) / DEFAULT_SKILLS_DIR
+    return str(default) if default.is_dir() else None
 
 
 def _resolve_mcp(flag: str | None, root: pathlib.Path | None = None) -> str | None:
@@ -132,6 +148,8 @@ def _printer(quiet: bool):
                 f"{data['requested']} tool calls; running the first {data['cap']}, "
                 "the rest go back to the next turn"
             )
+        elif event == "skills":
+            print(f"  [skills] available: {', '.join(data['names'])}")
         elif event == "planned" and data.get("subagent"):
             print(f"    [sub{data['subagent']}] checklist: " + "; ".join(data["items"]))
         elif event == "tool_call" and data.get("subagent"):
@@ -260,6 +278,13 @@ def main(argv: list[str] | None = None) -> int:
         "off to disable. Each server's tools join the registry as server__tool",
     )
     p.add_argument(
+        "--skills",
+        default=None,
+        help="directory of skills. Defaults to ./skills when it exists; pass a path to "
+        "use another, or off to skip. Only each skill's one-line description is loaded "
+        "upfront; the body arrives when the model calls load_skill",
+    )
+    p.add_argument(
         "--subagents",
         action="store_true",
         help="offer the delegate tool: a subtask runs as a child agent with its own "
@@ -375,6 +400,7 @@ def _run_agent(args, the_model, run_dir, resumed):
         approve=_make_approver(args.approve, args.quiet),
         max_tool_calls_per_step=args.max_tool_calls,
         plan=_resolve_plan(args.plan, args.live),
+        skills=_resolve_skills(args.skills),
         subagents=args.subagents,
         subagent_max_steps=args.subagent_steps,
         on_event=_printer(args.quiet),

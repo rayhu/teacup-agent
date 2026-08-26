@@ -27,6 +27,10 @@ class Tool:
     fn: Callable[..., str]
     requires_approval: bool = False  # True = a human must say yes before running
     timeout: float | None = None  # override the loop's per-call timeout, in seconds
+    # False = never move this result to a file. Most results are raw material and an
+    # excerpt plus a path is fine; a few are instructions the model has to follow, and
+    # truncating those defeats the point of returning them at all.
+    externalize: bool = True
 
 
 REGISTRY: dict[str, Tool] = {}
@@ -37,6 +41,7 @@ def tool(
     parameters: dict[str, Any],
     requires_approval: bool = False,
     timeout: float | None = None,
+    externalize: bool = True,
 ):
     """Decorator: register a plain function as a model-callable tool.
 
@@ -48,7 +53,8 @@ def tool(
 
     def deco(fn: Callable[..., str]) -> Callable[..., str]:
         REGISTRY[fn.__name__] = Tool(
-            fn.__name__, description, parameters, fn, requires_approval, timeout
+            fn.__name__, description, parameters, fn, requires_approval, timeout,
+            externalize,
         )
         return fn
 

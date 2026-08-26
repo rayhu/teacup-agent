@@ -505,3 +505,89 @@ of window. Use it for reading-heavy subtasks inside long runs, not as a default.
 available and the model simply never called it: `subagents: 0`. That is the same failure
 family as the email that never got sent. An available tool is not a used tool, and the
 number that proves a feature works has to come from a run that actually used it.
+
+---
+
+## Skills
+
+The system prompt is static context: every token is in every request, whether the task
+calls for it or not. Good for rules the agent must never forget, expensive for knowledge
+it needs once an hour. A skill is the other side of that line, a folder whose *metadata*
+is always present and whose *body* is loaded on demand.
+
+```
+skills/
+└── web-research/
+    └── SKILL.md      # --- name / description --- then the procedure
+```
+
+```bash
+uv run mini-agent --live "research X across several sources"
+```
+
+```
+[skills] available: long-document, web-research
+[step 1] -> load_skill({"name": "web-research"})
+```
+
+**Three levels of disclosure**, and what each costs:
+
+| Level | What the model sees | Cost |
+| --- | --- | --- |
+| Startup | `- web-research: Research a question across several web sources...` | ~25 tokens per skill, every request |
+| On match | the full procedure, as a tool result | paid once, in the run that needs it |
+| Deep reference | files beside `SKILL.md`, read with `read_file` | paid only if opened |
+
+**Measured on this repo**: the catalog block costs 180 tokens, of which about 42 is the
+marginal cost of one more skill and the rest is the preamble explaining the mechanism
+once. It covers 920 tokens of procedure, so static context per request is 1,665 rather
+than the 2,405 it would be with the bodies inlined. A run that never does research never
+pays for the research procedure at all.
+
+**Loading twice returns a pointer, not the text.** Resending a 600-token procedure would
+undo the saving the mechanism exists for, so `load_skill` says "already loaded earlier in
+this conversation" the second time.
+
+**A skill with no description is skipped.** Without one the model cannot know when to
+reach for it, which makes it pure cost in the catalog.
+
+**Skills are knowledge, not code.** They are text the model reads and follows, which makes
+the skills directory a trust boundary in the same way tool descriptions are. That is why
+they come from the project rather than being fetched from anywhere.
+
+### The catalog is the trigger, and the first wording did not fire
+
+Measured with gpt-5-mini on a textbook research task ("find the current MCP revision and
+what changed, two bullets with sources"), with nothing in the prompt telling it to use a
+skill:
+
+| Catalog wording | Result |
+| --- | --- |
+| "These are procedures you can load when the task matches" | `loaded_skills: []`. It searched straight away and never looked. |
+| "**If the task in front of you matches one of these descriptions, call load_skill(name) first and follow what it says.**" | `loaded_skills: ['web-research']`, loaded as the very first action. |
+
+Same model, same task, same skill. The mechanism was never the problem; the sentence
+that offers it was. This is the third time in this repo that an available capability went
+unused until it was made an instruction rather than an option, after the email that was
+never sent and the subagent that was never delegated to.
+
+A control run confirms it does not fire on everything: `(3200-450)*0.6` loaded no skill
+and went straight to `calculate`.
+
+### The bug that first live run exposed
+
+The skill body is 2,420 characters, and the externalizer moves any tool result over 2,000
+characters to a file. So the first successful load handed the model the first 600
+characters of the procedure it was supposed to follow, plus a path.
+
+Tool results come in two kinds, and the difference matters: **raw material**, where an
+excerpt plus a path is exactly right, and **instructions**, where truncation defeats the
+purpose of returning them at all. `Tool.externalize` marks the difference, and
+`load_skill` sets it to `False`.
+
+**What has not moved yet.** The system prompt still carries the recency and
+query-anchoring rules, roughly 300 tokens that only matter for research. Now that the
+model demonstrably loads the skill on a research task, moving them is a real option, but
+it wants its own before-and-after measurement: the rules currently fix a failure that was
+expensive to find, and "it loaded the skill once" is not the same as "it loads the skill
+whenever those rules matter".

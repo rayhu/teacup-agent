@@ -26,6 +26,7 @@ from typing import Any, Callable
 from mini_agent import context as ctx
 from mini_agent import persist
 from mini_agent import plan as plan_mod
+from mini_agent import skills as skills_mod
 from mini_agent import subagent as subagent_mod
 from mini_agent import tools as tools_mod
 from mini_agent.memory import Memory, NullMemory
@@ -348,7 +349,12 @@ def execute_calls(
             # plus the path (the model can read it back with read_file). The trace
             # records the trimmed version — it represents what the model actually
             # saw; the full text lives on disk.
-            if run_dir is not None and len(result) > EXTERNALIZE_OVER:
+            spec = tools_mod.REGISTRY.get(call.name)
+            if (
+                run_dir is not None
+                and len(result) > EXTERNALIZE_OVER
+                and (spec is None or spec.externalize)
+            ):
                 full_len = len(result)
                 result = ctx.externalize(result, run_dir, state.step, i, call.name)
                 emit("externalized", name=call.name, chars=full_len, step=state.step)
@@ -378,6 +384,7 @@ def run(
     run_dir: str | pathlib.Path | None = None,  # persistence + externalization dir
     resume: AgentState | None = None,  # continue from a previously saved state
     plan: bool = False,  # decompose the goal into a checklist first (one extra call)
+    skills: str | pathlib.Path | None = None,  # directory of skills; None = none
     subagents: bool = False,  # offer the delegate tool (a child run with its own context)
     subagent_max_steps: int = 4,
     exclude_tools: list[str] | None = None,  # names the model must not see this run
@@ -405,6 +412,12 @@ def run(
     )
     if recalled := memory.recall():
         system += f"\n\n{recalled}"
+
+    # Skills put only their metadata here. The bodies stay out until asked for, which is
+    # the whole point: this block is in every request, a body is in one.
+    available_skills = skills_mod.discover(skills) if skills else []
+    if catalog := skills_mod.catalog(available_skills):
+        system += f"\n\n{catalog}"
 
     # run_dir=None means "do not persist and do not externalize" — what evals and
     # unit tests want, so they leave nothing behind in the repo.
@@ -451,6 +464,10 @@ def run(
     if set_key:
         set_key("mini-agent-" + hashlib.sha256(state.messages[0]["content"].encode()).hexdigest()[:16])
 
+    if available_skills:
+        skills_mod.enable(available_skills, state)
+        emit("skills", names=[s.name for s in available_skills])
+
     if subagents:
         # Registered per run, not globally: an unbound tool schema would sit in the
         # context prefix of every request for a capability the run cannot use.
@@ -475,6 +492,8 @@ def run(
     finally:
         if subagents:
             subagent_mod.disable()
+        if available_skills:
+            skills_mod.disable()
 
 
 def _loop(

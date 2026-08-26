@@ -62,6 +62,8 @@ src/mini_agent/
 ├── plan.py        checklist    split the goal into items and hold the run to them
 ├── persist.py     persistence  save state every step, resume from it
 ├── mcp_tools.py   MCP          borrow tools from MCP servers
+├── skills.py      skills       procedures loaded only when the task matches
+├── subagent.py    delegation   a child run with its own context
 ├── trajectory.py  scoring      grade a real run: mechanical metrics + an LLM judge
 └── cli.py         entry point
 tests/                  pytest: the eval cases plus unit tests
@@ -106,6 +108,8 @@ Each of these earned its place by fixing a run that had gone wrong. The stories 
 - **MCP**: point at a server and its tools join the registry, namespaced and gated.
 - **Subagents**: delegate a reading-heavy subtask to a child agent with its own context;
   only its conclusion comes back, so the bulk never enters this context.
+- **Skills**: a procedure's one-line description is always loaded, its body only when the
+  task matches, so the agent carries many specialities and pays for the one it uses.
 
 ## The three traps in the control loop
 

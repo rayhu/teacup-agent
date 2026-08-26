@@ -60,6 +60,7 @@ class AgentState:
     todo: list[TodoItem] = field(default_factory=list)
     completion_checked: bool = False  # the "anything left undone?" push-back fired
     subagent_runs: int = 0  # how many subagents this run delegated to
+    loaded_skills: list[str] = field(default_factory=list)  # skills pulled into context
     trace: list[ToolTrace] = field(default_factory=list)
 
     # ---- the loop's guards ----------------------------------------------
@@ -103,6 +104,7 @@ class AgentState:
             "status": self.status,
             "salvaged": self.salvaged,
             "subagents": self.subagent_runs,
+            "skills_loaded": len(self.loaded_skills),
             "todo_done": f"{sum(t.done for t in self.todo)}/{len(self.todo)}"
             if self.todo
             else "n/a",

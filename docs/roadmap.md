@@ -2,7 +2,7 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10 are done (except the fine-grained permissions part of #6).
+**Progress**: #1-#10 and #12 are done (except the fine-grained permissions part of #6).
 Five items that were never on the roadmap were added after reviewing real runs
 (see "Field patches" at the end).
 Next up: #11 (a better search backend), the last unstarted item.
@@ -465,6 +465,63 @@ in both quality and stability.
 **Options**: the model's own hosted web search (via the Responses API, see #1), or a
 dedicated agentic search API. The interface does not change; only the inside of
 `search_web` does — the three-mode structure (auto/web/offline) is already there.
+
+---
+
+### 12. Agent Skills — DONE (2026-08-26)
+
+**Why**: the system prompt is static context, so every token in it is in every request
+whether the task calls for it or not. That is right for rules the agent must never forget
+and wrong for knowledge it needs once an hour. Measured before this landed: 842 tokens of
+system prompt plus 643 of tool schemas, resent every turn, and both only grow as servers
+and tools are added.
+
+**What shipped**: [`skills.py`](../src/mini_agent/skills.py), `--skills <dir>` defaulting
+to `./skills` when it exists, and two real skills (`web-research`, `long-document`).
+
+Progressive disclosure, three levels:
+
+1. **Startup**: name and one-line description spliced into the system prompt, about 25
+   tokens per skill.
+2. **On match**: the model calls `load_skill`, and the procedure arrives as a tool result,
+   which is dynamic context by construction.
+3. **Deep reference**: a skill points at files beside it, read with `read_file` only if
+   needed. No new mechanism.
+
+**Measured**: the catalog block costs 180 tokens (about 42 of it marginal per skill) and
+covers 920 tokens of procedure, so static context per request is 1,665 instead of the
+2,405 it would be with the bodies inlined. Loading the same skill twice returns a pointer
+rather than the text, because resending a 600-token procedure would undo the saving the
+feature exists for.
+
+**The live test that mattered**: with gpt-5-mini on a research task and no instruction to
+use skills, the first catalog wording ("procedures you can load when the task matches")
+produced `loaded_skills: []`. Rewritten as an instruction ("if the task matches one of
+these descriptions, call load_skill first and follow it"), the same model loaded
+`web-research` as its first action. A control task, `(3200-450)*0.6`, loaded nothing.
+Third time in this repo that an available capability stayed unused until it was phrased
+as an obligation.
+
+**A bug that run exposed**: the skill body is 2,420 characters and the externalizer moves
+anything over 2,000 to a file, so the model received the first 600 characters of the
+procedure it was meant to follow. Tool results are either raw material (an excerpt plus a
+path is right) or instructions (truncation defeats the point). `Tool.externalize` now
+marks the difference and `load_skill` sets it to `False`.
+
+**Design decisions**:
+- A skills directory is the opt-in, the same convention as `mcp.json`: its metadata costs
+  prefix tokens and its contents are instructions the model will follow.
+- A skill without a description is skipped. Without one the model cannot know when to load
+  it, so it is pure cost.
+- Frontmatter is parsed by hand rather than adding a YAML dependency to read two fields.
+- Skills are knowledge, not code. They are text the model follows, which makes the skills
+  directory a trust boundary in the same way tool descriptions are.
+
+**Left open**: nothing moves *out* of the system prompt yet. The recency and
+query-anchoring rules (roughly 300 tokens) only matter for research and are the obvious
+candidates. The model does now load the skill on a research task, so the move is a real
+option, but it needs its own before-and-after: those rules fix a failure that was
+expensive to find, and one successful load is not proof of reliable loading.
 
 ---
 

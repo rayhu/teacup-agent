@@ -37,6 +37,7 @@ class Case:
     time_budget: float | None = None
     context_limit: int = 30_000
     subagents: bool = False
+    skills: str | None = None
     plan: bool = False
     plan_items: list[str] | None = None
     clock_values: list[float] | None = None  # fake clock, makes the time brake repeatable
@@ -301,6 +302,22 @@ CASES: list[Case] = [
             and s.status == "done"
         ),
     ),
+    Case(
+        name="skills: the body arrives as a tool result, never in the system prompt",
+        script=[
+            assistant_calls([("load_skill", {"name": "web-research"})]),
+            assistant_says("followed the procedure"),
+        ],
+        skills="skills",
+        check=lambda s: (
+            s.loaded_skills == ["web-research"]
+            # the catalog is in the prefix, the procedure is not
+            and "web-research:" in s.messages[0]["content"]
+            and "Grade every source" not in s.messages[0]["content"]
+            and "Grade every source" in s.trace[0].result
+            and tool_results_follow_their_call(s)
+        ),
+    ),
 ]
 
 
@@ -317,6 +334,7 @@ def run_case(case: Case) -> tuple[bool, AgentState]:
         time_budget=case.time_budget,
         context_limit=case.context_limit,
         subagents=case.subagents,
+        skills=case.skills,
         plan=case.plan,
         run_dir=None,  # evals never write to disk
         # A fresh iterator per run, so a case can be executed repeatedly.
