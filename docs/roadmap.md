@@ -1,9 +1,9 @@
 # mini-agent 升级路线图
 
 **基线评估（2026-08-25）**：内核不过时，工程层大约停在 2023 年底 / 2024 年初。
-**进度**：#1、#3、#5 已完成。
+**进度**：#1、#3、#4、#5 已完成。
 另外从三次真实运行的复盘里补了三件 roadmap 上原本没有的事（见文末「实战补丁」）。
-下一站 #4（上下文压缩）—— 决定能不能跑长任务。
+下一站 #2（prompt caching）或 #7（trajectory eval）。
 
 `LLM → tool call → tool result → LLM` 这个循环在 2026 年依然是所有 agent 的内核，
 [`loop.py`](../src/mini_agent/loop.py) 没有一行是「老技术」。差的是外面那一整层生产工程。
@@ -109,7 +109,7 @@ code_interpreter 等 hosted tool）只在 Responses 上落地。
 
 ## P1 · 决定「能不能跑长任务」
 
-### 4. 上下文工程（压缩 / 外置）
+### 4. 上下文工程（压缩 / 外置）✅ 已完成（2026-08-26）
 
 **现状**：`state.messages` 是个无限增长的 list。跑 20-30 轮必然撑爆 context window，
 而且越长越贵、模型注意力越散。
@@ -123,6 +123,20 @@ code_interpreter 等 hosted tool）只在 Responses 上落地。
 
 **验收**：造一个需要 15+ 轮的任务，跑完不爆 context；压缩前后 `state.snapshot()` 能报出
 token 数下降；关键结论没有在压缩中丢失（这条要用 trajectory eval 兜，见 #7）。
+
+**落地情况**：新增 [`context.py`](../src/mini_agent/context.py)。
+
+- 外置：>2000 字符的工具结果写进 `runs/<时间戳>/`，上下文只留 600 字符 + 路径 +
+  「用 read_file 取回」。实测真实检索的 2022 字符结果被压到约 900 tokens 上下文，全文在盘上。
+- 压缩：超 `--context-limit`（默认 30000）时把早期历史摘要成一条消息。
+  保留 system 前缀、原始目标、最近 8 条。
+- **最关键的实现细节是切点而不是摘要质量**：`safe_cut_points()` 复用了顺序不变量那套扫描，
+  只在「没有悬空调用」处下刀，找不到就不压。拆散一对调用/结果的代价是下一轮直接 400。
+- 判断依据优先用模型返回的真实 `usage.input_tokens`（顺手把它从 `Reply` 里暴露出来了），
+  拿不到才退回字符估算。
+- `state.snapshot()` 新增 `context_tokens` 和 `compactions`。
+
+**遗留**：压缩本身要花一次模型调用的钱，目前每次都全量重摘；分层摘要（摘要的摘要）没做。
 
 ---
 

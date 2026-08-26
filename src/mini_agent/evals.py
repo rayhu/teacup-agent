@@ -18,6 +18,20 @@ from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
 from mini_agent.state import AgentState
 
 
+class ScriptedWithSummarizer(ScriptedModel):
+    """脚本模型 + 会应答压缩请求（压缩会额外调一次模型，剧本里不该为它留位置）。"""
+
+    def __init__(self, script, fallback: str = "（剧本已结束）"):
+        super().__init__(script, fallback)
+        self.summaries = 0
+
+    def complete(self, messages, tools):
+        if messages and str(messages[0].get("content", "")).startswith("你在压缩"):
+            self.summaries += 1
+            return assistant_says("【摘要】已查证 A、B 两条事实；C 尝试失败。")
+        return super().complete(messages, tools)
+
+
 @dataclass
 class Case:
     name: str
@@ -27,6 +41,7 @@ class Case:
     budget: float = 0.05
     max_tool_calls: int = 3
     time_budget: float | None = None
+    context_limit: int = 30_000
     clock_values: list[float] | None = None  # 假时钟读数，让时间刹车可复现
 
 
@@ -175,6 +190,19 @@ CASES: list[Case] = [
             and s.answer
         ),
     ),
+    Case(
+        name="上下文压缩：压完消息协议必须依然完整",
+        script=[assistant_calls([("calculate", {"expression": "1+1"})]) for _ in range(5)]
+        + [assistant_says("压缩后仍能收尾")],
+        context_limit=200,  # 故意设小，逼它压缩
+        max_steps=7,
+        check=lambda s: (
+            s.compactions >= 1
+            and tool_results_follow_their_call(s)  # 没把调用和结果拆散
+            and any("[上下文摘要]" in str(m.get("content", "")) for m in s.messages)
+            and s.messages[1]["content"] == "上下文压缩：压完消息协议必须依然完整"  # 目标还在
+        ),
+    ),
 ]
 
 
@@ -183,12 +211,14 @@ def run_case(case: Case) -> tuple[bool, AgentState]:
     os.environ.setdefault("MINI_AGENT_SEARCH", "offline")
     state = loop.run(
         goal=case.name,
-        model=ScriptedModel(list(case.script)),
+        model=ScriptedWithSummarizer(list(case.script)),
         memory=NullMemory(),
         max_steps=case.max_steps,
         budget=case.budget,
         max_tool_calls_per_step=case.max_tool_calls,
         time_budget=case.time_budget,
+        context_limit=case.context_limit,
+        run_dir=None,  # 评测不写盘
         # 每次跑都新建一个迭代器，用例可以重复执行
         **({"clock": iter(case.clock_values).__next__} if case.clock_values else {}),
     )

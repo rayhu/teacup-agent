@@ -36,6 +36,7 @@ class Reply:
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     cost: float = 0.0  # 这一轮花掉的美元
+    input_tokens: int = 0  # 这一轮送进去的上下文有多大（压缩决策的依据）
 
 
 class Model(Protocol):
@@ -110,15 +111,17 @@ class OpenAIModel:
             for tc in (msg.tool_calls or [])
         ]
         usage = getattr(resp, "usage", None)
+        prompt_tokens = getattr(usage, "prompt_tokens", 0) if usage else 0
         return Reply(
             items=[msg.model_dump(exclude_none=True)],
             text=msg.content or "",
             tool_calls=calls,
             cost=estimate_cost(
                 self.model,
-                getattr(usage, "prompt_tokens", 0) if usage else 0,
+                prompt_tokens,
                 getattr(usage, "completion_tokens", 0) if usage else 0,
             ),
+            input_tokens=prompt_tokens,
         )
 
     def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
@@ -207,15 +210,17 @@ class ResponsesModel:
                 )
 
         usage = getattr(resp, "usage", None)
+        input_tokens = getattr(usage, "input_tokens", 0) if usage else 0
         return Reply(
             items=items,
             text=getattr(resp, "output_text", "") or "",
             tool_calls=calls,
             cost=estimate_cost(
                 self.model,
-                getattr(usage, "input_tokens", 0) if usage else 0,
+                input_tokens,
                 getattr(usage, "output_tokens", 0) if usage else 0,
             ),
+            input_tokens=input_tokens,
         )
 
     def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:

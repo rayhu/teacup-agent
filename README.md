@@ -35,6 +35,7 @@ cp .env.example .env   # 然后填入 OPENAI_API_KEY
 src/mini_agent/
 ├── model.py    Model        —— 唯一会思考的部件。OpenAIModel（真实）/ ScriptedModel（离线剧本）
 ├── state.py    State        —— goal / messages / step / remaining_budget / status + 工具留痕
+├── context.py  上下文工程   —— 大结果外置到文件 + 超限时压缩早期历史
 ├── tools.py    Tools        —— 函数 + JSON Schema + 安全执行（错误变成工具结果，而不是异常）
 ├── memory.py   Memory       —— 短期 = messages；长期 = memory.json（可被 remember 工具写入）
 ├── loop.py     Control Loop —— LLM → tool call → tool result → LLM
@@ -50,7 +51,8 @@ docs/roadmap.md              —— 这份实现距离当前生产级别的 agen
 | 部件 | 文件 | 当前实现 | 想加强时换成 |
 | --- | --- | --- | --- |
 | Model | `model.py` | Responses API（默认）+ Chat Completions，另有离线脚本模型 | Claude / 本地模型 / 多模型路由 |
-| State | `state.py` | dataclass：步数、预算、状态机、留痕 | 落盘 checkpoint、可恢复运行 |
+| State | `state.py` | dataclass：步数、预算、时间、状态机、留痕 | 落盘 checkpoint、可恢复运行 |
+| 上下文 | `context.py` | 大结果外置 + 超限压缩（保护工具调用配对） | 按相关性召回、分层摘要 |
 | Tools | `tools.py` | search_web（**真实联网**，DuckDuckGo 免 key）、calculate、read_file、remember | 浏览器、SQL、代码执行、发邮件 |
 | Control Loop | `loop.py` | 单层循环 + 四道守卫 + 工具并行执行 + 模型调用重试 | 计划-执行分离、子 Agent、人工确认 |
 | Memory | `memory.py` | JSON 文件 + 去重 + 只留最近 N 条 | 向量库、摘要压缩、按相关性召回 |
@@ -95,6 +97,31 @@ MINI_AGENT_SEARCH=offline uv run mini-agent                      # 强制离线
 
 同一任务实测（gpt-5-mini）：responses 的上下文里多出一条 `reasoning` 项，会随下一轮请求发回去；
 chat 那边没有对应物。OpenAI 迁移文档称同 prompt 下 SWE-bench 高约 3%。
+
+## 上下文管理
+
+`state.messages` 天然只增不减，跑 20-30 轮之后三件事一起变坏：撑爆 context window、
+每轮全价重发、模型注意力被无关的旧输出稀释。两道手段，**外置优先于压缩**：
+
+**1. 外置**（`--run-dir`，默认 `runs/<时间戳>`，填 `off` 关闭）
+超过 2000 字符的工具结果写进文件，上下文里只留开头 600 字符 + 路径 + 一句
+「需要完整内容就用 read_file 读这个路径」。**信息一点没丢**，而取回的代价只在真需要时才付。
+
+```
+📄 search_web 返回 2022 字符，已外置到文件，上下文只留摘要
+```
+
+**2. 压缩**（`--context-limit`，默认 30000 tokens）
+上下文仍然超阈值时，把较早的一段交给模型摘要，用一条 `[上下文摘要]` 消息替换掉几十条历史。
+保留 system 前缀（否则 prompt caching 失效）、原始目标、最近 8 条。摘要提示词明确要求保住
+「已查证的事实 + 来源链接 + 试过什么失败了」——最后一条尤其重要，否则压缩完它会重新踩一遍坑。
+
+**压缩最危险的地方不是摘要质量，是切点。** 把一个工具调用和它的结果拆散，下一轮请求直接 400。
+所以 `safe_cut_points()` 只在「没有悬空调用」的位置下刀——扫描逻辑和 evals 里那条顺序不变量
+是同一套。找不到安全切点就宁可不压。评测里有一条用例专门盯着「压完协议依然完整」。
+
+判断依据用的是**模型返回的真实 token 数**（`usage.input_tokens`），拿不到时才退回字符估算
+（中日韩按 1.5 字符/token，其余 4 字符/token）。
 
 ## 工具并行执行
 

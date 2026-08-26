@@ -35,6 +35,8 @@ class AgentState:
     remaining_budget: float = 0.05  # 单位：美元，每轮按 token 用量扣减
     time_budget: float | None = None  # 墙上时间上限（秒），None = 不限
     elapsed: float = 0.0  # 已经跑了多久（秒）
+    context_tokens: int = 0  # 上一轮送进模型的上下文有多大
+    compactions: int = 0  # 压缩过几次
     status: Status = "idle"
     answer: str = ""
     salvaged: bool = False  # True = 资源耗尽后靠强制收尾轮抢回来的答案
@@ -70,6 +72,8 @@ class AgentState:
             "max_steps": self.max_steps,
             "remaining_budget": self.remaining_budget,
             "elapsed_s": round(self.elapsed, 1),
+            "context_tokens": self.context_tokens,
+            "compactions": self.compactions,
             "status": self.status,
             "salvaged": self.salvaged,
             "messages": len(self.messages),

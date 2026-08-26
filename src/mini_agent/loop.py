@@ -12,12 +12,14 @@
 
 from __future__ import annotations
 
+import pathlib
 import time
 from datetime import date
 from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable
 
+from mini_agent import context as ctx
 from mini_agent import tools as tools_mod
 from mini_agent.memory import Memory, NullMemory
 from mini_agent.model import Model, ToolCall, chat_tool_result
@@ -158,12 +160,16 @@ def complete_with_retries(
             (sleep or time.sleep)(delay)  # 调用时才取，测试才拦得住
 
 
+EXTERNALIZE_OVER = 2000  # 超过这么多字符的工具结果就写盘，上下文里只留摘要 + 路径
+
+
 def execute_calls(
     state: AgentState,
     calls: list[ToolCall],
     model: Model,
     emit: Callable[..., None],
     tool_timeout: float,
+    run_dir: pathlib.Path | None = None,
 ) -> None:
     """并行执行一轮里的所有工具调用，然后**按原顺序**回填。
 
@@ -215,6 +221,12 @@ def execute_calls(
         executed = not (cap > 0 and i >= cap)
         if executed:
             emit("tool_result", name=call.name, result=result, step=state.step)
+            # 外置：大块结果写盘，上下文里只留开头 + 路径（模型可用 read_file 取回）。
+            # 留痕记的是精简版 —— 它代表「模型实际看到了什么」，全文在盘上。
+            if run_dir is not None and len(result) > EXTERNALIZE_OVER:
+                full_len = len(result)
+                result = ctx.externalize(result, run_dir, state.step, i, call.name)
+                emit("externalized", name=call.name, chars=full_len, step=state.step)
         state.trace.append(
             ToolTrace(
                 step=state.step,
@@ -236,6 +248,8 @@ def run(
     max_tool_calls_per_step: int = 3,
     time_budget: float | None = 600.0,  # 默认 10 分钟；None = 不限
     tool_timeout: float = 30.0,  # 单个工具调用的超时（秒）
+    context_limit: int = 30_000,  # 上下文超过这么多 token 就压缩
+    run_dir: str | pathlib.Path | None = None,  # 外置文件放哪；None = runs/<时间戳>
     today: str | None = None,
     clock: Callable[[], float] = time.monotonic,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
@@ -267,6 +281,7 @@ def run(
         time_budget=time_budget,
     )
     started_at = clock()
+    run_dir = pathlib.Path(run_dir) if run_dir else pathlib.Path("runs") / time.strftime("%Y%m%d-%H%M%S")
     state.messages = [
         {"role": "system", "content": system},
         {"role": "user", "content": goal},
@@ -291,6 +306,17 @@ def run(
 
         state.step += 1
 
+        # ---- 0a. 上下文超限就先压缩 -----------------------------------------
+        if state.context_tokens > context_limit:
+            try:
+                saved = ctx.compact(state, model, context_limit)
+            except Exception as e:  # 压缩失败不该让整个任务垮掉
+                emit("error", message=f"压缩失败：{type(e).__name__}: {e}")
+                saved = 0
+            if saved:
+                state.context_tokens = ctx.messages_tokens(state.messages)
+                emit("compacted", saved_tokens=saved, now=state.context_tokens, step=state.step)
+
         # ---- 0. 把资源状况告诉模型 -----------------------------------------
         # 它得知道自己还剩多少步、多少钱，才谈得上「继续挖还是收尾」。
         state.messages.append(status_note(state))
@@ -307,6 +333,8 @@ def run(
             break
 
         state.charge(reply.cost)
+        # 真实 token 数优先，拿不到（如脚本模型）就估算
+        state.context_tokens = reply.input_tokens or ctx.messages_tokens(state.messages)
 
         # ---- 2. 先把模型这轮的输出写回状态--------------------------
         # 用 extend 而不是 append：Responses API 一轮可能产出多个条目
@@ -321,7 +349,7 @@ def run(
             break
 
         # ---- 4. 并行执行所有工具调用，按原顺序回填（坑 2）------------------
-        execute_calls(state, reply.tool_calls, model, emit, tool_timeout)
+        execute_calls(state, reply.tool_calls, model, emit, tool_timeout, run_dir)
         # 回到循环顶部，把工具结果一起交回模型 —— 这就是「Agent」和「一次函数调用」的区别
 
     state.elapsed = clock() - started_at

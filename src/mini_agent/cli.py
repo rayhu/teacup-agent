@@ -50,6 +50,10 @@ def _printer(quiet: bool):
                 f"  [step {data['step']}] ⚠ 模型一次要了 {data['requested']} 个工具调用，"
                 f"只执行前 {data['cap']} 个，其余退回下一轮"
             )
+        elif event == "compacted":
+            print(f"  🗜 上下文压缩：省下约 {data['saved_tokens']} tokens，现约 {data['now']}")
+        elif event == "externalized":
+            print(f"  📄 {data['name']} 返回 {data['chars']} 字符，已外置到文件，上下文只留摘要")
         elif event == "retry":
             print(f"  ↻ 模型调用失败（{data['error']}），{data['delay']}s 后重试第 {data['attempt']} 次")
         elif event == "salvaged":
@@ -102,6 +106,17 @@ def main(argv: list[str] | None = None) -> int:
         default=30.0,
         help="单个工具调用的超时（秒），默认 30。超时会给模型一条 ERROR 结果，循环继续",
     )
+    p.add_argument(
+        "--context-limit",
+        type=int,
+        default=30_000,
+        help="上下文超过这么多 token 就压缩早期历史，默认 30000",
+    )
+    p.add_argument(
+        "--run-dir",
+        default=None,
+        help="大块工具结果的外置目录，默认 runs/<时间戳>；填 off 关闭外置",
+    )
     p.add_argument("--memory", default="memory.json", help="长期记忆文件路径")
     p.add_argument("-q", "--quiet", action="store_true", help="只打印最终答案")
     args = p.parse_args(argv)
@@ -127,6 +142,8 @@ def main(argv: list[str] | None = None) -> int:
         budget=args.budget,
         time_budget=args.deadline if args.deadline > 0 else None,  # 0 = 不限
         tool_timeout=args.tool_timeout,
+        context_limit=args.context_limit,
+        run_dir=None if args.run_dir == "off" else args.run_dir,
         max_tool_calls_per_step=args.max_tool_calls,
         on_event=_printer(args.quiet),
     )
