@@ -8,11 +8,13 @@ from __future__ import annotations
 import argparse
 import json
 import os
+import pathlib
+import time
 from typing import Any
 
 from dotenv import load_dotenv
 
-from mini_agent import loop, model as model_mod
+from mini_agent import loop, model as model_mod, persist
 from mini_agent.memory import Memory
 
 DEFAULT_GOAL = "查一下 NVIDIA 的 GPU 策略，并算一下 1200 * 0.85 / 3"
@@ -115,14 +117,37 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--run-dir",
         default=None,
-        help="大块工具结果的外置目录，默认 runs/<时间戳>；填 off 关闭外置",
+        help="本次运行的落盘目录（状态快照 + 外置的大块工具结果），"
+        "默认 runs/<时间戳>；填 off 关闭",
     )
     p.add_argument("--memory", default="memory.json", help="长期记忆文件路径")
+    p.add_argument(
+        "--resume",
+        default=None,
+        help="从某个 runs/<时间戳>/state.json（或它所在目录）接着跑",
+    )
     p.add_argument("-q", "--quiet", action="store_true", help="只打印最终答案")
     args = p.parse_args(argv)
 
     # 检索模式与模型解耦：离线 demo 默认也走离线检索，保证「不联网、秒出结果」
     os.environ["MINI_AGENT_SEARCH"] = args.search or ("auto" if args.live else "offline")
+
+    resumed = persist.load(args.resume) if args.resume else None
+    if resumed is not None:
+        # 恢复时，命令行给的上限是「**再给这么多**」：已经用掉的步数/时间都记在状态里，
+        # 直接沿用会导致一恢复就立刻又触顶。
+        resumed.max_steps = resumed.step + args.max_steps
+        resumed.remaining_budget += args.budget
+        resumed.time_budget = (resumed.elapsed + args.deadline) if args.deadline > 0 else None
+        resumed.salvaged = False  # 上一次的强制收尾不该算在这一次头上
+    if args.run_dir == "off":
+        run_dir = None
+    elif args.run_dir:
+        run_dir = args.run_dir
+    elif args.resume:  # 恢复时沿用原来的目录，别把一次运行拆成两处
+        run_dir = pathlib.Path(args.resume).parent if args.resume.endswith(".json") else args.resume
+    else:
+        run_dir = pathlib.Path("runs") / time.strftime("%Y%m%d-%H%M%S")
 
     if not args.live:
         the_model = _offline_model()
@@ -130,6 +155,11 @@ def main(argv: list[str] | None = None) -> int:
         the_model = model_mod.ResponsesModel(args.model)
     else:
         the_model = model_mod.OpenAIModel(args.model)
+    if not args.quiet and resumed is not None:
+        print(
+            f"从 {args.resume} 恢复：已跑 {resumed.step} 轮、"
+            f"{resumed.elapsed:.0f} 秒，再给 {args.max_steps} 轮\n"
+        )
     if not args.quiet:
         mode = f"live:{args.model}/{args.api}" if args.live else "offline:scripted"
         print(f"模式 {mode} ｜ 检索 {os.environ['MINI_AGENT_SEARCH']} ｜ 目标：{args.goal}\n")
@@ -143,12 +173,15 @@ def main(argv: list[str] | None = None) -> int:
         time_budget=args.deadline if args.deadline > 0 else None,  # 0 = 不限
         tool_timeout=args.tool_timeout,
         context_limit=args.context_limit,
-        run_dir=None if args.run_dir == "off" else args.run_dir,
+        run_dir=run_dir,
+        resume=resumed,
         max_tool_calls_per_step=args.max_tool_calls,
         on_event=_printer(args.quiet),
     )
 
     print(f"\n答案：{state.answer}")
+    if run_dir is not None and not args.quiet:
+        print(f"轨迹已存到 {pathlib.Path(run_dir) / persist.FILENAME}（可用 --resume 接着跑）")
     if not args.quiet:
         print(f"状态：{json.dumps(state.snapshot(), ensure_ascii=False)}")
     return 0 if state.status == "done" else 1

@@ -203,6 +203,19 @@ CASES: list[Case] = [
             and s.messages[1]["content"] == "上下文压缩：压完消息协议必须依然完整"  # 目标还在
         ),
     ),
+    Case(
+        name="收尾轮若硬发工具调用，也必须补齐结果消息（否则恢复时会 400）",
+        script=[
+            assistant_calls([("calculate", {"expression": "1+1"})]),
+            assistant_calls([("calculate", {"expression": "9+9"})]),  # 收尾轮还想调工具
+        ],
+        max_steps=1,
+        check=lambda s: (
+            s.status == "max_steps"
+            and tool_results_follow_their_call(s)  # 没有悬空的 tool_call_id
+            and any("强制收尾阶段" in str(m.get("content", "")) for m in s.messages)
+        ),
+    ),
 ]
 
 

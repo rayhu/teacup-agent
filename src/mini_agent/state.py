@@ -37,6 +37,8 @@ class AgentState:
     elapsed: float = 0.0  # 已经跑了多久（秒）
     context_tokens: int = 0  # 上一轮送进模型的上下文有多大
     compactions: int = 0  # 压缩过几次
+    input_tokens_total: int = 0  # 累计送进模型的 token
+    cached_tokens_total: int = 0  # 其中命中 prompt cache 的
     status: Status = "idle"
     answer: str = ""
     salvaged: bool = False  # True = 资源耗尽后靠强制收尾轮抢回来的答案
@@ -64,6 +66,11 @@ class AgentState:
     def charge(self, cost: float) -> None:
         self.remaining_budget = round(self.remaining_budget - cost, 6)
 
+    def cache_hit_rate(self) -> str:
+        if not self.input_tokens_total:
+            return "n/a"
+        return f"{self.cached_tokens_total / self.input_tokens_total:.0%}"
+
     def snapshot(self) -> dict[str, Any]:
         """给人看的状态摘要（不含完整 messages）。"""
         return {
@@ -74,6 +81,7 @@ class AgentState:
             "elapsed_s": round(self.elapsed, 1),
             "context_tokens": self.context_tokens,
             "compactions": self.compactions,
+            "cache_hit": self.cache_hit_rate(),
             "status": self.status,
             "salvaged": self.salvaged,
             "messages": len(self.messages),

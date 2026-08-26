@@ -3,6 +3,8 @@
 它检查的是三件容易写错的事：tool_calls 的取法、assistant 消息的原样回填、费用换算。
 """
 
+import pytest
+
 from types import SimpleNamespace
 
 from mini_agent.model import OpenAIModel
@@ -56,3 +58,34 @@ def test_plain_answer_has_no_tool_calls():
     client, _ = _fake_client("42", [], SimpleNamespace(prompt_tokens=0, completion_tokens=0))
     reply = OpenAIModel("gpt-5", client=client).complete([], [])
     assert reply.tool_calls == [] and reply.text == "42"
+
+
+# --- prompt caching 计价 ------------------------------------------------------
+
+
+def test_cached_input_tokens_are_billed_at_a_tenth():
+    """缓存命中的输入只按十分之一计价 —— 这是保持前缀稳定的直接回报。"""
+    from types import SimpleNamespace as NS
+
+    from mini_agent.model import estimate_cost
+
+    full = estimate_cost("gpt-5", input_tokens=1_000_000, output_tokens=0)
+    half_cached = estimate_cost("gpt-5", 1_000_000, 0, cached_tokens=500_000)
+    assert full == 1.25
+    assert half_cached == pytest.approx(0.5 * 1.25 + 0.5 * 0.125)
+
+    client, _ = _fake_client(
+        "hi",
+        [],
+        NS(prompt_tokens=1000, completion_tokens=0, prompt_tokens_details=NS(cached_tokens=800)),
+    )
+    reply = OpenAIModel("gpt-5", client=client).complete([], [])
+    assert reply.cached_tokens == 800
+    assert reply.cost == pytest.approx((200 * 1.25 + 800 * 0.125) / 1_000_000)
+
+
+def test_missing_cache_details_are_treated_as_zero():
+    from types import SimpleNamespace as NS
+
+    client, _ = _fake_client("hi", [], NS(prompt_tokens=100, completion_tokens=0))
+    assert OpenAIModel("gpt-5", client=client).complete([], []).cached_tokens == 0

@@ -1,9 +1,9 @@
 # mini-agent 升级路线图
 
 **基线评估（2026-08-25）**：内核不过时，工程层大约停在 2023 年底 / 2024 年初。
-**进度**：#1、#3、#4、#5 已完成。
+**进度**：#1、#2、#3、#4、#5、#8 已完成。
 另外从三次真实运行的复盘里补了三件 roadmap 上原本没有的事（见文末「实战补丁」）。
-下一站 #2（prompt caching）或 #7（trajectory eval）。
+下一站 #7（trajectory eval）—— 落盘的轨迹已经就位，正好是它的输入。
 
 `LLM → tool call → tool result → LLM` 这个循环在 2026 年依然是所有 agent 的内核，
 [`loop.py`](../src/mini_agent/loop.py) 没有一行是「老技术」。差的是外面那一整层生产工程。
@@ -75,7 +75,7 @@ code_interpreter 等 hosted tool）只在 Responses 上落地。
 
 ---
 
-### 2. Prompt caching
+### 2. Prompt caching ✅ 已完成（2026-08-26）
 
 **现状**：长 system prompt + 越来越长的历史，每轮全价重发。
 
@@ -84,6 +84,15 @@ code_interpreter 等 hosted tool）只在 Responses 上落地。
 再在 `Reply.cost` 里区分 cached / uncached token 计价。
 
 **验收**：同一任务连跑两次，第二次的 `remaining_budget` 消耗明显更低，且 snapshot 能报出缓存命中。
+
+**落地情况**：`PRICES` 改成三元组（输入 / 命中缓存的输入 / 输出），命中部分按十分之一计价；
+两个后端都从 usage 里挖出 `cached_tokens`（Chat 在 `prompt_tokens_details`，
+Responses 在 `input_tokens_details`）；`snapshot()` 报 `cache_hit`。
+另外用 system prompt 的哈希做 `prompt_cache_key`，让同配置的多次运行互相复用缓存。
+
+**实测**：gpt-5-mini 跑 5 轮带真实检索的任务，`cache_hit: 38%`。
+**一个坑**：第一次测出来是 0%，查下来是首个请求约 972 token，**没到 OpenAI 约 1024 token 的起caching门槛**。
+短任务显示 0% 是正常的，不是 bug。
 
 ---
 
@@ -202,7 +211,7 @@ token 数下降；关键结论没有在压缩中丢失（这条要用 trajectory
 
 ---
 
-### 8. 可观测性与可恢复
+### 8. 可观测性与可恢复 ✅ 已完成（2026-08-26）
 
 **现状**：跑完就没了。崩了从头再来，出了问题只能看终端回滚。
 
@@ -211,6 +220,18 @@ token 数下降；关键结论没有在压缩中丢失（这条要用 trajectory
 个 dataclass，序列化成 JSON 就能从中断处续跑。
 
 **验收**：跑到一半 Ctrl-C，能从 checkpoint 续上，不重复已完成的工具调用。
+
+**落地情况**：新增 [`persist.py`](../src/mini_agent/persist.py)。每步把整个 `AgentState`
+写进 `runs/<时间戳>/state.json`（临时文件 + 改名，避免残档），`--resume` 从那里接着跑。
+恢复时**不重建 system 消息**（重建 = prompt cache 作废），命令行上限按「再给这么多」叠加。
+`run_dir=None` 表示不落盘 —— 评测和单测走这条路，不往仓库里拉屎。
+
+**顺带逮到一个真 bug**：写恢复用例时发现，强制收尾轮如果模型仍然硬发工具调用，
+那些调用**没有结果消息**，消息协议就断了 —— 下一次请求（包括 `--resume`）直接 400。
+现在收尾轮会给每个悬空调用补一条「已进入收尾阶段，工具不可用」的结果。
+评测里加了一条用例盯着它。这类 bug 只有在真去做「恢复」时才会现形。
+
+**未完成**：OpenTelemetry span 之类的结构化追踪。
 
 ---
 

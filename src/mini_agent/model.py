@@ -37,9 +37,14 @@ class Reply:
     tool_calls: list[ToolCall] = field(default_factory=list)
     cost: float = 0.0  # 这一轮花掉的美元
     input_tokens: int = 0  # 这一轮送进去的上下文有多大（压缩决策的依据）
+    cached_tokens: int = 0  # 其中命中 prompt cache 的部分（便宜十倍）
 
 
 class Model(Protocol):
+    def set_cache_key(self, key: str) -> None:
+        """给 prompt cache 一个稳定的分组键（可选实现）。"""
+        ...
+
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> Reply: ...
@@ -59,22 +64,33 @@ def chat_tool_result(call: ToolCall, result: str) -> dict[str, Any]:
     }
 
 
-def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
-    pin, pout = PRICES.get(model, _DEFAULT_PRICE)
-    return (input_tokens * pin + output_tokens * pout) / 1_000_000
+def estimate_cost(
+    model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0
+) -> float:
+    """input_tokens 是**总输入**（含缓存命中的部分），cached_tokens 是其中命中缓存的。"""
+    pin, pcached, pout = PRICES.get(model, _DEFAULT_PRICE)
+    fresh = max(0, input_tokens - cached_tokens)
+    return (fresh * pin + cached_tokens * pcached + output_tokens * pout) / 1_000_000
+
+
+def cached_from(usage: Any, field: str) -> int:
+    """从 usage 里挖出缓存命中的 token 数（两个 API 的字段名不同）。"""
+    details = getattr(usage, field, None)
+    return getattr(details, "cached_tokens", 0) or 0 if details else 0
 
 
 # --------------------------------------------------------------------------
 # 真实模型
 # --------------------------------------------------------------------------
 
-# 每百万 token 的价格（美元），仅用于预算演示，可能过时 —— 以官方价目表为准。
-PRICES: dict[str, tuple[float, float]] = {
-    "gpt-5": (1.25, 10.00),
-    "gpt-5-mini": (0.25, 2.00),
-    "gpt-4.1-mini": (0.40, 1.60),
+# 每百万 token 的价格（美元）：(输入, 命中缓存的输入, 输出)。仅用于预算演示，可能过时。
+# 缓存命中的输入通常只要十分之一 —— 这就是保持上下文前缀稳定的直接回报。
+PRICES: dict[str, tuple[float, float, float]] = {
+    "gpt-5": (1.25, 0.125, 10.00),
+    "gpt-5-mini": (0.25, 0.025, 2.00),
+    "gpt-4.1-mini": (0.40, 0.10, 1.60),
 }
-_DEFAULT_PRICE = (1.25, 10.00)
+_DEFAULT_PRICE = (1.25, 0.125, 10.00)
 
 
 class OpenAIModel:
@@ -87,6 +103,7 @@ class OpenAIModel:
 
     def __init__(self, model: str = "gpt-5", client: Any = None):
         self.model = model
+        self.cache_key: str | None = None
         if client is None:
             from openai import OpenAI  # 延迟导入：离线运行不需要装 openai
 
@@ -100,11 +117,14 @@ class OpenAIModel:
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> Reply:
-        resp = self.client.chat.completions.create(
-            model=self.model,
-            messages=messages,
-            tools=tools,
-        )
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "messages": messages,
+            "tools": tools,
+        }
+        if self.cache_key:  # 让相同前缀的请求路由到同一台机器，提高缓存命中率
+            kwargs["prompt_cache_key"] = self.cache_key
+        resp = self.client.chat.completions.create(**kwargs)
         msg = resp.choices[0].message
         calls = [
             ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
@@ -112,6 +132,7 @@ class OpenAIModel:
         ]
         usage = getattr(resp, "usage", None)
         prompt_tokens = getattr(usage, "prompt_tokens", 0) if usage else 0
+        cached = cached_from(usage, "prompt_tokens_details") if usage else 0
         return Reply(
             items=[msg.model_dump(exclude_none=True)],
             text=msg.content or "",
@@ -120,8 +141,10 @@ class OpenAIModel:
                 self.model,
                 prompt_tokens,
                 getattr(usage, "completion_tokens", 0) if usage else 0,
+                cached,
             ),
             input_tokens=prompt_tokens,
+            cached_tokens=cached,
         )
 
     def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
@@ -156,6 +179,7 @@ class ResponsesModel:
     ):
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.cache_key: str | None = None
         if client is None:
             from openai import OpenAI  # 延迟导入：离线运行不需要装 openai
 
@@ -192,6 +216,8 @@ class ResponsesModel:
         }
         if self.reasoning_effort:
             kwargs["reasoning"] = {"effort": self.reasoning_effort}
+        if self.cache_key:  # 相同前缀路由到同一台机器，提高缓存命中率
+            kwargs["prompt_cache_key"] = self.cache_key
 
         resp = self.client.responses.create(**kwargs)
 
@@ -211,6 +237,7 @@ class ResponsesModel:
 
         usage = getattr(resp, "usage", None)
         input_tokens = getattr(usage, "input_tokens", 0) if usage else 0
+        cached = cached_from(usage, "input_tokens_details") if usage else 0
         return Reply(
             items=items,
             text=getattr(resp, "output_text", "") or "",
@@ -219,12 +246,17 @@ class ResponsesModel:
                 self.model,
                 input_tokens,
                 getattr(usage, "output_tokens", 0) if usage else 0,
+                cached,
             ),
             input_tokens=input_tokens,
+            cached_tokens=cached,
         )
 
     def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
         return {"type": "function_call_output", "call_id": call.id, "output": result}
+
+    def set_cache_key(self, key: str) -> None:
+        self.cache_key = key
 
 
 # --------------------------------------------------------------------------

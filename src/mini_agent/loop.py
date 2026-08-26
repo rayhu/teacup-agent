@@ -12,6 +12,7 @@
 
 from __future__ import annotations
 
+import hashlib
 import pathlib
 import time
 from datetime import date
@@ -20,6 +21,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable
 
 from mini_agent import context as ctx
+from mini_agent import persist
 from mini_agent import tools as tools_mod
 from mini_agent.memory import Memory, NullMemory
 from mini_agent.model import Model, ToolCall, chat_tool_result
@@ -112,6 +114,14 @@ def finalize(state: AgentState, model: Model, emit: Callable[..., None]) -> None
         return
     state.charge(reply.cost)
     state.messages.extend(reply.items)
+
+    # 收尾轮传的是空工具清单，但模型仍可能硬发工具调用。**每个宣告过的 id 都必须有结果**，
+    # 否则消息协议断裂：下一次请求（包括 --resume 接着跑）会直接 400。
+    for call in reply.tool_calls:
+        state.messages.append(
+            result_item(model, call, "ERROR: 已进入强制收尾阶段，工具不再可用，请直接给出结论。")
+        )
+
     if not reply.text:  # 没榨出东西就别声称抢救成功
         return
     state.answer = reply.text
@@ -249,7 +259,8 @@ def run(
     time_budget: float | None = 600.0,  # 默认 10 分钟；None = 不限
     tool_timeout: float = 30.0,  # 单个工具调用的超时（秒）
     context_limit: int = 30_000,  # 上下文超过这么多 token 就压缩
-    run_dir: str | pathlib.Path | None = None,  # 外置文件放哪；None = runs/<时间戳>
+    run_dir: str | pathlib.Path | None = None,  # 落盘与外置目录；None = 都不做
+    resume: AgentState | None = None,  # 从上次落盘的状态接着跑
     today: str | None = None,
     clock: Callable[[], float] = time.monotonic,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
@@ -273,20 +284,35 @@ def run(
     if recalled := memory.recall():
         system += f"\n\n{recalled}"
 
-    state = AgentState(
-        goal=goal,
-        max_steps=max_steps,
-        remaining_budget=budget,
-        max_tool_calls_per_step=max_tool_calls_per_step,
-        time_budget=time_budget,
-    )
-    started_at = clock()
-    run_dir = pathlib.Path(run_dir) if run_dir else pathlib.Path("runs") / time.strftime("%Y%m%d-%H%M%S")
-    state.messages = [
-        {"role": "system", "content": system},
-        {"role": "user", "content": goal},
-    ]
+    # run_dir=None 表示「不落盘也不外置」—— 评测和单测要的就是这个，别往仓库里拉屎
+    run_dir = pathlib.Path(run_dir) if run_dir else None
+
+    if resume is not None:
+        # 恢复：消息、步数、花费、耗时全部沿用，尤其**不重建 system 消息** ——
+        # 重建会让上下文前缀变化，之前攒下的 prompt cache 全部作废。
+        state = resume
+        started_at = clock() - state.elapsed  # 把已经花掉的时间接上
+    else:
+        state = AgentState(
+            goal=goal,
+            max_steps=max_steps,
+            remaining_budget=budget,
+            max_tool_calls_per_step=max_tool_calls_per_step,
+            time_budget=time_budget,
+        )
+        started_at = clock()
+        state.messages = [
+            {"role": "system", "content": system},
+            {"role": "user", "content": goal},
+        ]
     state.status = "running"
+
+    # prompt cache 的分组键：由**上下文前缀**决定，所以同一套配置的多次运行能互相复用缓存。
+    # 缓存本身是 OpenAI 自动做的，我们要做的只有两件：前缀别变（状态行一律追加在末尾），
+    # 以及告诉它哪些请求该归为一组。注意前缀不足约 1024 token 时根本不会进缓存。
+    set_key = getattr(model, "set_cache_key", None)
+    if set_key:
+        set_key("mini-agent-" + hashlib.sha256(state.messages[0]["content"].encode()).hexdigest()[:16])
 
     def emit(event: str, **data: Any) -> None:
         if on_event:
@@ -333,6 +359,8 @@ def run(
             break
 
         state.charge(reply.cost)
+        state.input_tokens_total += reply.input_tokens
+        state.cached_tokens_total += reply.cached_tokens
         # 真实 token 数优先，拿不到（如脚本模型）就估算
         state.context_tokens = reply.input_tokens or ctx.messages_tokens(state.messages)
 
@@ -350,9 +378,17 @@ def run(
 
         # ---- 4. 并行执行所有工具调用，按原顺序回填（坑 2）------------------
         execute_calls(state, reply.tool_calls, model, emit, tool_timeout, run_dir)
+
+        # ---- 5. 落盘：每步都存，崩了才有得恢复 -----------------------------
+        # elapsed 用本轮开头量的那个值，不再多问一次时钟（省掉一处非确定性）
+        if run_dir is not None:
+            persist.save(state, run_dir)
         # 回到循环顶部，把工具结果一起交回模型 —— 这就是「Agent」和「一次函数调用」的区别
 
     state.elapsed = clock() - started_at
     if state.status != "done" and not state.answer:
         state.answer = f"（未得出最终答案，停止原因：{state.status}）"
+    if run_dir is not None:  # 终态也存一份，复盘和评测都靠它
+        persist.save(state, run_dir)
+        emit("saved", path=str(run_dir / persist.FILENAME))
     return state

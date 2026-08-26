@@ -38,6 +38,7 @@ src/mini_agent/
 ├── context.py  上下文工程   —— 大结果外置到文件 + 超限时压缩早期历史
 ├── tools.py    Tools        —— 函数 + JSON Schema + 安全执行（错误变成工具结果，而不是异常）
 ├── memory.py   Memory       —— 短期 = messages；长期 = memory.json（可被 remember 工具写入）
+├── persist.py  落盘/恢复    —— 每步写 runs/<时间戳>/state.json，可 --resume 接着跑
 ├── loop.py     Control Loop —— LLM → tool call → tool result → LLM
 ├── evals.py    Evals        —— 用脚本模型体检循环本身，零 key 零成本
 └── cli.py                   —— 命令行入口
@@ -50,8 +51,8 @@ docs/roadmap.md              —— 这份实现距离当前生产级别的 agen
 
 | 部件 | 文件 | 当前实现 | 想加强时换成 |
 | --- | --- | --- | --- |
-| Model | `model.py` | Responses API（默认）+ Chat Completions，另有离线脚本模型 | Claude / 本地模型 / 多模型路由 |
-| State | `state.py` | dataclass：步数、预算、时间、状态机、留痕 | 落盘 checkpoint、可恢复运行 |
+| Model | `model.py` | Responses API（默认）+ Chat Completions + 缓存计价，另有离线脚本模型 | Claude / 本地模型 / 多模型路由 |
+| State | `state.py` | dataclass：步数、预算、时间、状态机、留痕；每步落盘可恢复 | 分布式/并发运行 |
 | 上下文 | `context.py` | 大结果外置 + 超限压缩（保护工具调用配对） | 按相关性召回、分层摘要 |
 | Tools | `tools.py` | search_web（**真实联网**，DuckDuckGo 免 key）、calculate、read_file、remember | 浏览器、SQL、代码执行、发邮件 |
 | Control Loop | `loop.py` | 单层循环 + 四道守卫 + 工具并行执行 + 模型调用重试 | 计划-执行分离、子 Agent、人工确认 |
@@ -97,6 +98,38 @@ MINI_AGENT_SEARCH=offline uv run mini-agent                      # 强制离线
 
 同一任务实测（gpt-5-mini）：responses 的上下文里多出一条 `reasoning` 项，会随下一轮请求发回去；
 chat 那边没有对应物。OpenAI 迁移文档称同 prompt 下 SWE-bench 高约 3%。
+
+## 落盘与恢复
+
+每一步都把完整状态写进 `runs/<时间戳>/state.json`（先写临时文件再改名，避免残档）。
+**故意每步一存而不是跑完再存** —— 跑完才存的话，最需要它的那次崩溃恰好什么都没留下。
+
+```bash
+uv run mini-agent --max-steps 1 --run-dir runs/demo "..."   # 触顶停下
+uv run mini-agent --resume runs/demo --max-steps 3          # 从第 2 轮接着跑
+```
+
+恢复时命令行给的上限是「**再给这么多**」（已用掉的步数/时间都记在状态里，
+直接沿用会一恢复就又触顶）。还有一条容易忽略的细节：**恢复时不重建 system 消息** ——
+重建会让上下文前缀变化，之前攒下的 prompt cache 全部作废。有用例逐字盯着这一点。
+
+存下来的东西同时是 roadmap #7（trajectory eval）的输入：完整 messages + 每次工具调用的
+参数与结果 + 花费 + 终态。之前复盘只能对着终端里那 120 个字符猜，现在不用猜了。
+
+## Prompt caching
+
+缓存是 OpenAI 自动做的，我们要做的只有两件事：
+
+1. **别把前缀弄脏**。每轮的 `[运行状态]` 行一律追加在**末尾**，system 消息从头到尾不变；
+   `--resume` 也沿用原来的 system 消息。
+2. **告诉它哪些请求算一组**：用 system prompt 的哈希做 `prompt_cache_key`，
+   所以同一套配置的多次运行能互相复用缓存。
+
+命中的输入 token 只按**十分之一**计价，`estimate_cost()` 会把这部分单独算，
+`state.snapshot()` 里的 `cache_hit` 报命中率。
+
+实测（gpt-5-mini，5 轮 + 真实检索）：`"cache_hit": "38%"`。
+短任务显示 0% 是正常的 —— 前缀不足约 1024 token 时根本不会进缓存。
 
 ## 上下文管理
 
