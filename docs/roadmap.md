@@ -11,6 +11,9 @@ The loop `LLM -> tool call -> tool result -> LLM` is still the core of every age
 2026, and not one line of [`loop.py`](../src/mini_agent/loop.py) is "old technology".
 What was missing is the whole layer around it.
 
+Subsystem-level rationale lives in [design-notes.md](design-notes.md); this file is
+about what is still missing.
+
 This roadmap is ordered by **payoff divided by cost**. Each item says what to change,
 what counts as done, and where to read more. You do not have to do all of it — as a
 learning skeleton the repo is fine as it is, and every layer added makes those 40
