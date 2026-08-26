@@ -358,7 +358,11 @@ naturally, `loop.py` still does not change.
 **Definition of done**: connect to a local MCP server at startup, see its tools in
 `tools.specs()`, and have the model call them normally.
 
-**What shipped**: a new [`mcp_tools.py`](../src/mini_agent/mcp_tools.py) plus `--mcp <config>`.
+**What shipped**: a new [`mcp_tools.py`](../src/mini_agent/mcp_tools.py) plus `--mcp <config>`,
+which defaults to `./mcp.json` when that file exists and to no MCP at all when it does not.
+Off by default because connecting starts third-party processes and inflates the context
+prefix of every request; auto-loaded once the file exists because at that point the file
+*is* the consent.
 `loop.py` did not change, exactly as predicted — MCP's "name + JSON arguments" call shape
 lines up with `tools.execute()`.
 

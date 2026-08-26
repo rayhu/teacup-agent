@@ -12,6 +12,7 @@ dist/
 # Environment variables and secrets (never commit these)
 .env
 .env.local
+mcp.json          # may carry server credentials in "env"; mcp.example.json is the template
 
 # Tool caches
 .mypy_cache/

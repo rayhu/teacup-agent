@@ -60,6 +60,25 @@ def _offline_model() -> model_mod.ScriptedModel:
     )
 
 
+DEFAULT_MCP_CONFIG = "mcp.json"
+
+
+def _resolve_mcp(flag: str | None, root: pathlib.Path | None = None) -> str | None:
+    """Which MCP config to load, if any.
+
+    MCP is off by default because connecting means starting third-party processes and
+    putting their tool schemas into the context prefix of every request. But once a
+    project has an mcp.json, its existence *is* the opt-in — the same convention every
+    other MCP host uses — so it should not need a flag every single run.
+    """
+    if flag == "off":
+        return None
+    if flag:
+        return flag
+    default = (root or pathlib.Path.cwd()) / DEFAULT_MCP_CONFIG
+    return str(default) if default.is_file() else None
+
+
 def _resolve_plan(mode: str, live: bool) -> bool:
     """Whether to build the upfront checklist.
 
@@ -228,9 +247,9 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--mcp",
         default=None,
-        help="path to an MCP config file: "
-        '{"servers": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}}}. '
-        "Each server's tools join the registry as server__tool",
+        help="MCP config file. Defaults to ./mcp.json when that file exists, and to "
+        "no MCP at all when it does not; pass a path to use a different file, or "
+        "off to disable. Each server's tools join the registry as server__tool",
     )
     p.add_argument(
         "--plan",
@@ -282,11 +301,14 @@ def main(argv: list[str] | None = None) -> int:
         print(f"mode {mode} | search {os.environ['MINI_AGENT_SEARCH']} | goal: {args.goal}\n")
 
     hub = None
-    if args.mcp:
+    mcp_config = _resolve_mcp(args.mcp)
+    if mcp_config:
         from mini_agent.mcp_tools import McpHub, load_config
 
+        if not args.quiet and not args.mcp:
+            print(f"  [mcp] using {mcp_config} (pass --mcp off to skip it)")
         hub = McpHub()
-        for server_name, spec in load_config(args.mcp).items():
+        for server_name, spec in load_config(mcp_config).items():
             try:
                 added = hub.connect(server_name, spec)
             except Exception as e:  # one bad server must not sink the run

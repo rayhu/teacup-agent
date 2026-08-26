@@ -151,14 +151,65 @@ it had missed something, because nobody was remembering.** Keeping the list in
 Every tool in `tools.py` had to be written by hand. MCP is how you stop doing that:
 point at a server and its tools appear in the registry.
 
+### Setting it up
+
+MCP is **off unless you configure it**, because connecting means starting third-party
+processes and putting their tool schemas into the context prefix of every request. But
+once a project has an `mcp.json`, that file's existence *is* the opt-in — the same
+convention every other MCP host uses — so it loads automatically from then on.
+
 ```bash
-uv run mini-agent --mcp mcp.example.json --live "read <url> and summarise it"
+cp mcp.example.json mcp.json     # 1. start from the template
+$EDITOR mcp.json                 # 2. keep the servers you want
+uv run mini-agent --live "read <url> and summarise it"   # 3. that is all
 ```
 
 ```
+[mcp] using /path/to/mcp.json (pass --mcp off to skip it)
 [mcp] fetch: 1 tool (0 gated) — fetch__fetch
 [step 1] -> fetch__fetch({"url":"https://modelcontextprotocol.io/specification/versioning"})
 ```
+
+`--mcp <path>` uses a different file; `--mcp off` disables it for one run. `mcp.json` is
+gitignored, because the `env` block is where server credentials go — commit
+`mcp.example.json` instead.
+
+### Writing the config
+
+```jsonc
+{
+  "servers": {
+    "fetch": {
+      "command": "uvx",                        // stdio server: a command we start
+      "args": ["mcp-server-fetch"],
+      "approve": "none"                        // "I trust this server"
+    },
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "tools": ["read_text_file", "list_directory"]   // only these two
+    },
+    "remote": {
+      "url": "https://example.com/mcp",        // or a Streamable HTTP server
+      "env": {"API_TOKEN": "..."}
+    }
+  }
+}
+```
+
+| Key | Meaning |
+| --- | --- |
+| `command` / `args` / `env` / `cwd` | a stdio server: the process to start |
+| `url` | a Streamable HTTP server instead |
+| `tools` | allowlist. **Use it.** Every schema you take sits in the prefix of every request |
+| `approve` | `auto` (default: open only what the server marks read-only), `all`, `none` |
+| `stderr` | `hide` (default) or `show` — legacy servers print a wall of validation errors when probed |
+| `_`-prefixed keys | ignored, so you can write comments in JSON |
+
+Servers live in the [MCP registry](https://github.com/modelcontextprotocol/servers) and in
+the wider ecosystem; `uvx <server>` and `npx -y <package>` are the two usual ways to run
+one. Start with one server and one allowlisted tool — a config that pulls in forty tools
+makes every request slower, more expensive, and less focused.
 
 **Which protocol**: the current revision, **2026-07-28** — the stateless one. It removed
 the `initialize` handshake and the session id, so a tool call is now a single stateless
