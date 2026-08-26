@@ -1,0 +1,28 @@
+# Python
+__pycache__/
+*.py[cod]
+*.egg-info/
+build/
+dist/
+
+# uv / 虚拟环境
+.venv/
+.python-version
+
+# 环境变量与密钥（绝不要提交）
+.env
+.env.local
+
+# 工具缓存
+.mypy_cache/
+.pytest_cache/
+.ruff_cache/
+
+# Agent 运行时产物
+memory.json
+runs/
+
+# 编辑器 / 系统
+.vscode/
+.idea/
+.DS_Store
