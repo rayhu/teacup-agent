@@ -16,7 +16,7 @@ from typing import Any, Callable
 
 from mini_agent import tools as tools_mod
 from mini_agent.memory import Memory, NullMemory
-from mini_agent.model import Model
+from mini_agent.model import Model, ToolCall, chat_tool_result
 from mini_agent.state import AgentState, ToolTrace
 
 SYSTEM_PROMPT = """你是一个会使用工具的助手。
@@ -29,6 +29,12 @@ SYSTEM_PROMPT = """你是一个会使用工具的助手。
 - 遇到值得长期保留的事实（用户偏好、稳定结论），用 remember 工具记下来。
 
 请保持回答简洁，并说明结论依据。"""
+
+
+def result_item(model: Model, call: ToolCall, result: str) -> dict[str, Any]:
+    """问模型后端要工具结果的形状；没实现就退回 Chat Completions 的老形状。"""
+    fn = getattr(model, "tool_result_item", None)
+    return fn(call, result) if fn else chat_tool_result(call, result)
 
 
 def run(
@@ -86,17 +92,19 @@ def run(
 
         state.charge(reply.cost)
 
-        # ---- 2. 先把 assistant 消息写回状态）------------------------
-        state.messages.append(reply.message)
+        # ---- 2. 先把模型这轮的输出写回状态--------------------------
+        # 用 extend 而不是 append：Responses API 一轮可能产出多个条目
+        # （reasoning 项 + 多个 function_call 项），少带一个就丢了推理状态。
+        state.messages.extend(reply.items)
 
-        # ---- 3. 没有工具调用 = 任务完成---------------------------
+        # ---- 3. 没有工具调用 = 任务完成----------------------------
         if not reply.tool_calls:
             state.answer = reply.text
             state.status = "done"
             emit("answer", text=reply.text, step=state.step)
             break
 
-        # ---- 4. 每个 tool_call 都要执行并回填---------------------
+        # ---- 4. 每个 tool_call 都要执行并回填----------------------
         # 限流：只执行前 N 个，但**超出的那些也必须回一条 tool 消息**。
         # 少回一条，下一轮 API 就会因为 tool_call_id 没有对应结果而 400 ——
         # 所以这里是「拒绝执行」，不是「忽略」。
@@ -124,14 +132,9 @@ def run(
                     executed=not throttled,
                 )
             )
-            state.messages.append(
-                {
-                    "role": "tool",
-                    "tool_call_id": call.id,
-                    "name": call.name,
-                    "content": result,
-                }
-            )
+            # 工具结果的形状由模型后端决定：Chat 是 role="tool" 消息，
+            # Responses 是 {"type": "function_call_output", ...}。
+            state.messages.append(result_item(model, call, result))
         # 回到循环顶部，把工具结果一起交回模型 —— 这就是「Agent」和「一次函数调用」的区别
 
     if state.status != "done" and not state.answer:

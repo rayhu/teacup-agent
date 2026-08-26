@@ -16,7 +16,8 @@ uv sync                      # 建环境（自动创建 .venv 与 uv.lock）
 uv run mini-agent            # 离线跑一个 demo：不需要任何 API key，不花钱
 uv run mini-agent "帮我算一下 (3200-450)*0.6，并查一下 CUDA 是什么"
 
-uv run mini-agent --live "研究一下 NVIDIA 的 GPU 策略"   # 真实调用 OpenAI，需要 .env 里的 key
+uv run mini-agent --live "研究一下 NVIDIA 的 GPU 策略"          # 真实调用 OpenAI，需要 .env 里的 key
+uv run mini-agent --live --api chat "..."                       # 想对比旧的 Chat Completions 路径
 
 uv run python -m mini_agent.evals   # 跑评测（离线断言控制循环的正确性）
 uv run pytest                        # 同一批用例 + 工具/记忆单测
@@ -48,7 +49,7 @@ docs/roadmap.md              —— 这份实现距离当前生产级别的 agen
 
 | 部件 | 文件 | 当前实现 | 想加强时换成 |
 | --- | --- | --- | --- |
-| Model | `model.py` | OpenAI Chat Completions；另有脚本模型 | Responses API / Claude / 本地模型 |
+| Model | `model.py` | Responses API（默认）+ Chat Completions，另有离线脚本模型 | Claude / 本地模型 / 多模型路由 |
 | State | `state.py` | dataclass：步数、预算、状态机、留痕 | 落盘 checkpoint、可恢复运行 |
 | Tools | `tools.py` | search_web（**真实联网**，DuckDuckGo 免 key）、calculate、read_file、remember | 浏览器、SQL、代码执行、发邮件 |
 | Control Loop | `loop.py` | 单层循环 + 步数/预算/每轮工具数三道守卫 | 计划-执行分离、子 Agent、人工确认 |
@@ -77,6 +78,23 @@ MINI_AGENT_SEARCH=offline uv run mini-agent                      # 强制离线
 早期版本的离线匹配用 `any()`（查询里出现任一关键词就算命中），结果 "OpenAI strategy" 命中了 "nvidia gpu strategy" 这条语料，
 模型差点拿 NVIDIA 的资料回答 OpenAI 的问题。现在改成 `all()`，并有回归测试盯着。
 同理，`web` 模式下检索失败必须报 `ERROR:` 而不是返回空 —— 否则模型会把「工具坏了」理解成「世界上没有这件事」。
+
+## 两个 OpenAI 后端
+
+| | `--api responses`（默认） | `--api chat` |
+| --- | --- | --- |
+| 工具定义 | 扁平 `{"type":"function","name":...}` | 嵌套 `{"function":{...}}` |
+| 一轮输出 | `output` 列表（reasoning 项 + 多个 function_call） | 单条 assistant 消息 |
+| 调用 id | `call_id` | `id` |
+| 结果回填 | `{"type":"function_call_output",...}` | `role="tool"` 消息 |
+| 推理状态 | **跨工具调用保留** | 每轮丢弃 |
+
+四处差异全封在 [`model.py`](src/mini_agent/model.py) 的两个类里，[`loop.py`](src/mini_agent/loop.py) 的控制流一行没动 ——
+循环里只有两个泛化点：`state.messages.extend(reply.items)`（一轮可能产出多条），
+以及工具结果的形状由后端的 `tool_result_item()` 决定。
+
+同一任务实测（gpt-5-mini）：responses 的上下文里多出一条 `reasoning` 项，会随下一轮请求发回去；
+chat 那边没有对应物。OpenAI 迁移文档称同 prompt 下 SWE-bench 高约 3%。
 
 ## 三道刹车
 
@@ -122,6 +140,6 @@ result = fn(**item.arguments)   # ① arguments 是 JSON 字符串，不是 dict
 ## 它现在处在什么水平
 
 内核不过时（2026 年的 agent 内核依然是这个循环），工程层大约停在 2023 年底 / 2024 年初：
-没有 Responses API、没有 MCP、没有上下文压缩、工具串行执行、evals 只到单测级别。
+已经补上 Responses API（#1），但仍没有 MCP、没有上下文压缩、工具串行执行、evals 只到单测级别。
 
 差什么、为什么差、按什么顺序补 —— 见 [docs/roadmap.md](docs/roadmap.md)。

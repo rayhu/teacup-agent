@@ -29,10 +29,11 @@ class Case:
 
 
 def tool_results_follow_their_call(state: AgentState) -> bool:
-    """每条 role="tool" 消息的 tool_call_id，
-    必须在它**之前**的某条 assistant 消息的 tool_calls 里出现过。"""
+    """每条工具结果的 id，必须在它**之前**的某条「宣告了该调用」的条目里出现过，
+    且每个宣告过的 id 都必须恰好被回填一次。两种 API 形状都认。"""
     announced: set[str] = set()
     for msg in state.messages:
+        # Chat Completions 形状
         if msg.get("role") == "assistant":
             for tc in msg.get("tool_calls") or []:
                 announced.add(tc["id"])
@@ -40,6 +41,13 @@ def tool_results_follow_their_call(state: AgentState) -> bool:
             if msg.get("tool_call_id") not in announced:
                 return False
             announced.discard(msg["tool_call_id"])  # 一个 id 只应被回填一次
+        # Responses 形状
+        elif msg.get("type") == "function_call":
+            announced.add(msg["call_id"])
+        elif msg.get("type") == "function_call_output":
+            if msg.get("call_id") not in announced:
+                return False
+            announced.discard(msg["call_id"])
     return not announced  # 所有宣告过的调用都必须有结果
 
 

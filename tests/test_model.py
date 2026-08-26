@@ -47,7 +47,7 @@ def test_parses_tool_calls_and_cost():
     assert [(c.name, c.arguments) for c in reply.tool_calls] == [
         ("calculate", '{"expression":"1+1"}')
     ]
-    assert reply.message["role"] == "assistant"
+    assert reply.items[0]["role"] == "assistant"
     assert reply.cost == 1.25  # 1M 输入 token × $1.25/M
     assert sent["model"] == "gpt-5"
 

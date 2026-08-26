@@ -65,6 +65,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("goal", nargs="?", default=DEFAULT_GOAL, help="要完成的目标")
     p.add_argument("--live", action="store_true", help="调用真实 OpenAI 模型（需要 API key）")
     p.add_argument("--model", default="gpt-5", help="--live 时使用的模型名")
+    p.add_argument(
+        "--api",
+        choices=["responses", "chat"],
+        default="responses",
+        help="--live 时用哪个 OpenAI 接口。responses（默认）能跨工具调用保住推理状态；chat 是旧路径",
+    )
     p.add_argument("--max-steps", type=int, default=8, help="最大循环轮数")
     p.add_argument(
         "--max-tool-calls",
@@ -86,11 +92,14 @@ def main(argv: list[str] | None = None) -> int:
     # 检索模式与模型解耦：离线 demo 默认也走离线检索，保证「不联网、秒出结果」
     os.environ["MINI_AGENT_SEARCH"] = args.search or ("auto" if args.live else "offline")
 
-    the_model = (
-        model_mod.OpenAIModel(args.model) if args.live else _offline_model()
-    )
+    if not args.live:
+        the_model = _offline_model()
+    elif args.api == "responses":
+        the_model = model_mod.ResponsesModel(args.model)
+    else:
+        the_model = model_mod.OpenAIModel(args.model)
     if not args.quiet:
-        mode = f"live:{args.model}" if args.live else "offline:scripted"
+        mode = f"live:{args.model}/{args.api}" if args.live else "offline:scripted"
         print(f"模式 {mode} ｜ 检索 {os.environ['MINI_AGENT_SEARCH']} ｜ 目标：{args.goal}\n")
 
     state = loop.run(

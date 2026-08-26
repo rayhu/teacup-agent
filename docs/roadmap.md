@@ -1,6 +1,7 @@
 # mini-agent 升级路线图
 
 **基线评估（2026-08-25）**：内核不过时，工程层大约停在 2023 年底 / 2024 年初。
+**进度**：#1 已完成，下一站 #4（上下文压缩）或 #5（并行工具）。
 
 `LLM → tool call → tool result → LLM` 这个循环在 2026 年依然是所有 agent 的内核，
 [`loop.py`](../src/mini_agent/loop.py) 没有一行是「老技术」。差的是外面那一整层生产工程。
@@ -12,7 +13,7 @@
 
 ## P0 · 改一个类就能拿到的收益
 
-### 1. 换用 Responses API
+### 1. 换用 Responses API ✅ 已完成（2026-08-25）
 
 **现状**：[`model.py`](../src/mini_agent/model.py) 的 `OpenAIModel` 走 Chat Completions。
 每轮把模型的推理过程丢掉，只把最终 message 塞回 `messages`。
@@ -38,6 +39,35 @@ code_interpreter 等 hosted tool）只在 Responses 上落地。
 - `tests/test_model.py` 复制一份成 `test_responses_model.py`，用假 client 验证解析；
 - 8 条 evals 全绿（它们只依赖 `Model` 接口，不该受影响）；
 - 两个后端可通过 `--api {chat,responses}` 切换，同一任务跑通。
+
+**实际落地情况**：
+
+- 新增 `ResponsesModel`（[`model.py`](../src/mini_agent/model.py)），与 `OpenAIModel` 并存，
+  用 `--api {responses,chat}` 切换，**默认 responses**。
+- `loop.py` 的循环结构没变，但抽了两处形状差异出去：
+  - `Reply.message` → `Reply.items`（一轮可能产出多条：reasoning + 多个 function_call），
+    循环里改成 `state.messages.extend(reply.items)`；
+  - 工具结果的形状交给模型后端决定（`Model.tool_result_item`），
+    Chat 是 `role="tool"`，Responses 是 `function_call_output`。
+- `evals.py` 的顺序不变量 `tool_results_follow_their_call()` 现在两种形状都认。
+- 新增 `tests/test_responses_model.py`：假 client 验证解析 + 整条循环跑 Responses 形状。
+
+**实测证据**（gpt-5-mini，同一任务两个后端各跑一次，共花费约 $0.002）：
+
+```
+### responses                    ### chat
+  0. system                        0. system
+  1. user                          1. user
+  2. reasoning      ← 推理项       2. assistant (tool_calls=1)
+  3. function_call                 3. tool
+  4. function_call_output          4. assistant
+  5. message
+```
+
+第 2 条 `reasoning` 会随下一轮 input 一起发回去 —— 这就是收益的来源，Chat 那边没有对应物。
+
+**回头看**：预判的设计成本（`Reply.message` 的形状假设）确实是唯一的改动点，
+`loop.py` 的控制流一行没动。那层 `Model` 抽象站住了。
 
 **参考**：<https://developers.openai.com/api/docs/guides/migrate-to-responses>
 

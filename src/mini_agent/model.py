@@ -25,9 +25,14 @@ class ToolCall:
 
 @dataclass
 class Reply:
-    """模型一轮输出的归一化表示。"""
+    """模型一轮输出的归一化表示。
 
-    message: dict[str, Any]  # 原样塞回 messages 的 assistant 消息
+    items 是「要原样追加回上下文的条目」，而不是「一条 assistant 消息」——
+    Chat Completions 一轮只产出 1 条；Responses 一轮可能产出多条
+    （reasoning 项 + 若干 function_call 项），把它们原样带回去正是保住推理状态的关键。
+    """
+
+    items: list[dict[str, Any]]
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
     cost: float = 0.0  # 这一轮花掉的美元
@@ -37,6 +42,25 @@ class Model(Protocol):
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> Reply: ...
+
+    def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
+        """工具结果要以什么形状塞回上下文 —— 两个 API 这里的形状完全不同。"""
+        ...
+
+
+def chat_tool_result(call: ToolCall, result: str) -> dict[str, Any]:
+    """Chat Completions 的工具结果形状。"""
+    return {
+        "role": "tool",
+        "tool_call_id": call.id,
+        "name": call.name,
+        "content": result,
+    }
+
+
+def estimate_cost(model: str, input_tokens: int, output_tokens: int) -> float:
+    pin, pout = PRICES.get(model, _DEFAULT_PRICE)
+    return (input_tokens * pin + output_tokens * pout) / 1_000_000
 
 
 # --------------------------------------------------------------------------
@@ -85,21 +109,117 @@ class OpenAIModel:
             ToolCall(id=tc.id, name=tc.function.name, arguments=tc.function.arguments)
             for tc in (msg.tool_calls or [])
         ]
+        usage = getattr(resp, "usage", None)
         return Reply(
-            message=msg.model_dump(exclude_none=True),
+            items=[msg.model_dump(exclude_none=True)],
             text=msg.content or "",
             tool_calls=calls,
-            cost=self._cost(getattr(resp, "usage", None)),
+            cost=estimate_cost(
+                self.model,
+                getattr(usage, "prompt_tokens", 0) if usage else 0,
+                getattr(usage, "completion_tokens", 0) if usage else 0,
+            ),
         )
 
-    def _cost(self, usage: Any) -> float:
-        if usage is None:
-            return 0.0
-        pin, pout = PRICES.get(self.model, _DEFAULT_PRICE)
-        return (
-            getattr(usage, "prompt_tokens", 0) * pin
-            + getattr(usage, "completion_tokens", 0) * pout
-        ) / 1_000_000
+    def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
+        return chat_tool_result(call, result)
+
+
+class ResponsesModel:
+    """Responses API —— 面向推理模型（gpt-5 系列）的推荐路径。
+
+    和 Chat Completions 的四处形状差异，全部封在这个类里，loop.py 一行都不用改：
+
+    1. 工具定义是**扁平**的：{"type": "function", "name": ...}，没有嵌套的 "function" 层；
+    2. 输出是 resp.output 列表（可能含 reasoning 项 + 多个 function_call 项），
+       而不是单条 message；
+    3. 工具调用的 id 字段叫 call_id（不是 id）；
+    4. 工具结果回传形状是 {"type": "function_call_output", "call_id", "output"}，
+       而不是 role="tool" 的消息。
+
+    为什么值得换：把 output 里的 reasoning 项**原样带回下一轮 input**，
+    模型跨工具调用的推理状态就不会丢。Chat Completions 每轮都会把它丢掉。
+    OpenAI 的迁移文档称同 prompt 下 SWE-bench 高约 3%。
+
+    状态管理这里用「无状态重发」：每轮把完整上下文重新发一遍（含上一轮的 reasoning 项）。
+    另一条路是 previous_response_id + 只发增量，更省钱，等做 #2 prompt caching 时再说。
+    """
+
+    def __init__(
+        self,
+        model: str = "gpt-5",
+        client: Any = None,
+        reasoning_effort: str | None = None,
+    ):
+        self.model = model
+        self.reasoning_effort = reasoning_effort
+        if client is None:
+            from openai import OpenAI  # 延迟导入：离线运行不需要装 openai
+
+            if not os.getenv("OPENAI_API_KEY"):
+                raise RuntimeError(
+                    "缺少 OPENAI_API_KEY。请在 .env 里配置，或改用离线模式（去掉 --live）。"
+                )
+            client = OpenAI()
+        self.client = client
+
+    @staticmethod
+    def _flatten_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        """把 Chat 形状的工具定义摊平成 Responses 形状。"""
+        flat = []
+        for t in tools:
+            fn = t.get("function", t)
+            flat.append(
+                {
+                    "type": "function",
+                    "name": fn["name"],
+                    "description": fn.get("description", ""),
+                    "parameters": fn["parameters"],
+                }
+            )
+        return flat
+
+    def complete(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> Reply:
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "input": messages,
+            "tools": self._flatten_tools(tools),
+        }
+        if self.reasoning_effort:
+            kwargs["reasoning"] = {"effort": self.reasoning_effort}
+
+        resp = self.client.responses.create(**kwargs)
+
+        items: list[dict[str, Any]] = []
+        calls: list[ToolCall] = []
+        for item in resp.output:
+            data = item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else dict(item)
+            items.append(data)  # reasoning 项也要原样带回去 —— 这就是收益来源
+            if data.get("type") == "function_call":
+                calls.append(
+                    ToolCall(
+                        id=data["call_id"],
+                        name=data["name"],
+                        arguments=data.get("arguments", "{}"),
+                    )
+                )
+
+        usage = getattr(resp, "usage", None)
+        return Reply(
+            items=items,
+            text=getattr(resp, "output_text", "") or "",
+            tool_calls=calls,
+            cost=estimate_cost(
+                self.model,
+                getattr(usage, "input_tokens", 0) if usage else 0,
+                getattr(usage, "output_tokens", 0) if usage else 0,
+            ),
+        )
+
+    def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
+        return {"type": "function_call_output", "call_id": call.id, "output": result}
 
 
 # --------------------------------------------------------------------------
@@ -109,7 +229,7 @@ class OpenAIModel:
 
 def assistant_says(text: str, cost: float = 0.001) -> Reply:
     """构造一条「直接回答、不调工具」的模型输出。"""
-    return Reply(message={"role": "assistant", "content": text}, text=text, cost=cost)
+    return Reply(items=[{"role": "assistant", "content": text}], text=text, cost=cost)
 
 
 def assistant_calls(calls: list[tuple[str, Any]], cost: float = 0.001) -> Reply:
@@ -133,7 +253,7 @@ def assistant_calls(calls: list[tuple[str, Any]], cost: float = 0.001) -> Reply:
             for tc in tool_calls
         ],
     }
-    return Reply(message=message, tool_calls=tool_calls, cost=cost)
+    return Reply(items=[message], tool_calls=tool_calls, cost=cost)
 
 
 class ScriptedModel:
@@ -151,3 +271,6 @@ class ScriptedModel:
         if self.script:
             return self.script.pop(0)
         return assistant_says(self.fallback)
+
+    def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
+        return chat_tool_result(call, result)
