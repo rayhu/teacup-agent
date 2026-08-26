@@ -17,6 +17,7 @@ from typing import Any
 from dotenv import load_dotenv
 
 from mini_agent import loop, model as model_mod, persist
+from mini_agent import tools as tools_mod
 from mini_agent.memory import Memory
 
 DEFAULT_GOAL = "Look up NVIDIA's GPU strategy, and compute 1200 * 0.85 / 3"
@@ -225,6 +226,13 @@ def main(argv: list[str] | None = None) -> int:
         help="continue from a runs/<timestamp>/state.json (or the directory holding it)",
     )
     p.add_argument(
+        "--mcp",
+        default=None,
+        help="path to an MCP config file: "
+        '{"servers": {"fetch": {"command": "uvx", "args": ["mcp-server-fetch"]}}}. '
+        "Each server's tools join the registry as server__tool",
+    )
+    p.add_argument(
         "--plan",
         choices=["auto", "on", "off"],
         default="auto",
@@ -273,7 +281,44 @@ def main(argv: list[str] | None = None) -> int:
         mode = f"live:{args.model}/{args.api}" if args.live else "offline:scripted"
         print(f"mode {mode} | search {os.environ['MINI_AGENT_SEARCH']} | goal: {args.goal}\n")
 
-    state = loop.run(
+    hub = None
+    if args.mcp:
+        from mini_agent.mcp_tools import McpHub, load_config
+
+        hub = McpHub()
+        for server_name, spec in load_config(args.mcp).items():
+            try:
+                added = hub.connect(server_name, spec)
+            except Exception as e:  # one bad server must not sink the run
+                print(f"  [mcp] {server_name} failed to connect: {type(e).__name__}: {e}")
+                continue
+            if not args.quiet:
+                gated = sum(tools_mod.REGISTRY[n].requires_approval for n in added)
+                plural = "tool" if len(added) == 1 else "tools"
+                print(
+                    f"  [mcp] {server_name}: {len(added)} {plural} "
+                    f"({gated} gated) — {', '.join(added)}"
+                )
+
+    try:
+        state = _run_agent(args, the_model, run_dir, resumed)
+    finally:
+        if hub is not None:
+            hub.close()
+
+    print(f"\nAnswer: {state.answer}")
+    if run_dir is not None and not args.quiet:
+        print(
+            f"Trajectory saved to {pathlib.Path(run_dir) / persist.FILENAME} "
+            "(resume it with --resume)"
+        )
+    if not args.quiet:
+        print(f"State: {json.dumps(state.snapshot(), ensure_ascii=False)}")
+    return 0 if state.status == "done" else 1
+
+
+def _run_agent(args, the_model, run_dir, resumed):
+    return loop.run(
         goal=args.goal,
         model=the_model,
         memory=Memory(args.memory),
@@ -289,16 +334,6 @@ def main(argv: list[str] | None = None) -> int:
         plan=_resolve_plan(args.plan, args.live),
         on_event=_printer(args.quiet),
     )
-
-    print(f"\nAnswer: {state.answer}")
-    if run_dir is not None and not args.quiet:
-        print(
-            f"Trajectory saved to {pathlib.Path(run_dir) / persist.FILENAME} "
-            "(resume it with --resume)"
-        )
-    if not args.quiet:
-        print(f"State: {json.dumps(state.snapshot(), ensure_ascii=False)}")
-    return 0 if state.status == "done" else 1
 
 
 if __name__ == "__main__":

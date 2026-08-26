@@ -2,10 +2,10 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#8 are all done (except the fine-grained permissions part of #6).
+**Progress**: #1-#9 are done (except the fine-grained permissions part of #6).
 Five items that were never on the roadmap were added after reviewing real runs
 (see "Field patches" at the end).
-Next up: #9 (MCP) — opening up the tool ecosystem.
+Next up: #11 (a better search backend), then #10 (subagents).
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/mini_agent/loop.py) is "old technology".
@@ -339,7 +339,7 @@ only surfaces once you actually implement resume.
 
 ## P3 - opening up the ecosystem
 
-### 9. MCP support
+### 9. MCP support — DONE (2026-08-26)
 
 **Now**: tools are hardcoded Python functions, and adding one means editing
 [`tools.py`](../src/mini_agent/tools.py).
@@ -358,7 +358,44 @@ naturally, `loop.py` still does not change.
 **Definition of done**: connect to a local MCP server at startup, see its tools in
 `tools.specs()`, and have the model call them normally.
 
-**Reference**: <https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/>
+**What shipped**: a new [`mcp_tools.py`](../src/mini_agent/mcp_tools.py) plus `--mcp <config>`.
+`loop.py` did not change, exactly as predicted — MCP's "name + JSON arguments" call shape
+lines up with `tools.execute()`.
+
+**Which protocol revision**: **2026-07-28**, the stateless one. It removed the
+`initialize`/`notifications/initialized` handshake and the `Mcp-Session-Id` header, so a
+tool call is one stateless RPC; the connection-lifecycle code that used to dominate an MCP
+client is simply absent. We use the official Python SDK v2, which also speaks the earlier
+handshake-based revisions — verified against the real `mcp-server-fetch`, which is still
+on the old protocol: the SDK probed with `server/discover`, the server rejected it, the
+client fell back, and the call succeeded.
+
+**Design decisions**:
+- Tools register as `server__tool`, sanitized — the spec warns that aggregating clients
+  will hit name collisions, and OpenAI function names allow only `[A-Za-z0-9_-]`.
+- `annotations.read_only_hint` opens a tool; anything else is gated, **including servers
+  that annotate nothing** (the common case). The spec says annotations are untrusted
+  unless the server is, so `"approve": "none"` is how a config *states* trust.
+- A per-server `tools` allowlist, because every schema sits in the context prefix of
+  every request.
+- Server stderr is hidden by default: legacy servers print a wall of pydantic validation
+  errors when probed with `server/discover`. `"stderr": "show"` when a server will not
+  start.
+- One background event loop owns every session, so the SDK's async API stays invisible to
+  the rest of the codebase.
+- A server that fails to connect is reported and skipped, never fatal.
+
+**Verified**: 20 tests against a real MCP server over stdio
+([`tests/fixtures/demo_mcp_server.py`](../tests/fixtures/demo_mcp_server.py), no network),
+plus a live run where gpt-5-mini used `fetch__fetch` to read the spec page and answer
+with a citation.
+
+**Left open**: resources, prompts, subscriptions, tasks; elicitation (a
+`resultType: "input_required"` result comes back as an `ERROR:` the model can route
+around); remote servers over Streamable HTTP work by URL but OAuth is untested.
+
+**Reference**: <https://modelcontextprotocol.io/specification/2026-07-28/changelog> ·
+<https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/>
 
 ---
 

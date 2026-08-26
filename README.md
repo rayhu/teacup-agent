@@ -42,6 +42,7 @@ src/mini_agent/
 │                            tool results, not exceptions)
 ├── memory.py   Memory       short term = messages; long term = memory.json
 ├── plan.py     checklist    decompose the goal into action items, hold the run to them
+├── mcp_tools.py MCP         borrow tools from MCP servers instead of writing them
 ├── persist.py  persistence  writes runs/<timestamp>/state.json every step, --resume
 ├── loop.py     Control Loop LLM -> tool call -> tool result -> LLM
 ├── evals.py    Evals        health check on the loop with a scripted model, free
@@ -59,7 +60,7 @@ docs/roadmap.md              what this is still missing, and in what order to ad
 | Model | `model.py` | Responses API (default) + Chat Completions + cache-aware pricing, plus an offline scripted model | Claude / local models / multi-model routing |
 | State | `state.py` | dataclass: steps, budget, time, status machine, trace; saved every step and resumable | distributed or concurrent runs |
 | Context | `context.py` | externalize big results + compact over the limit (protecting call/result pairing) | relevance-based recall, hierarchical summaries |
-| Tools | `tools.py` | search_web (**real network**), calculate, read_file, remember, send_email (gated) | browser, SQL, code execution, MCP |
+| Tools | `tools.py` + `mcp_tools.py` | five built-ins plus anything an MCP server exposes | more servers |
 | Control Loop | `loop.py` | one loop + four brakes + parallel tools + retries + a completion check | subagents, delegated planning |
 | Plan | `plan.py` | goal decomposed into a checklist the loop enforces | hierarchical plans, replanning mid-run |
 | Memory | `memory.py` | JSON file + dedupe + keep the last N | vector store, summarization, relevance recall |
@@ -122,7 +123,9 @@ first half. A real run did exactly that: excellent research, no email, `status: 
 and it stopped at turn 6 of 14 with 97% of the budget unspent. It was never a resource
 problem — **nothing was keeping track of the second half of the request**.
 
-So the goal is decomposed once at the start (one extra model call, `--plan off` to skip it) into 1-5 action items, and from then on:
+So the goal is decomposed once at the start into 1-5 action items — one extra model
+call, controlled by `--plan {auto,on,off}`, where `auto` (the default) means on for
+`--live` and off for the offline demo, which has nothing to plan:
 
 ```
 [checklist] 1. research the Model Context Protocol | 2. write a summary | 3. email it to a@b.c
@@ -142,6 +145,46 @@ So the goal is decomposed once at the start (one extra model call, `--plan off` 
 This is the same lesson as the run-status line, one level up: **the model did not know
 it had missed something, because nobody was remembering.** Keeping the list in
 `AgentState` is what lets the loop remember on its behalf.
+
+## MCP
+
+Every tool in `tools.py` had to be written by hand. MCP is how you stop doing that:
+point at a server and its tools appear in the registry.
+
+```bash
+uv run mini-agent --mcp mcp.example.json --live "read <url> and summarise it"
+```
+
+```
+[mcp] fetch: 1 tool (0 gated) — fetch__fetch
+[step 1] -> fetch__fetch({"url":"https://modelcontextprotocol.io/specification/versioning"})
+```
+
+**Which protocol**: the current revision, **2026-07-28** — the stateless one. It removed
+the `initialize` handshake and the session id, so a tool call is now a single stateless
+RPC and this integration is a fraction of what it would have cost a year ago. We use the
+official Python SDK (v2), which also speaks the older revisions, so servers that have not
+migrated still work — verified against `mcp-server-fetch`, which is still handshake-based.
+
+Four details carry the weight:
+
+| | |
+| --- | --- |
+| **Names are namespaced** | Two servers can each expose `search`, so tools land as `server__tool` (also sanitized: OpenAI function names allow only `[A-Za-z0-9_-]`, MCP allows dots) |
+| **Errors keep the discipline** | MCP separates protocol errors from *tool execution errors* (`isError: true`) and says clients should hand the latter to the model to self-correct. That is what `execute()` already did, so both become `ERROR: ...` |
+| **Approval is derived, and defaults to gated** | `annotations.read_only_hint` opens a tool; everything else needs approval — including a server that annotates nothing, which is the common case. The spec says annotations are untrusted unless the server is, so `"approve": "none"` is how you *state* trust rather than have us infer it |
+| **Async lives in one place** | The SDK is async, our tools are sync functions in a thread pool, so one background event loop owns every session and nothing else in the codebase learns about asyncio |
+
+Per-server config keys: `tools` (allowlist — every schema costs prefix tokens on every
+request), `approve` (`auto` / `all` / `none`), `stderr` (`hide` / `show` — legacy servers
+print a wall of validation errors when probed with `server/discover`).
+
+A server that fails to connect prints why and the run continues without it.
+
+**Not implemented**: resources, prompts, subscriptions, tasks, and everything the
+2026-07-28 revision deprecated (roots, sampling, logging). A `resultType: "input_required"`
+result — the multi-round-trip pattern — comes back as an `ERROR:` the model can route
+around, since we do not do elicitation.
 
 ## The human-approval gate
 
@@ -407,8 +450,8 @@ agent. The difference is the 40 lines in `loop.py`.
 The core is not dated: an agent in 2026 is still this loop. The engineering layer has
 come a long way from where it started — Responses API, prompt caching, context
 management, parallel execution, persistence and resume, an approval gate and
-trajectory eval are all in. What is still missing: MCP, subagents with isolated
-context, and a serious search backend.
+trajectory eval are all in. What is still missing: subagents with isolated context,
+and a serious search backend.
 
 What is missing, why it matters, and in what order to add it — see
 [docs/roadmap.md](docs/roadmap.md).

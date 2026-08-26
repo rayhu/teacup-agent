@@ -1,0 +1,16 @@
+{
+  "servers": {
+    "fetch": {
+      "command": "uvx",
+      "args": ["mcp-server-fetch"],
+      "approve": "none",
+      "_comment": "Fetching a URL is read-only, but this server predates the read-only annotation, so the trust is stated here rather than inferred."
+    },
+    "files": {
+      "command": "npx",
+      "args": ["-y", "@modelcontextprotocol/server-filesystem", "."],
+      "tools": ["read_text_file", "list_directory"],
+      "_comment": "Allowlist: every tool schema costs prefix tokens on every request. Needs npx."
+    }
+  }
+}
