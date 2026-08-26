@@ -1,4 +1,4 @@
-"""单测一律走离线检索：确定性、零网络、跑得快。"""
+"""Unit tests always search offline: deterministic, network-free and fast."""
 
 import pytest
 

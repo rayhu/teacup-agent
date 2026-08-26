@@ -1,301 +1,415 @@
 # mini-agent
 
-一个**最小但五脏俱全**的 AI Agent，用来把这个公式落成能跑的代码：
+A **minimal AI agent that still has all the organs** — one formula turned into code
+you can actually run:
 
 ```
 Agent = Model + State + Tools + Control Loop + Memory/Evals
 ```
 
-每个部件都是真的在工作（没有空壳模块），但实现都刻意保持在几十行，方便逐个替换成真货。
+Every part really does its job (no placeholder modules), and every implementation is
+deliberately kept to a few dozen lines so you can replace them one at a time.
 
-## 快速开始
-
-```bash
-uv sync                      # 建环境（自动创建 .venv 与 uv.lock）
-
-uv run mini-agent            # 离线跑一个 demo：不需要任何 API key，不花钱
-uv run mini-agent "帮我算一下 (3200-450)*0.6，并查一下 CUDA 是什么"
-
-uv run mini-agent --live "研究一下 NVIDIA 的 GPU 策略"          # 真实调用 OpenAI，需要 .env 里的 key
-uv run mini-agent --live --api chat "..."                       # 想对比旧的 Chat Completions 路径
-
-uv run python -m mini_agent.evals   # 跑评测（离线断言控制循环的正确性）
-uv run pytest                        # 同一批用例 + 工具/记忆单测
-```
-
-`--live` 需要 `.env`：
+## Quick start
 
 ```bash
-cp .env.example .env   # 然后填入 OPENAI_API_KEY
+uv sync                      # create the environment (.venv + uv.lock)
+
+uv run mini-agent            # offline demo: no API key, no cost
+uv run mini-agent "compute (3200-450)*0.6 and tell me what CUDA is"
+
+uv run mini-agent --live "research NVIDIA's GPU strategy"   # real OpenAI call, needs .env
+uv run mini-agent --live --api chat "..."                   # compare the older Chat Completions path
+
+uv run python -m mini_agent.evals   # evals: offline assertions about the control loop
+uv run pytest                       # the same cases + tool/memory unit tests
 ```
 
-## 目录结构
+`--live` needs a `.env`:
+
+```bash
+cp .env.example .env   # then fill in OPENAI_API_KEY
+```
+
+## Layout
 
 ```
 src/mini_agent/
-├── model.py    Model        —— 唯一会思考的部件。OpenAIModel（真实）/ ScriptedModel（离线剧本）
-├── state.py    State        —— goal / messages / step / remaining_budget / status + 工具留痕
-├── context.py  上下文工程   —— 大结果外置到文件 + 超限时压缩早期历史
-├── tools.py    Tools        —— 函数 + JSON Schema + 安全执行（错误变成工具结果，而不是异常）
-├── memory.py   Memory       —— 短期 = messages；长期 = memory.json（可被 remember 工具写入）
-├── persist.py  落盘/恢复    —— 每步写 runs/<时间戳>/state.json，可 --resume 接着跑
-├── loop.py     Control Loop —— LLM → tool call → tool result → LLM
-├── evals.py    Evals        —— 用脚本模型体检循环本身，零 key 零成本
-├── trajectory.py  轨迹评测   —— 给真实运行打分：机械指标 + LLM 评委
-└── cli.py                   —— 命令行入口
-tests/                       —— pytest：evals 用例 + 工具/记忆单测
-NOTES.md                     —— 你原来的学习笔记，逐段标注了对应实现
-docs/roadmap.md              —— 这份实现距离当前生产级别的 agent 还差什么，以及按什么顺序补
+├── model.py    Model        the only part that thinks. Responses / Chat / scripted
+├── state.py    State        goal / messages / step / budget / status + tool trace
+├── context.py  context work externalize big results, compact history over the limit
+├── tools.py    Tools        function + JSON Schema + safe execution (errors become
+│                            tool results, not exceptions)
+├── memory.py   Memory       short term = messages; long term = memory.json
+├── plan.py     checklist    decompose the goal into action items, hold the run to them
+├── persist.py  persistence  writes runs/<timestamp>/state.json every step, --resume
+├── loop.py     Control Loop LLM -> tool call -> tool result -> LLM
+├── evals.py    Evals        health check on the loop with a scripted model, free
+├── trajectory.py            score a real run: mechanical metrics + an LLM judge
+└── cli.py                   command-line entry point
+tests/                       pytest: the eval cases + tool/memory/context unit tests
+NOTES.md                     the original study notes, annotated with what implements what
+docs/roadmap.md              what this is still missing, and in what order to add it
 ```
 
-## 五个部件都做了什么
+## What each of the five parts does
 
-| 部件 | 文件 | 当前实现 | 想加强时换成 |
+| Part | File | Today | When you outgrow it |
 | --- | --- | --- | --- |
-| Model | `model.py` | Responses API（默认）+ Chat Completions + 缓存计价，另有离线脚本模型 | Claude / 本地模型 / 多模型路由 |
-| State | `state.py` | dataclass：步数、预算、时间、状态机、留痕；每步落盘可恢复 | 分布式/并发运行 |
-| 上下文 | `context.py` | 大结果外置 + 超限压缩（保护工具调用配对） | 按相关性召回、分层摘要 |
-| Tools | `tools.py` | search_web（**真实联网**）、calculate、read_file、remember、send_email（需批准） | 浏览器、SQL、代码执行、MCP |
-| Control Loop | `loop.py` | 单层循环 + 四道守卫 + 工具并行执行 + 模型调用重试 | 计划-执行分离、子 Agent、人工确认 |
-| Memory | `memory.py` | JSON 文件 + 去重 + 只留最近 N 条 | 向量库、摘要压缩、按相关性召回 |
-| Evals | `evals.py` + `trajectory.py` | 13 条离线协议用例 + 真实轨迹打分 | 固定任务集、跨版本回归对比 |
+| Model | `model.py` | Responses API (default) + Chat Completions + cache-aware pricing, plus an offline scripted model | Claude / local models / multi-model routing |
+| State | `state.py` | dataclass: steps, budget, time, status machine, trace; saved every step and resumable | distributed or concurrent runs |
+| Context | `context.py` | externalize big results + compact over the limit (protecting call/result pairing) | relevance-based recall, hierarchical summaries |
+| Tools | `tools.py` | search_web (**real network**), calculate, read_file, remember, send_email (gated) | browser, SQL, code execution, MCP |
+| Control Loop | `loop.py` | one loop + four brakes + parallel tools + retries + a completion check | subagents, delegated planning |
+| Plan | `plan.py` | goal decomposed into a checklist the loop enforces | hierarchical plans, replanning mid-run |
+| Memory | `memory.py` | JSON file + dedupe + keep the last N | vector store, summarization, relevance recall |
+| Evals | `evals.py` + `trajectory.py` | 15 offline protocol cases + real-trajectory scoring | fixed task suites, cross-version regression |
 
-## search_web 的三种模式
+## The three search_web modes
 
-联网检索走 [`ddgs`](https://pypi.org/project/ddgs/)（DuckDuckGo），**不需要任何 API key**，`uv sync` 时已随依赖装好。
-用环境变量 `MINI_AGENT_SEARCH` 切换：
+Web search goes through [`ddgs`](https://pypi.org/project/ddgs/) (DuckDuckGo) and
+needs **no API key**; `uv sync` installs it. Switch with the `MINI_AGENT_SEARCH`
+environment variable:
 
-| 值 | 行为 | 用途 |
+| Value | Behaviour | Use for |
 | --- | --- | --- |
-| `auto`（默认） | 联网检索；失败则退回本地语料并注明原因 | 日常使用 |
-| `web` | 只用联网检索；失败返回 `ERROR:` | 不允许拿离线语料充数的场景 |
-| `offline` | 只查本地 3 条语料，零网络请求 | 评测、单测、演示 |
+| `auto` (default) | search the web; on failure fall back to the local corpus and say why | everyday use |
+| `web` | web only; on failure return `ERROR:` | when offline material must not stand in |
+| `offline` | the three local corpus entries only, zero network calls | evals, unit tests, demos |
 
-命令行用 `--search` 覆盖；默认值跟运行模式绑定：`--live` 时是 `auto`（真联网），离线 demo 是 `offline`（零网络、秒出）。
+`--search` overrides it on the command line. The default follows the run mode:
+`auto` (real network) with `--live`, `offline` (network-free and instant) for the
+offline demo.
 
 ```bash
-uv run mini-agent --live "研究 OpenAI 最近半年的融资和竞争格局"   # 默认就会真联网
-MINI_AGENT_SEARCH=offline uv run mini-agent                      # 强制离线
+uv run mini-agent --live "research OpenAI's funding and competition"  # really goes online
+MINI_AGENT_SEARCH=offline uv run mini-agent                           # force offline
 ```
 
-**一条设计原则：宁可返回「没找到」，也不能返回错的东西。**
-早期版本的离线匹配用 `any()`（查询里出现任一关键词就算命中），结果 "OpenAI strategy" 命中了 "nvidia gpu strategy" 这条语料，
-模型差点拿 NVIDIA 的资料回答 OpenAI 的问题。现在改成 `all()`，并有回归测试盯着。
-同理，`web` 模式下检索失败必须报 `ERROR:` 而不是返回空 —— 否则模型会把「工具坏了」理解成「世界上没有这件事」。
+**A design rule: returning "nothing found" always beats returning the wrong thing.**
+An early version matched the offline corpus with `any()` (any keyword in the query
+counted as a hit), so "OpenAI strategy" matched the "nvidia gpu strategy" entry and
+the model nearly answered an OpenAI question with NVIDIA material. It uses `all()`
+now, with a regression test watching it. For the same reason, a failed search in
+`web` mode must return `ERROR:` rather than nothing — otherwise the model reads "the
+tool is broken" as "this does not exist in the world".
 
-## 两个 OpenAI 后端
+## Two OpenAI backends
 
-| | `--api responses`（默认） | `--api chat` |
+| | `--api responses` (default) | `--api chat` |
 | --- | --- | --- |
-| 工具定义 | 扁平 `{"type":"function","name":...}` | 嵌套 `{"function":{...}}` |
-| 一轮输出 | `output` 列表（reasoning 项 + 多个 function_call） | 单条 assistant 消息 |
-| 调用 id | `call_id` | `id` |
-| 结果回填 | `{"type":"function_call_output",...}` | `role="tool"` 消息 |
-| 推理状态 | **跨工具调用保留** | 每轮丢弃 |
+| Tool definitions | flat `{"type":"function","name":...}` | nested `{"function":{...}}` |
+| One turn of output | an `output` list (reasoning item + several function_calls) | a single assistant message |
+| Call id | `call_id` | `id` |
+| Result shape | `{"type":"function_call_output",...}` | a `role="tool"` message |
+| Reasoning state | **preserved across tool calls** | discarded every turn |
 
-四处差异全封在 [`model.py`](src/mini_agent/model.py) 的两个类里，[`loop.py`](src/mini_agent/loop.py) 的控制流一行没动 ——
-循环里只有两个泛化点：`state.messages.extend(reply.items)`（一轮可能产出多条），
-以及工具结果的形状由后端的 `tool_result_item()` 决定。
+All four differences are sealed inside the two classes in
+[`model.py`](src/mini_agent/model.py); the control flow in
+[`loop.py`](src/mini_agent/loop.py) did not move. The loop only needed two
+generalizations: `state.messages.extend(reply.items)` (a turn can produce several
+entries) and letting the backend's `tool_result_item()` decide the result shape.
 
-同一任务实测（gpt-5-mini）：responses 的上下文里多出一条 `reasoning` 项，会随下一轮请求发回去；
-chat 那边没有对应物。OpenAI 迁移文档称同 prompt 下 SWE-bench 高约 3%。
+Measured on the same task (gpt-5-mini): the responses context carries an extra
+`reasoning` entry that goes back out with the next request; the chat side has no
+equivalent. OpenAI's migration guide reports roughly +3% on SWE-bench with the same
+prompt.
 
-## 人机确认门
+## The checklist
 
-只读工具直接跑；**有外部副作用、无法撤销**的工具（示例里是 `send_email`）执行前要过一道门：
+Ask for "research X, **then email me the result**" and an agent will happily do the
+first half. A real run did exactly that: excellent research, no email, `status: done`,
+and it stopped at turn 6 of 14 with 97% of the budget unspent. It was never a resource
+problem — **nothing was keeping track of the second half of the request**.
+
+So the goal is decomposed once at the start (one extra model call, `--no-plan` to skip
+it) into 1-5 action items, and from then on:
+
+```
+[checklist] 1. research the Model Context Protocol | 2. write a summary | 3. email it to a@b.c
+```
+
+- Every turn's `[run status]` line carries the checklist with `[x]` / `[ ]` marks, so
+  the open items stay in front of the model.
+- The model ticks items off with the `update_todo` tool — `done`, or `blocked` with a
+  reason. Blocked counts as settled: it stops being outstanding but keeps the reason,
+  so the final answer can say what was left and why.
+- **The loop refuses to finish while an item is untouched.** If the model stops calling
+  tools with items still open, it gets one push-back (`[completion check]`) listing
+  them, and then the answer stands either way. Once, never a loop.
+- The forced wrap-up turn names the unfinished items too, so a run that ran out of
+  resources says plainly what it never did.
+
+This is the same lesson as the run-status line, one level up: **the model did not know
+it had missed something, because nobody was remembering.** Keeping the list in
+`AgentState` is what lets the loop remember on its behalf.
+
+## The human-approval gate
+
+Read-only tools just run. Tools with **external, irreversible side effects**
+(`send_email` in this repo) pass through a gate first:
 
 ```python
 @tool(description="...", parameters={...}, requires_approval=True)
 def send_email(to, subject, body): ...
 ```
 
-`--approve` 三种策略：
+Three `--approve` policies:
 
-| 值 | 行为 |
+| Value | Behaviour |
 | --- | --- |
-| `auto`（默认） | 有终端就问你（打印工具名、参数、说明，等 y/N）；**没终端就一律拒绝** |
-| `deny` | 一律拒绝 |
-| `allow` | 一律放行（明确的 yolo 模式） |
+| `auto` (default) | ask you when there is a terminal (prints tool, arguments, description, waits for y/N); **deny when there is not** |
+| `deny` | always deny |
+| `allow` | always allow (explicit yolo mode) |
 
-**「没人看着就默认放行」是最危险的默认值** —— 出事的恰恰是没人看着的那次（CI、定时任务、后台跑批）。
-所以 auto 在检测不到 TTY 时选择拒绝，而不是选择方便。
+**"Nobody is watching, so allow it" is the most dangerous default there is** — the
+run that goes wrong is precisely the unattended one (CI, cron, batch jobs). So `auto`
+denies when it cannot find a TTY, instead of choosing convenience.
 
-被拒绝的调用**同样要有结果消息**（和限流一样，否则协议断裂），内容告诉模型：
-没有执行、别重发、换个做法或在答案里说明这一步要用户自己来。
-只读工具**绝不设这个标记** —— 问多了会麻木，麻木了就会闭眼点同意，反而更危险。
+A denied call **still gets a result message** (same as a throttled one, or the
+protocol breaks). It tells the model: not executed, do not re-send, take another
+route or say in the answer that the user must do this step. Read-only tools **never**
+carry the flag — ask too often and people go numb, and numb people approve with
+their eyes closed.
 
-轨迹评测里 `denied` 和 `throttled` 分开统计，还有一个 `retried_after_denial`：
-被拒绝后又原样重发同一个调用，说明模型没读懂拒绝。
+**The gate is where authorization happens, so the model must attempt the call.** An
+earlier version of the prompt offered "or state in your final answer that this step is
+for the user" as an alternative, and the model took that exit *before ever trying* —
+it wrote a draft email and asked for permission in an answer nobody reads before the
+run ends. The prompt now spells out the order: call the tool, and only if the call
+comes back denied take another route. Two live runs confirm the change: `send_email`
+is now attempted (and denied by policy), then marked blocked with the reason.
 
-## 两种评测，别混为一谈
+Trajectory eval counts `denied` and `throttled` separately, plus
+`retried_after_denial`: re-sending an identical call after a denial means the model
+did not read the denial.
+
+## Two kinds of evaluation — do not conflate them
 
 | | `evals.py` | `trajectory.py` |
 | --- | --- | --- |
-| 用什么模型 | 假的（按剧本） | 真轨迹（`runs/*/state.json`） |
-| 测什么 | **机器有没有坏**：消息协议、刹车、压缩切点 | **这次跑得好不好**：达成度、依据、效率、诚实 |
-| 成本 | 零 | 机械指标零成本；LLM 评委按次收费 |
-| 判据 | 必须 13/13 全绿 | 分数是相对的，用来比较两次改动 |
+| Model | fake (scripted) | a real trajectory (`runs/*/state.json`) |
+| Question | **is the machine broken?** message protocol, brakes, compaction cut points | **how well did this run go?** outcome, grounding, efficiency, honesty |
+| Cost | zero | mechanical metrics free; the LLM judge costs per run |
+| Verdict | must be 15/15 green | relative scores, for comparing two versions |
 
 ```bash
-uv run python -m mini_agent.trajectory runs/20260826-xxxx           # 机械指标，免费
-uv run python -m mini_agent.trajectory runs/* --judge --out r.json  # 加 LLM 评委
+uv run python -m mini_agent.trajectory runs/20260826-xxxx           # mechanical, free
+uv run python -m mini_agent.trajectory runs/* --judge --out r.json  # add the LLM judge
 ```
 
-**机械指标**（确定性，先看这些）：步数、工具调用数、失败数、**重复调用数**、被限流数、
-压缩次数、耗时、token、缓存命中、是否真的交付了结论、**是否反过来问用户**
-（第一次实测失败就栽在这儿）、引用条数、以及 **`unsupported_citations`：
-答案里出现、但任何工具结果里都没出现过的链接** —— 这是「编造引用」的确定性检测。
+**Mechanical metrics** (deterministic; read these first): steps, tool calls, failures,
+**duplicate calls**, throttled, denied, compactions, elapsed, tokens, cache hits,
+whether a conclusion was actually delivered, **whether it asked the user back**
+(the very first real run failed exactly this way), citation count,
+**`unsupported_citations`: links that appear in the answer but in no tool result** —
+the deterministic detector for invented citations — and two signals for half-finished
+work:
 
-**LLM 评委**：outcome / grounding / efficiency / honesty 各 0-5 分，外加一句总评和「最该改的一点」。
-解析不出 JSON 就如实报错，不假装打了分。
+- **`action_never_attempted`**: the goal used an action verb (send, email, submit,
+  delete...) and no approval-gated tool was ever called. "Looks done, is not."
+  A *denied* attempt does not count as a failure here: the model did its part and a
+  human said no.
+- **`asks_without_trying`**: it asked the user for authorization in the answer without
+  ever attempting the call. Asking *after* a denial is what the prompt asks for, so
+  the raw `asks_user_back` signal is kept separately and this is the sharper one.
+- **`pending_todos`**: checklist items still open at the end.
 
-一次真实对照很说明问题：评委给某次运行的 grounding 打了 3 分，理由是「引用了 4 个来源但轨迹里
-只有一次检索，缺少证据」。而机械检查显示 `unsupported_citations = 0` —— 4 条链接全都出现在
-那次检索的结果里。**评委只看到截断后的 300 字符摘要，机械检查看的是全文。**
-所以两者的顺序是：先信确定性指标，再听评委的定性判断。
+**The LLM judge**: outcome / grounding / efficiency / honesty from 0-5, plus a
+one-line verdict and "the single thing most worth fixing". If the JSON does not
+parse, it says so instead of pretending to have scored.
 
-## 落盘与恢复
+One real comparison makes the point. The judge scored a run's grounding 3, reasoning
+that "it cited four sources but the trajectory shows only one search, so the evidence
+is missing". The mechanical check reported `unsupported_citations = 0` — all four
+links did appear in that search's results. **The judge saw a 300-character excerpt;
+the mechanical check saw the full text.** So the order is: trust the deterministic
+metrics first, then listen to the judge's qualitative read.
 
-每一步都把完整状态写进 `runs/<时间戳>/state.json`（先写临时文件再改名，避免残档）。
-**故意每步一存而不是跑完再存** —— 跑完才存的话，最需要它的那次崩溃恰好什么都没留下。
+## Persistence and resume
+
+Every step writes the full state to `runs/<timestamp>/state.json` (temp file plus
+rename, so no half-written files). **Saving every step rather than at the end is
+deliberate** — save only at the end and the crash that most needed the data is the
+one that leaves nothing.
 
 ```bash
-uv run mini-agent --max-steps 1 --run-dir runs/demo "..."   # 触顶停下
-uv run mini-agent --resume runs/demo --max-steps 3          # 从第 2 轮接着跑
+uv run mini-agent --max-steps 1 --run-dir runs/demo "..."   # hits the ceiling and stops
+uv run mini-agent --resume runs/demo --max-steps 3          # continues from turn 2
 ```
 
-恢复时命令行给的上限是「**再给这么多**」（已用掉的步数/时间都记在状态里，
-直接沿用会一恢复就又触顶）。还有一条容易忽略的细节：**恢复时不重建 system 消息** ——
-重建会让上下文前缀变化，之前攒下的 prompt cache 全部作废。有用例逐字盯着这一点。
+On resume, the command-line ceilings mean "**give it this much more**" (steps and
+time already spent live in the state, so reusing them verbatim would hit the ceiling
+again immediately). One easily-missed detail: **resume does not rebuild the system
+message** — rebuilding changes the context prefix and voids every prompt-cache entry
+earned so far. A test watches that byte for byte.
 
-存下来的东西同时是 roadmap #7（trajectory eval）的输入：完整 messages + 每次工具调用的
-参数与结果 + 花费 + 终态。之前复盘只能对着终端里那 120 个字符猜，现在不用猜了。
+What gets saved is also the input to trajectory eval: full messages, every tool
+call's arguments and result, the spend, the final state. Reviewing a run used to mean
+guessing from the 120 characters the terminal printed.
 
 ## Prompt caching
 
-缓存是 OpenAI 自动做的，我们要做的只有两件事：
+The caching is OpenAI's job. Ours is two things:
 
-1. **别把前缀弄脏**。每轮的 `[运行状态]` 行一律追加在**末尾**，system 消息从头到尾不变；
-   `--resume` 也沿用原来的 system 消息。
-2. **告诉它哪些请求算一组**：用 system prompt 的哈希做 `prompt_cache_key`，
-   所以同一套配置的多次运行能互相复用缓存。
+1. **Do not dirty the prefix.** The per-turn `[run status]` line is always appended
+   at the **end**, the system message never changes, and `--resume` reuses the
+   original system message.
+2. **Say which requests belong together**: `prompt_cache_key` is a hash of the system
+   prompt, so separate runs with the same configuration reuse each other's cache.
 
-命中的输入 token 只按**十分之一**计价，`estimate_cost()` 会把这部分单独算，
-`state.snapshot()` 里的 `cache_hit` 报命中率。
+Cached input tokens bill at **a tenth**, `estimate_cost()` accounts for them
+separately, and `cache_hit` in `state.snapshot()` reports the rate.
 
-实测（gpt-5-mini，5 轮 + 真实检索）：`"cache_hit": "38%"`。
-短任务显示 0% 是正常的 —— 前缀不足约 1024 token 时根本不会进缓存。
+Measured (gpt-5-mini, 5 turns with real search): `"cache_hit": "38%"`. Short tasks
+showing 0% is normal — a prefix under ~1024 tokens never enters the cache at all.
 
-## 上下文管理
+## Context management
 
-`state.messages` 天然只增不减，跑 20-30 轮之后三件事一起变坏：撑爆 context window、
-每轮全价重发、模型注意力被无关的旧输出稀释。两道手段，**外置优先于压缩**：
+`state.messages` only grows. After 20-30 turns three things go wrong together: the
+context window overflows, every turn is resent at full price, and attention is
+diluted by stale output. Two mechanisms, and **externalizing comes before
+compacting**:
 
-**1. 外置**（`--run-dir`，默认 `runs/<时间戳>`，填 `off` 关闭）
-超过 2000 字符的工具结果写进文件，上下文里只留开头 600 字符 + 路径 + 一句
-「需要完整内容就用 read_file 读这个路径」。**信息一点没丢**，而取回的代价只在真需要时才付。
+**1. Externalize** (`--run-dir`, default `runs/<timestamp>`, `off` to disable).
+Tool results over 2000 characters go to a file; the context keeps the first 600
+characters, the path, and a line saying "read that path with read_file for the full
+content". **Nothing is lost**, and the cost of fetching it is paid only when needed.
 
 ```
-📄 search_web 返回 2022 字符，已外置到文件，上下文只留摘要
+[externalized] search_web returned 2022 characters; saved to a file, only an excerpt stays in context
 ```
 
-**2. 压缩**（`--context-limit`，默认 30000 tokens）
-上下文仍然超阈值时，把较早的一段交给模型摘要，用一条 `[上下文摘要]` 消息替换掉几十条历史。
-保留 system 前缀（否则 prompt caching 失效）、原始目标、最近 8 条。摘要提示词明确要求保住
-「已查证的事实 + 来源链接 + 试过什么失败了」——最后一条尤其重要，否则压缩完它会重新踩一遍坑。
+**2. Compact** (`--context-limit`, default 30000 tokens). If the context is still
+over the limit, an earlier slice is summarized and replaced by one
+`[context summary]` message. The system prefix (or prompt caching dies), the original
+goal and the last 8 entries are kept. The summarizer prompt explicitly demands
+"verified facts + source links + what was tried and failed" — the last one matters
+most, or the agent walks into the same dead end again after compaction.
 
-**压缩最危险的地方不是摘要质量，是切点。** 把一个工具调用和它的结果拆散，下一轮请求直接 400。
-所以 `safe_cut_points()` 只在「没有悬空调用」的位置下刀——扫描逻辑和 evals 里那条顺序不变量
-是同一套。找不到安全切点就宁可不压。评测里有一条用例专门盯着「压完协议依然完整」。
+**The dangerous part of compaction is not summary quality, it is the cut point.**
+Split a tool call from its result and the next request fails with a 400. So
+`safe_cut_points()` only cuts where nothing is dangling — the same scan as the
+ordering invariant in evals. If there is no safe cut, it does not compact. One eval
+case watches "the protocol survives compaction".
 
-判断依据用的是**模型返回的真实 token 数**（`usage.input_tokens`），拿不到时才退回字符估算
-（中日韩按 1.5 字符/token，其余 4 字符/token）。
+The decision uses the **real token count from the model** (`usage.input_tokens`),
+falling back to a character estimate (CJK at 1.5 chars/token, everything else at 4)
+only when there is none.
 
-## 工具并行执行
+## Parallel tool execution
 
-模型一轮发起的多个工具调用会**并行执行**（线程池），然后**严格按原顺序**回填。
-并行最容易打破的正是消息协议的两条不变量，所以两条都有用例锁着：
-回填顺序与 `tool_calls` 一致、每个 id 恰好一条结果。
+Multiple tool calls from one turn run **in parallel** (thread pool) and are fed back
+**strictly in the original order**. Parallelism is exactly what breaks the two
+message-protocol invariants, so both are pinned by tests: results in `tool_calls`
+order, and exactly one result per id.
 
-`--tool-timeout`（默认 30 秒）给单个调用兜底：超时返回一条 `ERROR:` 结果，循环继续，
-而不是整轮卡死。诚实说明：Python 杀不掉卡住的线程，超时后那个线程被丢在后台自生自灭 ——
-真要硬隔离得上子进程。剩余时间比超时值还短时，以剩余时间为准（时间刹车也管得住工具）。
+`--tool-timeout` (default 30s) covers a single call: on timeout the model gets an
+`ERROR:` result and the loop continues instead of the whole turn wedging. Honest
+caveat: Python cannot kill a stuck thread, so after a timeout that thread is left to
+finish on its own — real isolation would need a subprocess. If less time remains than
+the timeout, the remaining time wins (the time brake reaches tools too).
 
-**实测**（三个真实检索）：串行 5.05s → 并行 3.64s，**1.39x**。
-提速有限的原因值得记一笔：瓶颈不是网络而是**我们自己的检索限流间隔**。
-间隔 1.5s 时并行 8.3s、间隔 0 时 4.7s —— 限流把并行度吃掉了。
-折中到 0.5s（6 个检索连发零失败），剩下的失败交给退避重试兜底。
-换成正经的检索 API（roadmap #11）后这一项才会真正放开。
+**Measured** (three real searches): serial 5.05s, parallel 3.64s — **1.39x**. The
+modest speedup is worth recording: the bottleneck was not the network but **our own
+search throttle**. At a 1.5s interval the parallel run took 8.3s; with no interval,
+4.7s. Settled on 0.5s (six back-to-back searches, zero failures) and left the rest to
+backoff retries. This only opens up properly with a real search API (roadmap #11).
 
-## 四道刹车
+## Four brakes
 
-模型可能一轮甩出 10 个搜索、或者在工具之间反复横跳把预算烧光。循环里有四个独立的守卫：
+A model can fire ten searches in one turn, or bounce between tools until the budget
+is gone. The loop has four independent guards:
 
-| 守卫 | 参数 | 默认 | 触发后 |
+| Guard | Flag | Default | On trigger |
 | --- | --- | --- | --- |
-| 轮数 | `--max-steps` | 8 | `status="max_steps"`，停机 |
-| 预算 | `--budget`（美元） | 0.05 | `status="out_of_budget"`，停机 |
-| 墙上时间 | `--deadline`（秒） | **600（10 分钟）**，填 0 = 不限 | `status="out_of_time"`，停机 |
-| 每轮工具调用数 | `--max-tool-calls` | 3（0 = 不限） | 只执行前 N 个，其余**退回下一轮** |
+| Turns | `--max-steps` | 8 | `status="max_steps"`, stop |
+| Budget | `--budget` (USD) | 0.05 | `status="out_of_budget"`, stop |
+| Wall clock | `--deadline` (seconds) | **600 (10 min)**, 0 = unlimited | `status="out_of_time"`, stop |
+| Tool calls per turn | `--max-tool-calls` | 3 (0 = unlimited) | run the first N, **push the rest to the next turn** |
 
-钱和时间量的是两件事：**钱衡量模型算力，时间衡量人的等待**。检索限流（1.5s 间隔）、
-退避重试（最多 7s）、网络慢——这些只烧时间不烧钱，唯有时间刹车拦得住。
-每轮的 `[运行状态]` 行会把**最紧的那道**摆到模型面前，免得它盯着最宽松的那个继续挖
-（实测里它就被「预算还剩 91%」误导过，完全没注意步数已经见底）。
+Money and time measure different things: **dollars measure model compute, time
+measures human waiting.** Search throttling (0.5s spacing), backoff retries (up to
+7s) and slow networks burn time without burning money, and only the time brake
+catches them. The per-turn `[run status]` line puts **the tightest** brake in front
+of the model, so it does not keep digging while watching the most generous one (in a
+real run it was misled by "91% of the budget left" and never noticed its steps were
+gone).
 
-时间只在**两轮之间**检查，单个工具调用卡死仍会超时——那需要给工具本身加超时，
-属于 roadmap #5 并行执行时一起做的事。
+Time is only checked **between turns**; a single wedged tool call is what
+`--tool-timeout` is for.
 
-触顶不等于放弃：见下面「刹车不能只是停」。
+Hitting a ceiling is not the same as giving up — see "A brake must do more than
+stop" below.
 
-第三道刹车有个必须做对的细节：**被拦下的调用也要回一条 `role="tool"` 消息**，内容是
-「本轮已达上限，未执行，下一轮再发」。如果只是把它们丢掉，那些 `tool_call_id` 就没有对应结果，
-下一轮请求会直接 400 —— 所以这里的语义是「拒绝执行」而不是「忽略」。模型读到这条会自己收敛，
-把 10 个查询压成最关键的几个。`evals.py` 里有一条用例专门锁这个行为，
-`state.snapshot()` 也会分别报告 `tool_calls`（真跑了几个）和 `throttled`（拦了几个）。
+The fourth brake has a detail that must be right: **a call that was held back still
+gets a `role="tool"` message**, saying "the per-turn limit is reached, not executed,
+send it again next turn". Drop them instead and those `tool_call_id`s have no
+results, so the next request fails with a 400 — the semantics here are "refused", not
+"ignored". Reading that, the model converges on its own and squeezes ten queries into
+the few that matter. `evals.py` pins this behaviour, and `state.snapshot()` reports
+`tool_calls` (actually run) and `throttled` (held back) separately.
 
-### 刹车不能只是「停」
+### A brake must do more than stop
 
-实测教训：模型曾把 8 轮全用在检索上，一个字的结论都没给 —— 十次检索的钱白花。
-所以刹车还要负责**把车上的东西卸下来**，两道机制：
+Lesson from a real run: the model spent all 8 turns searching and produced not one
+line of conclusion — ten searches paid for, nothing to show. So the brakes also have
+to **unload the car**. Two mechanisms:
 
-1. **最后一轮收走工具**：`state.step >= max_steps` 时传空的工具清单。
-   措辞可以被无视，空清单不能 —— 模型只剩「说话」这一个选择。
-2. **强制收尾轮**：真的触顶（步数或预算）时，再问一次、同样不给工具，
-   要求它把已有信息榨成「结论 + 置信度 + 未核实项」。抢救到东西才会把 `salvaged` 标为 true。
+1. **No tools on the final turn**: when `state.step >= max_steps` the tool list goes
+   out empty. Wording can be ignored, an empty list cannot — the model's only
+   remaining option is to talk.
+2. **A forced wrap-up turn**: when a ceiling is actually hit, ask once more, again
+   with no tools, and require "conclusion + confidence + unverified items" from what
+   is already there. `salvaged` is only set to true if something was actually
+   rescued.
 
-每轮开头还会追加一条 `[运行状态]` 消息，把「第几轮 / 剩多少预算」告诉模型 —— 它得知道自己的
-处境才谈得上「继续挖还是收尾」。这条追加在**末尾**而不是写进 system prompt，
-否则上下文前缀每轮都变，prompt caching 就废了。
+Each turn also appends a `[run status]` message telling the model which turn it is on
+and how much budget is left — it cannot choose between digging and wrapping up
+without knowing where it stands. That line is appended at the **end** rather than
+written into the system prompt; otherwise the context prefix changes every turn and
+prompt caching is void.
 
 ```bash
-uv run mini-agent --live --max-tool-calls 2 "研究 OpenAI 最近半年的融资和竞争格局"
+uv run mini-agent --live --max-tool-calls 2 "research OpenAI's funding and competition"
 ```
 
-## 控制循环里最容易踩的三个坑
+## The three traps in the control loop
 
-代码里都有注释标记，也都被 `evals.py` 覆盖：
+All three are marked in the code and covered by `evals.py`:
 
-1. **顺序**：带 `tool_calls` 的 assistant 消息必须**先**写回 `messages`，再写工具结果；反了下一轮 API 会报错。
-2. **数量**：一轮可能有多个 `tool_call`，**每个 `tool_call_id` 都要有**一条 `role="tool"` 消息，漏一个下一轮 400。
-3. **终止**：没有神秘的 `check_completion()`。结束条件只有两种 —— 模型不再请求工具（= 给出最终答案），或步数/预算触顶。
+1. **Order**: the assistant message carrying `tool_calls` must be written back into
+   `messages` **before** the tool results. Reversed, the next API call errors.
+2. **Count**: a turn may contain several `tool_call`s, and **every `tool_call_id`
+   needs** its own `role="tool"` message. Miss one and the next request is a 400.
+3. **Termination**: there is no mysterious `check_completion()`. A run ends when the
+   model stops requesting tools (i.e. it gave a final answer), or when a ceiling is
+   hit.
 
-另外：工具执行失败（坏 JSON、参数不对、工具本身抛异常）一律**把错误文本当作工具结果返回**给模型，让它自己改正。这不是防御性编程，这正是循环存在的意义。
+And: when a tool fails (bad JSON, wrong arguments, an exception inside the tool) the
+error text is **returned as the tool result** so the model can correct itself. That
+is not defensive programming — it is the whole reason the loop exists.
 
-## 原笔记里的两个 bug
+## The two bugs in the original notes
 
-`NOTES.md` 保留了改造前的伪代码。其中：
+`NOTES.md` keeps the pre-refactor pseudo-code, including:
 
 ```python
-result = fn(**item.arguments)   # ① arguments 是 JSON 字符串，不是 dict
-                                # ② 结果没有回传给模型，也没有循环
+result = fn(**item.arguments)   # 1. arguments is a JSON string, not a dict
+                                # 2. the result never goes back to the model, and there is no loop
 ```
 
-① 少了 `json.loads()`；② 没有把工具结果 append 回消息再问一次模型 —— 所以那段代码是「一次函数调用」，还不是 Agent。差别就在 `loop.py` 那 40 行里。
+(1) is a missing `json.loads()`; (2) is the absence of appending the tool result and
+asking the model again — which makes that snippet a single function call, not an
+agent. The difference is the 40 lines in `loop.py`.
 
-## 它现在处在什么水平
+## Where this sits today
 
-内核不过时（2026 年的 agent 内核依然是这个循环），工程层大约停在 2023 年底 / 2024 年初：
-已经补上 Responses API（#1），但仍没有 MCP、没有上下文压缩、工具串行执行、evals 只到单测级别。
+The core is not dated: an agent in 2026 is still this loop. The engineering layer has
+come a long way from where it started — Responses API, prompt caching, context
+management, parallel execution, persistence and resume, an approval gate and
+trajectory eval are all in. What is still missing: MCP, subagents with isolated
+context, and a serious search backend.
 
-差什么、为什么差、按什么顺序补 —— 见 [docs/roadmap.md](docs/roadmap.md)。
+What is missing, why it matters, and in what order to add it — see
+[docs/roadmap.md](docs/roadmap.md).

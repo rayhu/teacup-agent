@@ -1,10 +1,13 @@
-"""方便直接 `python main.py` 的薄入口；正式用法是 `uv run mini-agent`。
+"""Thin entry point so `python main.py` works; the real usage is `uv run mini-agent`.
+
+The study notes that used to live in this file were moved to NOTES.md in full, with
+each section annotated with the implementation file it corresponds to.
 """
 
 import sys
 from pathlib import Path
 
-sys.path.insert(0, str(Path(__file__).parent / "src"))  # 未安装包时也能跑
+sys.path.insert(0, str(Path(__file__).parent / "src"))  # works without installing
 
 from mini_agent.cli import main  # noqa: E402
 

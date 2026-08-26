@@ -1,385 +1,549 @@
-# mini-agent 升级路线图
+# mini-agent roadmap
 
-**基线评估（2026-08-25）**：内核不过时，工程层大约停在 2023 年底 / 2024 年初。
-**进度**：#1—#8 全部完成（除 #6 的细粒度权限外）。
-另外从三次真实运行的复盘里补了三件 roadmap 上原本没有的事（见文末「实战补丁」）。
-下一站 #9（MCP）—— 打开工具生态。
+**Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
+was roughly where the field stood in late 2023 / early 2024.
+**Progress**: #1-#8 are all done (except the fine-grained permissions part of #6).
+Five items that were never on the roadmap were added after reviewing real runs
+(see "Field patches" at the end).
+Next up: #9 (MCP) — opening up the tool ecosystem.
 
-`LLM → tool call → tool result → LLM` 这个循环在 2026 年依然是所有 agent 的内核，
-[`loop.py`](../src/mini_agent/loop.py) 没有一行是「老技术」。差的是外面那一整层生产工程。
+The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
+2026, and not one line of [`loop.py`](../src/mini_agent/loop.py) is "old technology".
+What was missing is the whole layer around it.
 
-这份路线图按**做完之后收益 / 改动成本**排序。每条都写清了：改哪里、怎么算做完、参考资料。
-不必按顺序全做 —— 作为学习骨架，它现在这样恰好；每加一层，那 40 行循环就更难看清一点。
+This roadmap is ordered by **payoff divided by cost**. Each item says what to change,
+what counts as done, and where to read more. You do not have to do all of it — as a
+learning skeleton the repo is fine as it is, and every layer added makes those 40
+lines a little harder to see.
 
 ---
 
-## P0 · 改一个类就能拿到的收益
+## P0 - payoff from changing one class
 
-### 1. 换用 Responses API ✅ 已完成（2026-08-25）
+### 1. Move to the Responses API — DONE (2026-08-25)
 
-**现状**：[`model.py`](../src/mini_agent/model.py) 的 `OpenAIModel` 走 Chat Completions。
-每轮把模型的推理过程丢掉，只把最终 message 塞回 `messages`。
+**Before**: `OpenAIModel` in [`model.py`](../src/mini_agent/model.py) used Chat
+Completions, throwing away the model's reasoning each turn and pushing only the final
+message back into `messages`.
 
-**代价**：对 gpt-5 这类推理模型，跨工具调用的推理状态无法保留。OpenAI 官方迁移文档称，
-同样的 prompt 下 Responses API 的 SWE-bench 成绩高约 3%；且新能力（内置 web_search、
-code_interpreter 等 hosted tool）只在 Responses 上落地。
+**The cost**: for reasoning models like gpt-5 the reasoning state cannot survive
+across tool calls. OpenAI's migration guide reports about +3% on SWE-bench with the
+same prompt, and new capabilities (hosted tools such as built-in web_search and
+code_interpreter) only land on Responses.
 
-**怎么改**：只动 `OpenAIModel` 一个类，`loop.py` / `state.py` 一行不用改 —— 这正是当初
-把模型抽象成 `complete(messages, tools) -> Reply` 的回报。要点：
+**How**: touch only `OpenAIModel`; `loop.py` and `state.py` do not change — that is
+the payoff for abstracting the model as `complete(messages, tools) -> Reply`. Key
+points:
 
-- 工具定义是**扁平**的：`{"type": "function", "name": ..., "parameters": ...}`，
-  不像 Chat Completions 套一层 `function`。
-- 输出是 `response.output` 列表，工具调用项 `type == "function_call"`，用 `call_id`。
-- 工具结果回传的形状是 `{"type": "function_call_output", "call_id": ..., "output": ...}`，
-  不是 `role="tool"` 消息。
-- 用 `previous_response_id` 串联上下文，就能保住推理状态。
+- Tool definitions are **flat**: `{"type": "function", "name": ..., "parameters": ...}`,
+  without the extra `function` nesting Chat Completions uses.
+- Output is the `response.output` list; tool calls have `type == "function_call"` and
+  use `call_id`.
+- Tool results go back as
+  `{"type": "function_call_output", "call_id": ..., "output": ...}`, not a
+  `role="tool"` message.
+- `previous_response_id` chains the context and preserves reasoning state.
 
-**注意**：这会让「归一化的 Reply」多承担一点 —— `Reply.message` 目前假设是一条 chat 消息。
-可能需要把它抽象成「要 append 回上下文的东西」。这是这条改动唯一的设计成本。
+**Caveat**: this asks more of the normalized `Reply` — `Reply.message` assumes one
+chat message, and may need to become "the things to append back to the context".
+That is the one design cost of this change.
 
-**验收**：
-- `tests/test_model.py` 复制一份成 `test_responses_model.py`，用假 client 验证解析；
-- 8 条 evals 全绿（它们只依赖 `Model` 接口，不该受影响）；
-- 两个后端可通过 `--api {chat,responses}` 切换，同一任务跑通。
+**Definition of done**:
+- copy `tests/test_model.py` into `test_responses_model.py` and verify parsing with a
+  fake client;
+- all evals still green (they only depend on the `Model` interface);
+- both backends selectable with `--api {chat,responses}`, same task working on each.
 
-**实际落地情况**：
+**What actually shipped**:
 
-- 新增 `ResponsesModel`（[`model.py`](../src/mini_agent/model.py)），与 `OpenAIModel` 并存，
-  用 `--api {responses,chat}` 切换，**默认 responses**。
-- `loop.py` 的循环结构没变，但抽了两处形状差异出去：
-  - `Reply.message` → `Reply.items`（一轮可能产出多条：reasoning + 多个 function_call），
-    循环里改成 `state.messages.extend(reply.items)`；
-  - 工具结果的形状交给模型后端决定（`Model.tool_result_item`），
-    Chat 是 `role="tool"`，Responses 是 `function_call_output`。
-- `evals.py` 的顺序不变量 `tool_results_follow_their_call()` 现在两种形状都认。
-- 新增 `tests/test_responses_model.py`：假 client 验证解析 + 整条循环跑 Responses 形状。
+- A new `ResponsesModel` alongside `OpenAIModel`, selected with
+  `--api {responses,chat}`, **defaulting to responses**.
+- The loop structure did not change, but two shape differences were factored out:
+  - `Reply.message` -> `Reply.items` (a turn can produce several entries: reasoning
+    plus multiple function_calls), so the loop does
+    `state.messages.extend(reply.items)`;
+  - the tool-result shape is decided by the backend (`Model.tool_result_item`):
+    `role="tool"` for Chat, `function_call_output` for Responses.
+- The ordering invariant `tool_results_follow_their_call()` in `evals.py` now
+  recognises both shapes.
+- New `tests/test_responses_model.py`: fake-client parsing plus the whole loop driven
+  in the Responses shape.
 
-**实测证据**（gpt-5-mini，同一任务两个后端各跑一次，共花费约 $0.002）：
+**Measured** (gpt-5-mini, same task on each backend, about $0.002 total):
 
 ```
 ### responses                    ### chat
   0. system                        0. system
   1. user                          1. user
-  2. reasoning      ← 推理项       2. assistant (tool_calls=1)
+  2. reasoning      <- reasoning    2. assistant (tool_calls=1)
   3. function_call                 3. tool
   4. function_call_output          4. assistant
   5. message
 ```
 
-第 2 条 `reasoning` 会随下一轮 input 一起发回去 —— 这就是收益的来源，Chat 那边没有对应物。
+Entry 2, `reasoning`, goes back out with the next request — that is where the gain
+comes from, and Chat has no equivalent.
 
-**回头看**：预判的设计成本（`Reply.message` 的形状假设）确实是唯一的改动点，
-`loop.py` 的控制流一行没动。那层 `Model` 抽象站住了。
+**In hindsight**: the predicted design cost (`Reply.message`'s shape assumption) was
+indeed the only thing that had to change; the control flow in `loop.py` did not move.
+The `Model` abstraction held.
 
-**参考**：<https://developers.openai.com/api/docs/guides/migrate-to-responses>
-
----
-
-### 2. Prompt caching ✅ 已完成（2026-08-26）
-
-**现状**：长 system prompt + 越来越长的历史，每轮全价重发。
-
-**怎么改**：让消息前缀保持稳定（system prompt 不要每轮拼入变动内容 —— 注意现在的
-`memory.recall()` 是拼进 system 的，只要记忆没变就仍然稳定，别改成每轮拼时间戳之类）。
-再在 `Reply.cost` 里区分 cached / uncached token 计价。
-
-**验收**：同一任务连跑两次，第二次的 `remaining_budget` 消耗明显更低，且 snapshot 能报出缓存命中。
-
-**落地情况**：`PRICES` 改成三元组（输入 / 命中缓存的输入 / 输出），命中部分按十分之一计价；
-两个后端都从 usage 里挖出 `cached_tokens`（Chat 在 `prompt_tokens_details`，
-Responses 在 `input_tokens_details`）；`snapshot()` 报 `cache_hit`。
-另外用 system prompt 的哈希做 `prompt_cache_key`，让同配置的多次运行互相复用缓存。
-
-**实测**：gpt-5-mini 跑 5 轮带真实检索的任务，`cache_hit: 38%`。
-**一个坑**：第一次测出来是 0%，查下来是首个请求约 972 token，**没到 OpenAI 约 1024 token 的起caching门槛**。
-短任务显示 0% 是正常的，不是 bug。
+**Reference**: <https://developers.openai.com/api/docs/guides/migrate-to-responses>
 
 ---
 
-### 3. 重试、退避、超时 ✅ 已完成（2026-08-26）
+### 2. Prompt caching — DONE (2026-08-26)
 
-**现状**：[`loop.py`](../src/mini_agent/loop.py) 里模型调用一抛异常就 `status="error"` 整轮结束。
-一次 429 或网络抖动就前功尽弃。
+**Before**: a long system prompt plus an ever-growing history, resent at full price
+every turn.
 
-**怎么改**：在 `OpenAIModel.complete` 外面包一层指数退避（429/5xx/超时重试，4xx 不重试），
-重试次数计入 state 便于观测。注意别和 `max_steps` 混淆：**重试不是一个 step**。
+**How**: keep the message prefix stable (never splice changing content into the
+system prompt — note that `memory.recall()` is spliced in there, which is fine as
+long as the memory itself is stable; do not start appending timestamps). Then split
+cached and uncached tokens in `Reply.cost`.
 
-**验收**：新增单测，假 client 前两次抛 429、第三次成功 → 循环正常完成，`step` 不变。
+**Definition of done**: run the same task twice and the second run's
+`remaining_budget` drops noticeably less, with the snapshot reporting cache hits.
 
-**已完成的一半**：检索工具侧。实测 DuckDuckGo 连发 4-5 个查询就会限流，而 agent 恰好爱一轮甩好几个。
-[`tools.py`](../src/mini_agent/tools.py) 现在有请求间隔（1.5s）+ 退避重试（1s/2s/4s），
-并且**重试用尽后明确报 `ERROR:` 而不是静默降级成本地语料的「没有找到」**——
-把「检索坏了」伪装成「查无此事」，模型会直接得出「世界上没有这件事」的结论。
-**另一半也完成了**：`complete_with_retries()` 对 429/5xx/网络类错误退避重试（1s/2s），
-4xx 直接抛出不浪费时间。关键细节：**重试不算一个 step** —— 步数衡量的是「模型做了几次决策」，
-一次限流不该消耗 agent 的思考额度。另外单个工具调用也有超时了（`--tool-timeout`，默认 30s）。
+**What shipped**: `PRICES` became a triple (input / cached input / output) with cached
+input billed at a tenth; both backends dig `cached_tokens` out of usage (Chat under
+`prompt_tokens_details`, Responses under `input_tokens_details`); `snapshot()` reports
+`cache_hit`. `prompt_cache_key` is a hash of the system prompt, so runs with the same
+configuration reuse each other's cache.
 
----
-
-## P1 · 决定「能不能跑长任务」
-
-### 4. 上下文工程（压缩 / 外置）✅ 已完成（2026-08-26）
-
-**现状**：`state.messages` 是个无限增长的 list。跑 20-30 轮必然撑爆 context window，
-而且越长越贵、模型注意力越散。
-
-**怎么改**，两件事一起做：
-
-- **压缩（compaction）**：token 数超过阈值时，把早期的工具结果摘要成一段，替换原始条目。
-  保留最近 N 轮原文 + 目标 + 关键结论。
-- **外置**：大块工具结果（网页正文、文件内容）写进 `runs/<id>/` 目录，上下文里只留
-  「摘要 + 文件路径」，模型需要细节时用 `read_file` 取回。这比什么压缩算法都有效。
-
-**验收**：造一个需要 15+ 轮的任务，跑完不爆 context；压缩前后 `state.snapshot()` 能报出
-token 数下降；关键结论没有在压缩中丢失（这条要用 trajectory eval 兜，见 #7）。
-
-**落地情况**：新增 [`context.py`](../src/mini_agent/context.py)。
-
-- 外置：>2000 字符的工具结果写进 `runs/<时间戳>/`，上下文只留 600 字符 + 路径 +
-  「用 read_file 取回」。实测真实检索的 2022 字符结果被压到约 900 tokens 上下文，全文在盘上。
-- 压缩：超 `--context-limit`（默认 30000）时把早期历史摘要成一条消息。
-  保留 system 前缀、原始目标、最近 8 条。
-- **最关键的实现细节是切点而不是摘要质量**：`safe_cut_points()` 复用了顺序不变量那套扫描，
-  只在「没有悬空调用」处下刀，找不到就不压。拆散一对调用/结果的代价是下一轮直接 400。
-- 判断依据优先用模型返回的真实 `usage.input_tokens`（顺手把它从 `Reply` 里暴露出来了），
-  拿不到才退回字符估算。
-- `state.snapshot()` 新增 `context_tokens` 和 `compactions`。
-
-**遗留**：压缩本身要花一次模型调用的钱，目前每次都全量重摘；分层摘要（摘要的摘要）没做。
+**Measured**: gpt-5-mini on a 5-turn task with real search, `cache_hit: 38%`.
+**One trap**: the first measurement was 0%, because the first request was about 972
+tokens — **below OpenAI's ~1024-token threshold for caching at all**. Short tasks
+showing 0% is normal, not a bug.
 
 ---
 
-### 5. 并行执行工具 ✅ 已完成（2026-08-26）
+### 3. Retries, backoff, timeouts — DONE (2026-08-26)
 
-**现状**：模型一轮并行发起 3 个搜索，[`loop.py`](../src/mini_agent/loop.py) 一个个串行跑。
-接了真实联网检索后，这里就是最明显的墙上时间浪费。
+**Before**: any exception from a model call in
+[`loop.py`](../src/mini_agent/loop.py) set `status="error"` and ended the run. One 429
+or network hiccup threw away everything.
 
-**怎么改**：把工具执行改成 `asyncio.gather`（或线程池，工具多是同步 IO）。
+**How**: wrap the model call in exponential backoff (retry on 429/5xx/timeouts, not on
+4xx) and count retries in the state for observability. Do not confuse this with
+`max_steps`: **a retry is not a step**.
 
-**必须守住的不变量**：结果**回填顺序要和 `tool_calls` 顺序一致**，每个 `tool_call_id`
-都要有对应结果 —— 也就是 `evals.py` 里 `tool_results_follow_their_call()` 锁的那条。
-并发是最容易把这条打破的改动，改完先看这条用例。
+**Definition of done**: a unit test where a fake client raises 429 twice then
+succeeds; the loop completes normally and `step` is unchanged.
 
-**验收**：3 个各 sleep 1s 的假工具，一轮总耗时 ≈ 1s 而不是 3s；8 条 evals 全绿。
+**Search side**: measured, DuckDuckGo rate-limits after 4-5 rapid queries — and an
+agent loves to fire several per turn. [`tools.py`](../src/mini_agent/tools.py) now has
+a minimum interval plus backoff retries (1s/2s/4s), and **when retries are exhausted
+it reports `ERROR:` instead of silently degrading to the corpus's "nothing found"** —
+disguising "the search broke" as "there is nothing" makes the model conclude the fact
+does not exist.
 
-**落地情况**：`execute_calls()` 用线程池并发，结果按原顺序回填；
-`tests/test_parallel.py` 里 3 个 0.3 秒的假工具 <0.6 秒跑完，顺序与不变量都验过。
-单次超时也一并做了（`--tool-timeout`，默认 30s），超时返回 ERROR 结果而不是卡死整轮 ——
-这就是时间刹车那里欠下的「单个工具卡死」问题。
-`tools.py` 的检索限流全局量加了锁（并行下那是竞态）。
-
-**意外发现**：真实检索只提速 1.39x（5.05s → 3.64s），因为瓶颈不是网络，
-而是我们自己为了躲 DuckDuckGo 限流加的间隔。实测间隔 1.5s 并行要 8.3s、间隔 0 只要 4.7s。
-已折中到 0.5s。**这项优化的天花板由 #11（换检索后端）决定，不由并发度决定** ——
-先量再优化，不然会在错的地方使劲。
-
----
-
-### 6. 人机确认门（HITL）与权限分级 ✅ 已完成（2026-08-26）
-
-**现状**：工具全是只读或无害的，所以没有审批环节。一旦加 `send_email`、`shell`、
-写文件，这就是个能造成真实损失的洞。
-
-**怎么改**：给 `Tool` 加一个 `requires_approval: bool`（或危险等级）。执行前 emit 一个
-`approval_required` 事件，CLI 侧交互确认；非交互模式下默认拒绝并把「已拒绝」作为工具结果回传
-（模型可以据此换个做法）。
-
-**验收**：标记为危险的工具在自动模式下不会被执行，且循环不崩、消息协议依然完整。
-
-**落地情况**：`Tool.requires_approval` + `run(approve=...)` 回调，默认策略 `deny_all`。
-CLI `--approve auto|deny|allow`：auto 有终端就问人、**没终端就拒绝**。
-新增示例工具 `send_email`（写 outbox.jsonl，不真发）—— 正好是你原始笔记那份工具清单的最后一个，
-也是第一个必须加门的：只读工具错了顶多浪费一次调用，这个错了信已经发出去了。
-
-**几个刻意的选择**：
-- 默认拒绝而不是默认放行。「没人看着就放行」是最危险的默认值，出事的恰恰是没人看着的那次。
-- 批准检查在**提交线程池之前**串行做（它要么问人、要么直接拒绝，不能并发）。
-- 被拒绝的调用同样回一条结果消息，内容明确「没有执行，别重发」。
-- 只读工具绝不设这个标记：问多了会麻木，麻木了就闭眼点同意，反而更危险。
-- 轨迹评测新增 `denied` 与 `retried_after_denial`（被拒后原样重发 = 没读懂拒绝）。
-
-**未完成**：更细的权限分级（按参数判断，比如「只允许发给白名单域名」）。
+**Model side**: `complete_with_retries()` backs off on 429/5xx/network errors (1s,
+2s) and re-raises 4xx immediately rather than wasting time. The key detail:
+**a retry is not a step** — steps measure how many decisions the model made, and one
+rate limit should not eat its thinking allowance. Per-call timeouts also landed
+(`--tool-timeout`, default 30s).
 
 ---
 
-## P2 · 从「能跑」到「可信」
+## P1 - what decides whether long tasks are possible
 
-### 7. Trajectory eval（轨迹评测）✅ 已完成（2026-08-26）
+### 4. Context engineering (compaction / externalization) — DONE (2026-08-26)
 
-**现状**：[`evals.py`](../src/mini_agent/evals.py) 的 8 条锁的是「循环协议对不对」——
-必要，但属于最低档，等价于单元测试。
+**Before**: `state.messages` grew without bound. 20-30 turns would blow the context
+window, and everything got more expensive and less focused as it grew.
 
-**2026 的 agent eval 长什么样**：评的是**整条轨迹**，不只是最终答案。同样一个正确答案，
-3 步干净走到 vs 12 步瞎撞碰运气，不是一个分。常见维度：结果正确性、工具调用是否正确
-（选对工具 + 参数对）、效率（步数 / token / 花费）、路径安全性，评分用 LLM-as-judge rubric。
+**How**, two things together:
 
-**怎么改**：
-- 造一个小任务集（10-20 条），每条给出期望结论要点和「合理的工具使用路径」；
-- 用 `ScriptedModel` 覆盖协议层，用真实模型跑轨迹层（这部分要花钱，单独一个命令）；
-- 加一个 judge：把 `state.trace` 和最终答案交给模型按 rubric 打分；
-- 结果落盘成 `runs/`，能对比两次改动之间的回归。
+- **Compaction**: past a token threshold, summarize the early tool results and replace
+  the originals. Keep the last N turns verbatim, plus the goal and key conclusions.
+- **Externalization**: write large tool results (page text, file contents) into
+  `runs/<id>/` and keep only "excerpt + file path" in the context; the model fetches
+  detail with `read_file`. This beats any summarization algorithm.
 
-**验收**：改一版 system prompt，能用数字说出「变好还是变坏」，而不是靠感觉。
+**Definition of done**: a task that needs 15+ turns finishes without blowing the
+context; `state.snapshot()` shows the token count dropping across a compaction; no key
+conclusion is lost in the process (which trajectory eval has to verify, see #7).
 
-**落地情况**：新增 [`trajectory.py`](../src/mini_agent/trajectory.py)，输入就是 #8 落盘的
-`runs/*/state.json`。两层：
+**What shipped**: a new [`context.py`](../src/mini_agent/context.py).
 
-- **机械指标**（零成本、确定性）：步数、工具调用/失败/**重复**、限流、压缩、耗时、token、
-  缓存命中、`delivered`（真交付了结论还是空手）、`asks_user_back`（反过来问用户 —— 第一次
-  实测失败的形态）、`unsupported_citations`（答案里出现但任何工具结果里都没有的链接）。
-- **LLM 评委**：outcome / grounding / efficiency / honesty 各 0-5 + 总评 + 最该改的一点。
-  解析不出 JSON 就报错，不假装打分。
+- Externalization: tool results over 2000 characters go into `runs/<timestamp>/`, and
+  the context keeps 600 characters, the path, and "read it back with read_file". A real
+  2022-character search result came down to roughly 900 tokens of context, with the
+  full text on disk.
+- Compaction: over `--context-limit` (default 30000), the early history becomes one
+  summary message. The system prefix, the original goal and the last 8 entries stay.
+- **The critical detail is the cut point, not summary quality**: `safe_cut_points()`
+  reuses the ordering-invariant scan and only cuts where nothing is dangling; if there
+  is no safe cut it does not compact. Splitting a call from its result costs a 400 on
+  the next request.
+- The decision prefers the model's real `usage.input_tokens` (now exposed on `Reply`)
+  and only falls back to a character estimate.
+- `state.snapshot()` gained `context_tokens` and `compactions`.
 
-**实测里最有意思的一幕**：评委给某次运行的 grounding 打 3 分，说「引用了 4 个来源但只检索了
-一次，缺少证据」；而机械检查算出 `unsupported_citations = 0`，4 条链接全在那次检索结果里。
-**评委看的是截断到 300 字符的摘要，机械检查看的是全文。**
-结论：**先信确定性指标，再听评委的定性判断** —— 评委适合评「好不好」，不适合当事实核查员。
-
-**未完成**：固定任务集 + 跨版本自动回归对比（现在还是一次跑一次评）。
-
-**参考**：<https://qaskills.sh/blog/agent-trajectory-evaluation-guide-2026>
-
----
-
-### 8. 可观测性与可恢复 ✅ 已完成（2026-08-26）
-
-**现状**：跑完就没了。崩了从头再来，出了问题只能看终端回滚。
-
-**怎么改**：每次 run 落盘（`runs/<timestamp>/`：messages、trace、花费、终态），
-加结构化日志 / OpenTelemetry span；再往前一步是 checkpoint 恢复 —— `AgentState` 本来就是
-个 dataclass，序列化成 JSON 就能从中断处续跑。
-
-**验收**：跑到一半 Ctrl-C，能从 checkpoint 续上，不重复已完成的工具调用。
-
-**落地情况**：新增 [`persist.py`](../src/mini_agent/persist.py)。每步把整个 `AgentState`
-写进 `runs/<时间戳>/state.json`（临时文件 + 改名，避免残档），`--resume` 从那里接着跑。
-恢复时**不重建 system 消息**（重建 = prompt cache 作废），命令行上限按「再给这么多」叠加。
-`run_dir=None` 表示不落盘 —— 评测和单测走这条路，不往仓库里拉屎。
-
-**顺带逮到一个真 bug**：写恢复用例时发现，强制收尾轮如果模型仍然硬发工具调用，
-那些调用**没有结果消息**，消息协议就断了 —— 下一次请求（包括 `--resume`）直接 400。
-现在收尾轮会给每个悬空调用补一条「已进入收尾阶段，工具不可用」的结果。
-评测里加了一条用例盯着它。这类 bug 只有在真去做「恢复」时才会现形。
-
-**未完成**：OpenTelemetry span 之类的结构化追踪。
+**Left open**: compaction itself costs a model call and currently re-summarizes from
+scratch every time; hierarchical summaries (summaries of summaries) are not done.
 
 ---
 
-## P3 · 打开生态
+### 5. Parallel tool execution — DONE (2026-08-26)
 
-### 9. 接入 MCP
+**Before**: the model fired three searches in one turn and
+[`loop.py`](../src/mini_agent/loop.py) ran them one at a time. With real web search
+that became the most obvious wall-clock waste.
 
-**现状**：工具是硬编码的 Python 函数，加一个工具就得改一次 [`tools.py`](../src/mini_agent/tools.py)。
+**How**: run tool execution through `asyncio.gather` (or a thread pool, since most
+tools are synchronous IO).
 
-**为什么值得**：MCP 已是 2026 工具接入的事实标准，接上之后现成的 server（文件系统、
-数据库、GitHub、浏览器……）拿来就用，不用自己一个个写。2026 roadmap 的重点是传输层扩展性、
-agent 间通信、治理与企业就绪。
+**Invariant that must hold**: results are fed back **in `tool_calls` order** and every
+`tool_call_id` has its result — the thing
+`tool_results_follow_their_call()` in `evals.py` pins down. Concurrency is the change
+most likely to break it, so check that case first.
 
-**怎么改**：写一个 `mcp_tools.py`，从 MCP server 拉取工具清单，转成现有的 `Tool` 结构塞进
-`REGISTRY` —— 因为 `tools.execute()` 的接口是「名字 + JSON 字符串参数」，和 MCP 的调用形状天然对齐，
-`loop.py` 依然不用改。
+**Definition of done**: three fake tools that sleep 1s each take ~1s per turn rather
+than 3s, with all evals still green.
 
-**验收**：启动时连上一个本地 MCP server，其工具出现在 `tools.specs()` 里并能被模型正常调用。
+**What shipped**: `execute_calls()` runs a thread pool and refills in the original
+order; in `tests/test_parallel.py` three 0.3s fake tools finish in under 0.6s, with
+order and invariants verified. Per-call timeouts came along too (`--tool-timeout`,
+default 30s), returning an ERROR result instead of wedging the whole turn — the "one
+stuck tool" debt left over from the time brake. The search throttle's global counter
+in `tools.py` got a lock (under parallelism it was a race).
 
-**参考**：<https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/>
-
----
-
-### 10. Subagent / 上下文隔离
-
-**现状**：所有事情挤在一条上下文里。
-
-**怎么改**：orchestrator-worker：主 agent 把子任务派给独立上下文的子 agent，子 agent 只把
-**结论**回传（而不是把它读过的所有网页都带回主上下文）。这同时也是最有效的上下文压缩手段。
-
-**验收**：一个需要读 5 个来源的任务，主上下文的 token 数显著低于单上下文版本，结论质量不降。
-
----
-
-### 11. 更好的检索后端
-
-**现状**：`search_web` 用 ddgs 抓 DuckDuckGo，免费免 key，但质量和稳定性都一般。
-
-**选项**：模型侧内置的 hosted web search（走 Responses API，见 #1）、或专门的 agentic search API。
-接口不用变，`search_web` 内部换后端即可 —— 三种模式（auto/web/offline）的结构已经预留好了。
+**Surprise finding**: real searches only sped up 1.39x (5.05s -> 3.64s), because the
+bottleneck was not the network but the interval we added ourselves to dodge
+DuckDuckGo's rate limiter. Measured: 8.3s in parallel at a 1.5s interval, 4.7s with no
+interval. Settled at 0.5s. **The ceiling on this optimization is set by #11 (a better
+search backend), not by concurrency** — measure before optimizing, or you push hard in
+the wrong place.
 
 ---
 
-## 刻意不做的事
+### 6. Human-in-the-loop approval and permission tiers — DONE (2026-08-26)
 
-- **不引入 agent 框架**（LangGraph 之类）。这个仓库的价值就在于那 40 行循环是**你自己的**，
-  一眼能看完。套上框架，学习价值立刻归零。
-- **不做多租户 / 服务化 / Web UI**。那是另一个项目的事。
-- **不追求工具数量**。四个工具足够演示所有机制；真要工具，走 #9 的 MCP。
+**Before**: every tool was read-only or harmless, so there was no approval step. Add
+`send_email`, `shell`, or file writes and that is a hole with real consequences.
+
+**How**: give `Tool` a `requires_approval: bool` (or a danger level). Emit an
+`approval_required` event before executing and confirm interactively in the CLI; in
+non-interactive mode deny by default and hand "denied" back as the tool result so the
+model can take another route.
+
+**Definition of done**: a tool marked dangerous never executes in automatic mode, and
+the loop keeps running with the message protocol intact.
+
+**What shipped**: `Tool.requires_approval` plus a `run(approve=...)` callback,
+defaulting to `deny_all`. CLI `--approve auto|deny|allow`: auto asks when there is a
+terminal and **denies when there is not**. A new example tool `send_email` (writes
+outbox.jsonl, sends nothing) — the last entry in the original notes' tool list, and
+the first one that needs a gate: a read-only tool going wrong wastes one call, this one
+going wrong means the mail has left.
+
+**Deliberate choices**:
+- Deny by default rather than allow. "Nobody is watching, so allow it" is the most
+  dangerous default there is; the run that goes wrong is the unattended one.
+- The approval check runs serially **before** the thread pool (it either asks a human
+  or denies, and cannot be parallelized).
+- A denied call still gets a result message that says "not executed, do not re-send".
+- Read-only tools never carry the flag: ask too often and people go numb, and numb
+  people approve with their eyes closed.
+- Trajectory eval gained `denied` and `retried_after_denial` (re-sending an identical
+  call after a denial = the denial was not understood).
+
+**Left open**: finer permission tiers (argument-aware rules, e.g. "only addresses on
+this allowlist").
 
 ---
 
-## 一句话优先级
+## P2 - from "it runs" to "it can be trusted"
 
-想让它更**聪明** → 做 #1（Responses API）。
-想让它能干**更久的活** → 做 #4（上下文压缩）。
-想让它**更快** → 做 #5（并行工具）。
-想让它**可信** → 做 #7（trajectory eval）。
-想让它**有更多能力** → 做 #9（MCP）。
+### 7. Trajectory eval — DONE (2026-08-26)
+
+**Before**: the cases in [`evals.py`](../src/mini_agent/evals.py) pin down whether the
+loop protocol is correct — necessary, but the lowest tier, equivalent to unit tests.
+
+**What an agent eval looks like in 2026**: it scores the **whole trajectory**, not
+just the final answer. The same correct answer reached in 3 clean steps and in 12
+flailing ones are not worth the same. Common dimensions: outcome correctness, tool-use
+correctness (right tool, right arguments), efficiency (steps / tokens / cost), and
+path safety, scored with an LLM-as-judge rubric.
+
+**How**:
+- build a small task set (10-20 items), each with expected conclusions and a
+  reasonable tool-use path;
+- keep `ScriptedModel` for the protocol layer and use a real model for the trajectory
+  layer (that part costs money, so it gets its own command);
+- add a judge: hand `state.trace` and the final answer to a model with a rubric;
+- persist results under `runs/` so two versions can be compared.
+
+**Definition of done**: change the system prompt and be able to say in numbers whether
+it got better or worse, instead of guessing.
+
+**What shipped**: a new [`trajectory.py`](../src/mini_agent/trajectory.py), taking the
+`runs/*/state.json` files persisted by #8 as input. Two layers:
+
+- **Mechanical metrics** (free, deterministic): steps, tool calls / failures /
+  **duplicates**, throttled, compactions, elapsed, tokens, cache hits, `delivered`
+  (a real conclusion or nothing), `asks_user_back` (handing the question back — the
+  shape of the very first real failure), and `unsupported_citations` (links in the
+  answer that appear in no tool result).
+- **The LLM judge**: outcome / grounding / efficiency / honesty from 0-5, plus a
+  verdict and the single thing most worth fixing. Unparseable JSON is reported as an
+  error rather than a fake score.
+
+**The most interesting moment in testing**: the judge scored one run's grounding 3,
+saying "it cited four sources but only searched once, so the evidence is missing",
+while the mechanical check computed `unsupported_citations = 0` — all four links were
+in that search's results. **The judge saw a 300-character excerpt; the mechanical
+check saw the full text.** Conclusion: **trust the deterministic metrics first, then
+the judge's qualitative read** — a judge is good at "how good is this", not at fact
+checking.
+
+**Left open**: a fixed task set and automated cross-version regression comparison
+(right now it is one run, one score).
+
+**Reference**: <https://qaskills.sh/blog/agent-trajectory-evaluation-guide-2026>
 
 ---
 
-## 实战补丁（来自三次真实运行的复盘）
+### 8. Observability and resumability — DONE (2026-08-26)
 
-这几条不在最初的路线图上，是跑真任务跑出来的。共同点：都不是循环写错了，
-而是**模型缺少它做决策所需的信息**。
+**Before**: a finished run left nothing behind. A crash meant starting over, and
+debugging meant scrolling the terminal.
 
-### A. 告诉模型今天几号 ✅
+**How**: persist each run (`runs/<timestamp>/`: messages, trace, spend, final state),
+add structured logging / OpenTelemetry spans; one step further is checkpoint resume —
+`AgentState` is already a dataclass, so JSON is enough to continue from where it
+stopped.
 
-**症状**（第 1 次运行）：让它研究 Anthropic 近半年动态，检索返回了真实的 2026 年新闻，
-它却判定「与公开信息量级严重不符，极可能不实」，拒绝采信，最后交回来一份**请示**而不是简报。
+**Definition of done**: Ctrl-C halfway through, then resume from the checkpoint
+without redoing completed tool calls.
 
-**根因**：system prompt 里没有日期。模型拿训练时代的记忆去衡量比自己新的信息，
-于是系统性地不信任检索结果 —— 在变化快的领域，这会让检索能力直接失效。
+**What shipped**: a new [`persist.py`](../src/mini_agent/persist.py). Every step writes
+the whole `AgentState` to `runs/<timestamp>/state.json` (temp file plus rename, so no
+half-written files), and `--resume` continues from there. Resume **does not rebuild the
+system message** (rebuilding voids the prompt cache), and command-line ceilings stack
+as "give it this much more". `run_dir=None` disables persistence — the path evals and
+unit tests take, so they leave nothing in the repo.
 
-**修法**：注入当天日期 + 明确「检索结果的时效性优先于你的先验」+ 要求做**来源分级**
-（一手 > 主流媒体 > SEO 聚合）而不是整体拒绝。后来还补了一条：**检索词的时间锚点也要用今天算**，
-不要拿记忆里的年份和事件当检索前提（第 2 次运行里它搜的是 "funding 2025"、"Claude 3.5"，
-反而错过了上一次搜到过的营收报道）。
+**A real bug caught along the way**: writing the resume test revealed that if the model
+still emits tool calls during the forced wrap-up turn, those calls have **no result
+messages** and the protocol breaks — the next request (including a later `--resume`)
+fails with a 400. The wrap-up turn now fills every dangling call with "the run has
+entered wrap-up, tools are unavailable", and an eval case watches it. This class of bug
+only surfaces once you actually implement resume.
 
-### B. 告诉模型它还剩多少资源 ✅
+**Left open**: structured tracing such as OpenTelemetry spans.
 
-**症状**（第 1 次运行）：还剩 6 轮、97% 预算的情况下，它问「是否同意我再跑 2-3 组检索」——
-而 CLI 是单轮的，**没有人能回答它**。
+---
 
-**根因**：`AgentState` 里 step / remaining_budget 一应俱全，却从没告诉过模型；
-system prompt 也没说明它跑在无人值守模式下。
+## P3 - opening up the ecosystem
 
-**修法**：每轮追加一条 `[运行状态]` 消息（追加在末尾，不破坏 prompt caching 前缀），
-system prompt 里写明「没有人会回答你的提问，不要请求许可」。
+### 9. MCP support
 
-### C. 触顶时必须强制收尾 ✅
+**Now**: tools are hardcoded Python functions, and adding one means editing
+[`tools.py`](../src/mini_agent/tools.py).
 
-**症状**（第 3 次运行）：修完 A、B 之后它变得很自主 —— 自主过头了。
-8 轮全用来检索（而且检索得很好：anthropic.com/news、Bloomberg、NYT、FT 一手来源全找到了），
-然后撞上 `max_steps`，输出「（未得出最终答案）」。**十次检索的钱全白花。**
+**Why it is worth it**: MCP is the de facto standard for tool integration in 2026.
+Connect to it and off-the-shelf servers (filesystem, databases, GitHub, browsers) work
+immediately instead of being written one at a time. The 2026 roadmap focuses on
+transport scalability, agent-to-agent communication, governance and enterprise
+readiness.
 
-**根因**：刹车只负责「停」，不负责「卸货」。而且状态行里预算显示很充裕（91%），
-步数却已见底 —— 模型权衡时被前者误导了。
+**How**: write an `mcp_tools.py` that pulls the tool list from an MCP server and turns
+each entry into the existing `Tool` structure in `REGISTRY`. Because `tools.execute()`
+takes "a name plus a JSON string of arguments", which matches MCP's call shape
+naturally, `loop.py` still does not change.
 
-**修法**两层：
-1. 最后一轮直接传**空的工具清单**（措辞可以被无视，空清单不能），并在状态行里升级措辞；
-2. 真触顶时再问一次、同样不给工具，把已有信息榨成「结论 + 置信度 + 未核实项」，
-   抢到东西才标记 `salvaged=True`。
+**Definition of done**: connect to a local MCP server at startup, see its tools in
+`tools.specs()`, and have the model call them normally.
 
-**教训**：这三条都指向同一个更一般的原则 ——
-**agent 的失败往往不在控制流，而在「模型不知道自己的处境」**。
-状态存在 `AgentState` 里不等于模型知道；不告诉它，它就只能靠猜。
+**Reference**: <https://blog.modelcontextprotocol.io/posts/2026-mcp-roadmap/>
 
-### D. 时间预算 ✅（2026-08-26）
+---
 
-**动机**：接了真实检索之后，限流间隔（1.5s）+ 退避重试（最多 7s）+ 网络延迟让墙上时间显著变长，
-但循环对「跑了多久」完全无感 —— 钱可能只用了 8%，人已经等了两分钟。
-钱衡量的是模型算力，时间衡量的是人的等待，两者不能互相代替。
+### 10. Subagents / context isolation
 
-**实现**：`run(time_budget=...)` / `--deadline 秒`，**默认 600 秒（10 分钟）**、填 0 不限，新状态 `out_of_time`，
-超时同样走强制收尾轮（C）。`[运行状态]` 行现在会把步数/预算/时间里**最紧的那道**摆到模型面前。
-`clock` 参数可注入假时钟，所以这条刹车在评测里是可复现的（`clock_values`），不靠 sleep。
+**Now**: everything shares one context.
 
-**已知局限**：时间只在两轮之间检查，单个工具调用卡死仍会超时。
-给工具本身加超时需要线程/异步，留到 #5 并行执行时一起做。
+**How**: orchestrator-worker. The main agent delegates subtasks to subagents with their
+own contexts, and a subagent returns only its **conclusion** (not every page it read).
+This is also the most effective form of context compression.
+
+**Definition of done**: for a task that needs five sources, the main context uses
+significantly fewer tokens than the single-context version with no loss of quality.
+
+---
+
+### 11. A better search backend
+
+**Now**: `search_web` scrapes DuckDuckGo through ddgs — free and key-less, but average
+in both quality and stability.
+
+**Options**: the model's own hosted web search (via the Responses API, see #1), or a
+dedicated agentic search API. The interface does not change; only the inside of
+`search_web` does — the three-mode structure (auto/web/offline) is already there.
+
+---
+
+## Deliberately not doing
+
+- **No agent framework** (LangGraph and friends). The value of this repo is that the
+  40-line loop is **yours** and fits on one screen. Wrap it in a framework and the
+  learning value drops to zero.
+- **No multi-tenancy, service layer or web UI.** That is a different project.
+- **No race for tool count.** Five tools demonstrate every mechanism; if you want more
+  tools, go through MCP (#9).
+
+---
+
+## Priorities in one line
+
+Want it **smarter** -> #1 (Responses API).
+Want it to sustain **longer work** -> #4 (context compaction).
+Want it **faster** -> #5 (parallel tools).
+Want it **trustworthy** -> #7 (trajectory eval).
+Want it to **do more** -> #9 (MCP).
+
+---
+
+## Field patches (from reviewing three real runs)
+
+None of these were on the original roadmap; they came out of running real tasks. They
+share a root cause: the loop was not wrong, the **model was missing the information it
+needed to decide**.
+
+### A. Tell the model what day it is — DONE
+
+**Symptom** (run 1): asked to research Anthropic's last six months, the search returned
+genuine 2026 news and the model judged it "wildly out of line with public information,
+very likely false", refused to use it, and handed back a **request for permission**
+instead of a briefing.
+
+**Root cause**: no date in the system prompt. The model measured newer information
+against training-era memory and systematically distrusted the search results — in a
+fast-moving field that disables search entirely.
+
+**Fix**: inject today's date, state explicitly that "search results take precedence
+over your priors", and require **source grading** (primary > major media > SEO
+aggregators) instead of blanket rejection. Later addition: **anchor query time
+expressions to today too** — do not build queries on remembered years and events (in
+run 2 it searched "funding 2025" and "Claude 3.5", and thereby missed a revenue report
+it had found the run before).
+
+### B. Tell the model how much is left — DONE
+
+**Symptom** (run 1): with 6 turns and 97% of the budget remaining, it asked "may I run
+2-3 more searches?" — and the CLI is single-shot, so **nobody could answer it**.
+
+**Root cause**: `AgentState` had step and remaining_budget all along, but the model was
+never told; nor did the system prompt say it was running unattended.
+
+**Fix**: append a `[run status]` message each turn (at the end, so the prompt-caching
+prefix stays intact), and state in the system prompt that "nobody will answer your
+questions, do not ask for permission".
+
+### C. Force a wrap-up when a ceiling is hit — DONE
+
+**Symptom** (run 3): after A and B it became far more autonomous — too autonomous. It
+spent all 8 turns searching (and searched well: anthropic.com/news, Bloomberg, NYT and
+FT all found), hit `max_steps`, and printed "(no final answer)". **Ten searches paid
+for, nothing to show.**
+
+**Root cause**: the brake only stopped the car, it did not unload it. And the status
+line showed a comfortable budget (91%) while the steps were nearly gone — the model
+weighed the wrong one.
+
+**Fix**, in two layers:
+1. the final turn is handed an **empty tool list** (wording can be ignored, an empty
+   list cannot), with sharper wording in the status line;
+2. when a ceiling is actually hit, ask once more, again with no tools, and squeeze
+   "conclusion + confidence + unverified items" out of what is there — `salvaged=True`
+   only if something was actually rescued.
+
+**The lesson**: all three point at the same general principle —
+**an agent's failures are usually not in the control flow but in "the model does not
+know its own situation"**. Having the state in `AgentState` is not the same as the
+model knowing it; if you do not tell it, it can only guess.
+
+### D. Time budget — DONE (2026-08-26)
+
+**Motivation**: once search was real, the throttle interval, backoff retries and
+network latency made wall-clock time grow a lot, while the loop had no idea how long it
+had been running — 8% of the money spent and two minutes of a human's life gone. Money
+measures model compute, time measures human waiting, and neither substitutes for the
+other.
+
+**Implementation**: `run(time_budget=...)` / `--deadline <seconds>`, **default 600
+(10 minutes)**, 0 for unlimited, with a new `out_of_time` status that also goes through
+the forced wrap-up from C. The `[run status]` line now puts **the tightest** of steps /
+budget / time in front of the model. The `clock` parameter accepts a fake clock, so
+this brake is reproducible in evals (`clock_values`) without sleeping.
+
+**Known limitation**: time is only checked between turns, so a wedged tool call can
+still overrun. That is what `--tool-timeout` (from #5) is for.
+
+### E. Attempt the gated call; do not ask for permission in the answer — DONE (2026-08-26)
+
+**Symptom**: asked to "research X, then email me the result", the agent researched
+well and **never called `send_email` at all**. It wrote a draft into its final answer
+and said "reply 'please send' to authorize me". More budget did not help: with the
+address supplied and 14 turns available it still stopped at turn 6 with 97% of the
+budget unspent. It was not running out of room; it never intended to make the call.
+
+**Root cause**: the prompt offered an exit — "if denied, take another route **or state
+in your final answer that this step is for the user to do**" — and the model took the
+exit *pre-emptively*, as the safest-looking option. Which turned an interactive
+question into a dead end, because the approval prompt was waiting one step away and
+nobody reads the final answer before the run ends.
+
+**Fix**: spell out the order, and say where authorization actually lives.
+
+1. call the tool when the task asks for it;
+2. only a *denied* call justifies another route, or saying the step is left to the user;
+3. never re-send an identical denied call.
+
+Plus one line: do not ask for authorization in the answer — the approval prompt is
+where the user grants or refuses it.
+
+**Verified live twice** (gpt-5-mini, `--approve deny` so nothing could be sent):
+`send_email` is attempted, denied by policy, and the item is then marked blocked with
+the reason. Before the fix, the tool was never called in any run.
+
+### F. A checklist, so half a task cannot look finished — DONE (2026-08-26)
+
+**Symptom**: the same run as E. Even with the prompt fixed, nothing in the system knew
+that the request had two halves. `status: done` was reported for a task that was half
+delivered, and neither the loop nor the metrics could tell.
+
+**Root cause**: the same general principle as A/B/C, one level up — **the model did not
+know it had missed something, because nobody was remembering.** A plan held in the
+model's head cannot be recovered once it drifts out of attention.
+
+**Implementation**: new [`plan.py`](../src/mini_agent/plan.py) plus `AgentState.todo`.
+
+- `decompose()` makes one model call at the start (no tools) and turns the goal into
+  1-5 action items. A planner that fails returns an empty list, which degrades exactly
+  to the old behaviour — a broken planner must never stop a run.
+- Every turn's `[run status]` line carries the checklist with `[x]`/`[ ]` marks.
+- The model ticks items off with the `update_todo` tool: `done`, or `blocked` with a
+  reason. Blocked is settled — it stops being outstanding but keeps the reason.
+- **Completion check**: if the model stops calling tools while items are open, the loop
+  pushes back once with the open items and continues; the answer stands on the second
+  attempt either way. Once, never a loop (an eval case pins that down).
+- The forced wrap-up turn (C) also names unfinished items, so a run that ran out of
+  resources admits what it never did.
+- CLI: on by default for `--live`, `--no-plan` to skip. `snapshot()` reports
+  `todo_done`.
+
+**A bug this caught immediately**: `persist.load()` rebuilt `trace` into dataclasses but
+left `todo` as raw dicts, so scoring a saved run crashed on attribute access. Nested
+dataclasses do not survive `asdict()` on their own — now both are rebuilt, with a test.
+
+**Metrics** (trajectory eval): `action_never_attempted` (the goal used an action verb
+and no gated tool was ever called — a *denied* attempt does not count, since the model
+did its part), `asks_without_trying` (asked for authorization in the answer without
+attempting the call), and `pending_todos`.
+
+**Left open**: the checklist is fixed at the start. Replanning mid-run, when the task
+turns out to be different from what it looked like, is not implemented.

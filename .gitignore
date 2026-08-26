@@ -5,24 +5,24 @@ __pycache__/
 build/
 dist/
 
-# uv / 虚拟环境
+# uv / virtualenv
 .venv/
 .python-version
 
-# 环境变量与密钥（绝不要提交）
+# Environment variables and secrets (never commit these)
 .env
 .env.local
 
-# 工具缓存
+# Tool caches
 .mypy_cache/
 .pytest_cache/
 .ruff_cache/
 
-# Agent 运行时产物
+# Agent runtime artifacts
 memory.json
 runs/
 
-# 编辑器 / 系统
+# Editors / OS
 .vscode/
 .idea/
 .DS_Store

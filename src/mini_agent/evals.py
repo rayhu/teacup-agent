@@ -1,13 +1,16 @@
-"""Evals —— 用脚本模型给控制循环做体检，零 API key、零费用。
+"""Evals — a health check on the control loop using a scripted model. No API key,
+no cost.
 
-评测的不是「模型聪不聪明」，而是「循环对不对」：
-坏参数能不能自愈、多工具是否全部回填、上限是否真的刹得住车。
+These do not measure how smart the model is; they measure whether the **loop** is
+correct: does a bad argument heal itself, does every tool call get its result back,
+do the ceilings actually stop the car.
 
-跑法：uv run python -m mini_agent.evals   （或 uv run pytest）
+Run with: uv run python -m mini_agent.evals   (or uv run pytest)
 """
 
 from __future__ import annotations
 
+import json
 import os
 from dataclasses import dataclass
 from typing import Callable
@@ -19,16 +22,24 @@ from mini_agent.state import AgentState
 
 
 class ScriptedWithSummarizer(ScriptedModel):
-    """脚本模型 + 会应答压缩请求（压缩会额外调一次模型，剧本里不该为它留位置）。"""
+    """Scripted model that also answers the framework's own side calls.
 
-    def __init__(self, script, fallback: str = "（剧本已结束）"):
+    Compaction and planning each make an extra model call, and the script should not
+    have to reserve a slot for either.
+    """
+
+    def __init__(self, script, fallback: str = "(script exhausted)", plan_items=None):
         super().__init__(script, fallback)
         self.summaries = 0
+        self.plan_items = plan_items or ["research the topic", "email the result"]
 
     def complete(self, messages, tools):
-        if messages and str(messages[0].get("content", "")).startswith("你在压缩"):
+        first = str(messages[0].get("content", "")) if messages else ""
+        if first.startswith("You are compacting"):
             self.summaries += 1
-            return assistant_says("【摘要】已查证 A、B 两条事实；C 尝试失败。")
+            return assistant_says("[summary] Facts A and B verified; attempt C failed.")
+        if first.startswith("Break the user's request"):
+            return assistant_says(json.dumps(self.plan_items))
         return super().complete(messages, tools)
 
 
@@ -42,40 +53,43 @@ class Case:
     max_tool_calls: int = 3
     time_budget: float | None = None
     context_limit: int = 30_000
-    clock_values: list[float] | None = None  # 假时钟读数，让时间刹车可复现
+    plan: bool = False
+    plan_items: list[str] | None = None
+    clock_values: list[float] | None = None  # fake clock, makes the time brake repeatable
 
 
 def tool_results_follow_their_call(state: AgentState) -> bool:
-    """每条工具结果的 id，必须在它**之前**的某条「宣告了该调用」的条目里出现过，
-    且每个宣告过的 id 都必须恰好被回填一次。两种 API 形状都认。"""
+    """Every tool result's id must appear in an entry **before** it that announced
+    the call, and every announced id must be filled exactly once. Both API shapes
+    are recognised."""
     announced: set[str] = set()
     for msg in state.messages:
-        # Chat Completions 形状
+        # Chat Completions shape
         if msg.get("role") == "assistant":
             for tc in msg.get("tool_calls") or []:
                 announced.add(tc["id"])
         elif msg.get("role") == "tool":
             if msg.get("tool_call_id") not in announced:
                 return False
-            announced.discard(msg["tool_call_id"])  # 一个 id 只应被回填一次
-        # Responses 形状
+            announced.discard(msg["tool_call_id"])  # an id may only be filled once
+        # Responses shape
         elif msg.get("type") == "function_call":
             announced.add(msg["call_id"])
         elif msg.get("type") == "function_call_output":
             if msg.get("call_id") not in announced:
                 return False
             announced.discard(msg["call_id"])
-    return not announced  # 所有宣告过的调用都必须有结果
+    return not announced  # every announced call must have a result
 
 
 CASES: list[Case] = [
     Case(
-        name="直接回答：模型不调工具时循环应立即结束",
+        name="direct answer: the loop ends as soon as the model calls no tools",
         script=[assistant_says("42")],
         check=lambda s: s.status == "done" and s.answer == "42" and s.step == 1,
     ),
     Case(
-        name="工具回填：一轮内的多个工具调用必须全部有结果消息",
+        name="refill: every tool call in a turn must get a result message",
         script=[
             assistant_calls(
                 [
@@ -83,21 +97,21 @@ CASES: list[Case] = [
                     ("calculate", {"expression": "2+3"}),
                 ]
             ),
-            assistant_says("好了"),
+            assistant_says("done"),
         ],
         check=lambda s: (
             len(s.trace) == 2
             and sum(m["role"] == "tool" for m in s.messages) == 2
-            and tool_results_follow_their_call(s)  # 坑 1：顺序不能反
+            and tool_results_follow_their_call(s)  # trap 1: order cannot be reversed
             and "5" in s.trace[1].result
         ),
     ),
     Case(
-        name="错误自愈：坏 JSON 参数应作为 ERROR 结果回传，循环继续",
+        name="self-healing: malformed JSON comes back as an ERROR result, loop continues",
         script=[
-            assistant_calls([("calculate", "{坏掉的 json")]),
+            assistant_calls([("calculate", "{broken json")]),
             assistant_calls([("calculate", {"expression": "1+1"})]),
-            assistant_says("修好了，等于 2"),
+            assistant_says("fixed, it is 2"),
         ],
         check=lambda s: (
             s.status == "done"
@@ -106,155 +120,205 @@ CASES: list[Case] = [
         ),
     ),
     Case(
-        name="未知工具：不应崩溃，而是告诉模型可用工具",
-        script=[assistant_calls([("teleport", {"to": "火星"})]), assistant_says("换个方式")],
-        check=lambda s: "未知工具" in s.trace[0].result and s.status == "done",
+        name="unknown tool: no crash, tell the model which tools exist",
+        script=[assistant_calls([("teleport", {"to": "Mars"})]), assistant_says("another way")],
+        check=lambda s: "unknown tool" in s.trace[0].result and s.status == "done",
     ),
     Case(
-        name="步数上限：模型一直调工具时必须刹车",
+        name="step ceiling: a model that keeps calling tools must be stopped",
         script=[assistant_calls([("calculate", {"expression": "1+1"})]) for _ in range(10)],
         check=lambda s: s.status == "max_steps" and s.step == 3,
         max_steps=3,
     ),
     Case(
-        name="预算上限：花超了必须停",
+        name="budget ceiling: overspending must stop the run",
         script=[assistant_calls([("calculate", {"expression": "1+1"})], cost=0.02) for _ in range(10)],
         check=lambda s: s.status == "out_of_budget" and s.remaining_budget <= 0,
         budget=0.03,
     ),
     Case(
-        name="长期记忆：remember 工具应把事实写进 memory",
+        name="long-term memory: the remember tool writes the fact into memory",
         script=[
-            assistant_calls([("remember", {"fact": "用户偏好中文回答"})]),
-            assistant_says("记住了"),
+            assistant_calls([("remember", {"fact": "user prefers concise answers"})]),
+            assistant_says("noted"),
         ],
-        check=lambda s: "已记住" in s.trace[0].result,
+        check=lambda s: "Remembered" in s.trace[0].result,
     ),
     Case(
-        name="每轮上限：超额的调用必须被拒绝执行，但仍要各回一条 tool 消息",
+        name="per-turn cap: excess calls are refused but still get a tool message each",
         script=[
             assistant_calls([("calculate", {"expression": f"{i}+1"}) for i in range(5)]),
-            assistant_says("够了"),
+            assistant_says("enough"),
         ],
         max_tool_calls=2,
         check=lambda s: (
-            sum(t.executed for t in s.trace) == 2  # 只真跑了 2 个
-            and sum(not t.executed for t in s.trace) == 3  # 3 个被拦
-            and sum(m["role"] == "tool" for m in s.messages) == 5  # 但 5 个 id 都回填了（坑 2）
+            sum(t.executed for t in s.trace) == 2  # only two actually ran
+            and sum(not t.executed for t in s.trace) == 3  # three were held back
+            and sum(m["role"] == "tool" for m in s.messages) == 5  # all five ids filled (trap 2)
             and tool_results_follow_their_call(s)
             and s.trace[4].result.startswith("ERROR:")
             and s.status == "done"
         ),
     ),
     Case(
-        name="绝不空手而归：步数用光后必须强制收尾给出结论",
-        # 前两轮一直调工具把步数耗光，收尾轮没有工具可用，只能给结论
+        name="never empty-handed: running out of steps forces a wrap-up conclusion",
+        # Two turns of tool calls burn the steps; the wrap-up turn has no tools left
+        # and can only conclude.
         script=[
             assistant_calls([("calculate", {"expression": "1+1"})]),
             assistant_calls([("calculate", {"expression": "1+1"})]),
-            assistant_says("目前能给出的结论：1+1=2（高置信）；其余项未能核实。"),
+            assistant_says("Best available conclusion: 1+1=2 (high confidence); the rest is unverified."),
         ],
         max_steps=2,
         check=lambda s: (
             s.status == "max_steps"
-            and s.salvaged  # 走了强制收尾轮
+            and s.salvaged  # the forced wrap-up turn ran
             and s.answer
-            and not s.answer.startswith("（未得出最终答案")
+            and not s.answer.startswith("(no final answer")
         ),
     ),
     Case(
-        name="预算烧光同样要收尾，而不是丢下一句「停止原因」",
+        name="a burnt budget also wraps up instead of printing a stop reason",
         script=[
             assistant_calls([("calculate", {"expression": "1+1"})], cost=0.02),
             assistant_calls([("calculate", {"expression": "1+1"})], cost=0.02),
-            assistant_says("预算耗尽前的结论：1+1=2。"),
+            assistant_says("Conclusion before the budget ran out: 1+1=2."),
         ],
         budget=0.03,
         check=lambda s: s.status == "out_of_budget" and s.salvaged and s.answer,
     ),
     Case(
-        name="时间刹车：墙上时间用光同样要停并收尾",
+        name="time brake: running out of wall-clock time also stops and wraps up",
         script=[
             assistant_calls([("calculate", {"expression": "1+1"})]),
             assistant_calls([("calculate", {"expression": "1+1"})]),
-            assistant_says("时间到，先给结论：1+1=2。"),
+            assistant_says("Out of time, so: 1+1=2."),
         ],
         time_budget=10.0,
-        # 假时钟：跑完两轮后第三次检查已超时（读数依次被 run() 取用）
+        # Fake clock: two turns run, the third check is already over the limit
+        # (run() consumes these readings in order).
         clock_values=[0.0, 1.0, 2.0, 12.0, 12.0, 12.0],
         check=lambda s: (
             s.status == "out_of_time"
-            and s.step == 2  # 钱和步数都还有富余，是时间把它拦下的
+            and s.step == 2  # money and steps both had slack; time stopped it
             and s.remaining_budget > 0
             and s.salvaged
             and s.answer
         ),
     ),
     Case(
-        name="上下文压缩：压完消息协议必须依然完整",
+        name="compaction: the message protocol must survive it",
         script=[assistant_calls([("calculate", {"expression": "1+1"})]) for _ in range(5)]
-        + [assistant_says("压缩后仍能收尾")],
-        context_limit=200,  # 故意设小，逼它压缩
+        + [assistant_says("still able to wrap up after compaction")],
+        context_limit=200,  # deliberately tiny, to force compaction
         max_steps=7,
         check=lambda s: (
             s.compactions >= 1
-            and tool_results_follow_their_call(s)  # 没把调用和结果拆散
-            and any("[上下文摘要]" in str(m.get("content", "")) for m in s.messages)
-            and s.messages[1]["content"] == "上下文压缩：压完消息协议必须依然完整"  # 目标还在
+            and tool_results_follow_their_call(s)  # no call was split from its result
+            and any("[context summary]" in str(m.get("content", "")) for m in s.messages)
+            and s.messages[1]["content"] == "compaction: the message protocol must survive it"
         ),
     ),
     Case(
-        name="收尾轮若硬发工具调用，也必须补齐结果消息（否则恢复时会 400）",
+        name="tool calls in the wrap-up turn still need result messages (or resume 400s)",
         script=[
             assistant_calls([("calculate", {"expression": "1+1"})]),
-            assistant_calls([("calculate", {"expression": "9+9"})]),  # 收尾轮还想调工具
+            assistant_calls([("calculate", {"expression": "9+9"})]),  # wrap-up turn tries a tool
         ],
         max_steps=1,
         check=lambda s: (
             s.status == "max_steps"
-            and tool_results_follow_their_call(s)  # 没有悬空的 tool_call_id
-            and any("强制收尾阶段" in str(m.get("content", "")) for m in s.messages)
+            and tool_results_follow_their_call(s)  # no dangling tool_call_id
+            and any("forced wrap-up" in str(m.get("content", "")) for m in s.messages)
         ),
     ),
     Case(
-        name="确认门：无人值守时危险操作必须被拒绝，且不能真的执行",
+        name="approval gate: unattended runs deny side effects and never execute them",
         script=[
             assistant_calls([("send_email", {"to": "a@b.c", "subject": "s", "body": "b"})]),
-            assistant_says("邮件没发成，需要你自己来发。"),
+            assistant_says("The email was not sent; you will have to send it yourself."),
         ],
         check=lambda s: (
             s.trace[0].skip_reason == "denied"
             and not s.trace[0].executed
-            and "没有执行" in s.trace[0].result
-            and tool_results_follow_their_call(s)  # 被拒绝的调用也要有结果消息
+            and "was NOT executed" in s.trace[0].result
+            and tool_results_follow_their_call(s)  # a denied call still gets a result
             and s.status == "done"
         ),
     ),
     Case(
-        name="确认门：只读工具不该被拦",
+        name="approval gate: read-only tools are never gated",
         script=[
             assistant_calls([("calculate", {"expression": "1+1"})]),
             assistant_says("2"),
         ],
         check=lambda s: s.trace[0].executed and s.trace[0].result == "2",
     ),
+    Case(
+        name="checklist: finishing with an untouched action item gets pushed back once",
+        # Turn 1 answers without doing the second item; the completion check fires and
+        # the model then sends the email.
+        script=[
+            assistant_says("Here is the research. I have not sent the email."),
+            assistant_calls([("send_email", {"to": "a@b.c", "subject": "s", "body": "b"})]),
+            assistant_calls([("update_todo", {"index": 2, "status": "blocked", "note": "denied"})]),
+            assistant_says("Research done; the email needs you to send it."),
+        ],
+        plan=True,
+        plan_items=["research the topic", "email the result to a@b.c"],
+        check=lambda s: (
+            s.completion_checked
+            and any("[completion check]" in str(m.get("content", "")) for m in s.messages)
+            # the push-back made it actually attempt the gated call
+            and any(t.name == "send_email" for t in s.trace)
+            and s.status == "done"
+        ),
+    ),
+    Case(
+        name="checklist: the push-back happens at most once, never a loop",
+        script=[assistant_says("done") for _ in range(6)],
+        plan=True,
+        plan_items=["research the topic", "email the result"],
+        check=lambda s: (
+            s.completion_checked
+            and s.status == "done"
+            and s.step == 2  # one push-back, then the answer stands
+            and sum("[completion check]" in str(m.get("content", "")) for m in s.messages) == 1
+        ),
+    ),
+    Case(
+        name="checklist: update_todo ticks an item off and it stops being outstanding",
+        script=[
+            assistant_calls([("update_todo", {"index": 1, "status": "done"})]),
+            assistant_calls([("update_todo", {"index": 2, "status": "done"})]),
+            assistant_says("both items handled"),
+        ],
+        plan=True,
+        plan_items=["research the topic", "email the result"],
+        check=lambda s: (
+            all(t.done for t in s.todo)
+            and not s.completion_checked  # nothing outstanding, so no push-back
+            and s.status == "done"
+        ),
+    ),
 ]
 
 
 def run_case(case: Case) -> tuple[bool, AgentState]:
-    # 评测必须确定性：强制离线检索，不发网络请求
+    # Evals must be deterministic: force offline search, no network calls.
     os.environ.setdefault("MINI_AGENT_SEARCH", "offline")
     state = loop.run(
         goal=case.name,
-        model=ScriptedWithSummarizer(list(case.script)),
+        model=ScriptedWithSummarizer(list(case.script), plan_items=case.plan_items),
         memory=NullMemory(),
         max_steps=case.max_steps,
         budget=case.budget,
         max_tool_calls_per_step=case.max_tool_calls,
         time_budget=case.time_budget,
         context_limit=case.context_limit,
-        run_dir=None,  # 评测不写盘
-        # 每次跑都新建一个迭代器，用例可以重复执行
+        plan=case.plan,
+        run_dir=None,  # evals never write to disk
+        # A fresh iterator per run, so a case can be executed repeatedly.
         **({"clock": iter(case.clock_values).__next__} if case.clock_values else {}),
     )
     return case.check(state), state
@@ -267,11 +331,11 @@ def main() -> int:
         print(f"{'PASS' if ok else 'FAIL'}  {case.name}")
         if not ok:
             failed += 1
-            print(f"      终态: {state.snapshot()}")
+            print(f"      final state: {state.snapshot()}")
             for t in state.trace:
-                print(f"      · {t.name}({t.arguments}) -> {t.result[:80]}")
+                print(f"      - {t.name}({t.arguments}) -> {t.result[:80]}")
     total = len(CASES)
-    print(f"\n{total - failed}/{total} 通过")
+    print(f"\n{total - failed}/{total} passed")
     return 1 if failed else 0
 
 

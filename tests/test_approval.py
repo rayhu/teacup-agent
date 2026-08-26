@@ -1,7 +1,8 @@
-"""人机确认门。
+"""The human-approval gate.
 
-只读工具不该被拦（问多了会麻木，麻木了就闭眼点同意）；
-有副作用的工具在无人值守时必须**默认拒绝**，而且拒绝后消息协议依然完整。
+Read-only tools must never be gated (ask too often and people go numb, and numb
+people approve with their eyes closed). Side-effecting tools must be **denied by
+default** when nobody is watching, and the message protocol must survive a denial.
 """
 
 import json
@@ -17,17 +18,17 @@ from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
 
 @pytest.fixture
 def outbox(tmp_path, monkeypatch):
-    monkeypatch.chdir(tmp_path)  # send_email 写在当前目录
+    monkeypatch.chdir(tmp_path)  # send_email writes into the working directory
     return tmp_path / "outbox.jsonl"
 
 
 def _send(**kw):
     return loop.run(
-        "发封邮件",
+        "send an email",
         ScriptedModel(
             [
-                assistant_calls([("send_email", {"to": "a@b.c", "subject": "标题", "body": "正文"})]),
-                assistant_says("处理完了"),
+                assistant_calls([("send_email", {"to": "a@b.c", "subject": "subject", "body": "body"})]),
+                assistant_says("handled"),
             ]
         ),
         memory=NullMemory(),
@@ -36,10 +37,10 @@ def _send(**kw):
 
 
 def test_default_policy_denies_and_nothing_is_sent(outbox):
-    state = _send()  # 不传 approve = 默认 deny_all
-    assert not outbox.exists(), "被拒绝的操作绝不能留下副作用"
+    state = _send()  # no approve argument = the default deny_all
+    assert not outbox.exists(), "a denied operation must leave no side effect"
     assert state.trace[0].skip_reason == "denied" and not state.trace[0].executed
-    assert "没有执行" in state.trace[0].result
+    assert "was NOT executed" in state.trace[0].result
     assert tool_results_follow_their_call(state)
 
 
@@ -58,17 +59,17 @@ def test_approver_sees_which_tool_it_is_approving(outbox):
 def test_read_only_tools_are_never_gated(outbox):
     asked = []
     state = loop.run(
-        "算个数",
+        "do some arithmetic",
         ScriptedModel([assistant_calls([("calculate", {"expression": "1+1"})]), assistant_says("2")]),
         memory=NullMemory(),
         approve=lambda call, spec: asked.append(call.name) or True,
     )
-    assert asked == []  # 压根没问
+    assert asked == []  # it was never asked
     assert state.trace[0].result == "2"
 
 
 def test_cli_auto_policy_denies_without_a_terminal(monkeypatch):
-    """CI / 后台任务里没有终端可问 —— 此时必须拒绝，而不是放行。"""
+    """In CI or a background job there is no terminal to ask, so it must deny."""
     monkeypatch.setattr("sys.stdin.isatty", lambda: False)
     approve = _make_approver("auto", quiet=True)
     assert approve(type("C", (), {"name": "send_email", "arguments": "{}"})(), tools.REGISTRY["send_email"]) is False

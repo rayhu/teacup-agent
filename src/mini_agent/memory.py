@@ -1,10 +1,12 @@
-"""Memory —— 分两层，都刻意做得很小。
+"""Memory — two layers, both deliberately tiny.
 
-短期记忆：就是 AgentState.messages 本身，任务结束即消失。
-长期记忆：一个 JSON 文件，跨会话保留；开局注入 system prompt，
-          模型可以通过 `remember` 工具往里写。
+Short term: `AgentState.messages` itself, gone when the task ends.
+Long term:  a JSON file that survives across sessions. It is injected into the
+            system prompt at startup, and the model can write to it with the
+            `remember` tool.
 
-真实项目里这一层会换成向量库 / 数据库，接口保持 remember() + recall() 即可。
+A real project swaps this layer for a vector store or a database; keep the
+remember() + recall() interface and nothing else has to change.
 """
 
 from __future__ import annotations
@@ -26,7 +28,7 @@ class Memory:
                 data = json.loads(self.path.read_text(encoding="utf-8"))
                 self.facts = [str(x) for x in data.get("facts", [])]
             except (json.JSONDecodeError, OSError):
-                self.facts = []  # 记忆损坏不该让 Agent 崩掉
+                self.facts = []  # corrupt memory must not take the agent down
 
     def save(self) -> None:
         self.path.write_text(
@@ -38,19 +40,19 @@ class Memory:
         fact = fact.strip()
         if fact and fact not in self.facts:
             self.facts.append(fact)
-            self.facts = self.facts[-self.limit :]  # 简单的淘汰策略：只留最近 N 条
+            self.facts = self.facts[-self.limit :]  # simplest eviction: keep last N
             self.save()
 
     def recall(self) -> str:
-        """取出可以拼进 system prompt 的记忆块。"""
+        """The memory block to splice into the system prompt."""
         if not self.facts:
             return ""
         lines = "\n".join(f"- {f}" for f in self.facts)
-        return f"你还记得以下事实（来自过去的会话）：\n{lines}"
+        return f"You remember these facts from earlier sessions:\n{lines}"
 
 
 class NullMemory(Memory):
-    """不落盘的记忆，评测和单测用。"""
+    """Memory that never touches disk — for evals and unit tests."""
 
     def __init__(self) -> None:
         self.path = pathlib.Path("/dev/null")

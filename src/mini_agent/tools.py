@@ -1,8 +1,8 @@
-"""Tools —— Agent 能对世界做的动作。
+"""Tools — the things the agent can do to the world.
 
-每个工具 = 一个 Python 函数 + 一份 JSON Schema（描述给模型看）。
-重点是把「注册 → 描述 → 调用 → 回填」这条链路走通；
-search_web 已经是真实联网检索，其余几个仍是最小实现。
+Each tool = one Python function + a JSON Schema (what the model sees).
+The point is to get the register -> describe -> call -> feed-back chain right.
+`search_web` hits the real network; the others are deliberately minimal.
 """
 
 from __future__ import annotations
@@ -25,7 +25,7 @@ class Tool:
     description: str
     parameters: dict[str, Any]  # JSON Schema
     fn: Callable[..., str]
-    requires_approval: bool = False  # True = 执行前必须有人点头
+    requires_approval: bool = False  # True = a human must say yes before running
 
 
 REGISTRY: dict[str, Tool] = {}
@@ -36,10 +36,12 @@ def tool(
     parameters: dict[str, Any],
     requires_approval: bool = False,
 ):
-    """装饰器：把一个普通函数登记成模型可调用的工具。
+    """Decorator: register a plain function as a model-callable tool.
 
-    requires_approval=True 用于**有外部副作用、且难以撤销**的操作：发邮件、下单、删数据。
-    只读工具不该设 —— 每次都问会让人麻木，麻木了就会闭眼点同意，反而更危险。
+    Set requires_approval=True for operations with **external side effects that
+    are hard to undo**: sending mail, placing orders, deleting data. Never set it
+    on read-only tools — asking every time makes people numb, and numb people
+    click "approve" with their eyes closed, which is worse than not asking.
     """
 
     def deco(fn: Callable[..., str]) -> Callable[..., str]:
@@ -52,7 +54,7 @@ def tool(
 
 
 def specs() -> list[dict[str, Any]]:
-    """导出成 OpenAI Chat Completions 的 tools 参数格式。"""
+    """Export the registry in the OpenAI Chat Completions `tools` shape."""
     return [
         {
             "type": "function",
@@ -67,85 +69,99 @@ def specs() -> list[dict[str, Any]]:
 
 
 def execute(name: str, arguments: str) -> str:
-    """执行一次工具调用。
+    """Run one tool call.
 
-    关键点：任何失败都**不抛异常**，而是把错误信息当作工具结果返回给模型。
-    模型看到错误后可以自己改参数重试 —— 这正是 Agent 循环的价值所在。
+    The key rule: failures **never raise**. The error text is returned as the tool
+    result so the model can read it and fix its own call. That self-correction is
+    exactly what the agent loop is for.
     """
     tool_obj = REGISTRY.get(name)
     if tool_obj is None:
-        return f"ERROR: 未知工具 {name!r}，可用工具：{', '.join(REGISTRY)}"
+        return f"ERROR: unknown tool {name!r}. Available tools: {', '.join(REGISTRY)}"
 
     try:
-        # 注意：模型返回的 arguments 是 JSON **字符串**，必须先反序列化。
-        # （原笔记里 `fn(**item.arguments)` 就是栽在这一步。）
+        # Note: `arguments` from the model is a JSON **string** and must be parsed
+        # first. (The `fn(**item.arguments)` line in the original notes died here.)
         kwargs = json.loads(arguments) if arguments else {}
     except json.JSONDecodeError as e:
-        return f"ERROR: 参数不是合法 JSON（{e}）。收到的是：{arguments!r}"
+        return f"ERROR: arguments are not valid JSON ({e}). Received: {arguments!r}"
 
     if not isinstance(kwargs, dict):
-        return f"ERROR: 参数必须是 JSON 对象，收到 {type(kwargs).__name__}"
+        return f"ERROR: arguments must be a JSON object, got {type(kwargs).__name__}"
 
     try:
         return str(tool_obj.fn(**kwargs))
     except TypeError as e:
-        return f"ERROR: 参数不匹配（{e}）。期望的 schema：{json.dumps(tool_obj.parameters, ensure_ascii=False)}"
-    except Exception as e:  # 工具自身出错，同样回传给模型
+        return (
+            f"ERROR: argument mismatch ({e}). Expected schema: "
+            f"{json.dumps(tool_obj.parameters, ensure_ascii=False)}"
+        )
+    except Exception as e:  # the tool itself failed — hand that to the model too
         return f"ERROR: {type(e).__name__}: {e}"
 
 
 # --------------------------------------------------------------------------
-# 具体工具：search_web 已接真实检索，其余仍是最小实现，可逐个替换成真货
+# The tools themselves. search_web is real; the rest are minimal stand-ins you
+# can replace one at a time.
 # --------------------------------------------------------------------------
 
-# 离线语料：没装 ddgs / 没网 / 显式要求离线时的兜底，同时保证评测确定性。
+# Offline corpus: the fallback when ddgs is missing, the network is down, or
+# offline mode is requested. It also keeps the evals deterministic.
 _CORPUS = {
     "nvidia gpu strategy": (
-        "NVIDIA 的 GPU 策略围绕三层展开：(1) 数据中心 —— Blackwell/Rubin 架构按机柜级"
-        "（NVL72）整体交付，把 GPU、CPU、NVLink 交换机打包成一个计算单元；"
-        "(2) 软件护城河 —— CUDA + NIM/TensorRT-LLM 推理栈，让迁移成本极高；"
-        "(3) 网络 —— 收购 Mellanox 后用 NVLink/InfiniBand 绑定整机方案。"
+        "NVIDIA's GPU strategy has three layers: (1) data center — Blackwell/Rubin "
+        "shipped as whole racks (NVL72) that bundle GPUs, CPUs and NVLink switches "
+        "into one compute unit; (2) a software moat — CUDA plus the NIM/TensorRT-LLM "
+        "inference stack, which makes migration expensive; (3) networking — NVLink "
+        "and InfiniBand after the Mellanox acquisition, locking in full-system deals."
     ),
-    "cuda": "CUDA 是 NVIDIA 的并行计算平台，也是其最深的护城河：生态迁移成本远高于硬件本身。",
+    "cuda": (
+        "CUDA is NVIDIA's parallel computing platform and its deepest moat: the cost "
+        "of leaving the ecosystem is far higher than the cost of the hardware."
+    ),
     "agent": (
-        "Agent = Model + State + Tools + Control Loop + Memory/Evals。"
-        "本质循环是：LLM → tool call → tool result → LLM。"
+        "Agent = Model + State + Tools + Control Loop + Memory/Evals. "
+        "The essential loop is: LLM -> tool call -> tool result -> LLM."
     ),
 }
 
 
 def _search_corpus(query: str) -> str:
-    """离线兜底检索。
+    """Offline fallback search.
 
-    匹配用 all() 而不是 any()：早期版本用 any()，导致 "OpenAI strategy" 里的
-    "strategy" 命中了 "nvidia gpu strategy" 这条，把 NVIDIA 的资料喂给了 OpenAI 的问题。
-    宁可返回「没找到」也不能返回错的东西 —— 模型会照单全收。
+    Matching uses all() rather than any(): an early version used any(), so the word
+    "strategy" in "OpenAI strategy" matched the "nvidia gpu strategy" entry and fed
+    NVIDIA material to an OpenAI question. Returning "nothing found" is always
+    better than returning the wrong thing — the model takes what it is given.
     """
     words = set(re.findall(r"[\w一-鿿]+", query.lower()))
     hits = [text for key, text in _CORPUS.items() if set(key.split()) <= words]
     if not hits:
         return (
-            f"没有找到与 {query!r} 相关的结果。"
-            f"（当前是**离线**语料库，只收录了：{', '.join(_CORPUS)}）"
+            f"No results for {query!r}. (This is the **offline** corpus; it only "
+            f"contains: {', '.join(_CORPUS)})"
         )
     return "\n\n".join(hits[:3])
 
 
-# 检索后端的限流保护。实测：连续快速发 4-5 个查询就会被 DuckDuckGo 掐断，
-# 而 agent 恰好最爱一轮甩好几个查询。这里做两件事：请求间隔 + 失败退避重试。
-# 实测（三个并行检索）：间隔 1.5s 要 8.3s，间隔 0 只要 4.7s —— 限流间隔才是瓶颈，不是网络。
-# 折中到 0.5s：6 个检索连发零失败，耗时 8.9s；万一真被限流，还有退避重试兜底。
-_MIN_INTERVAL = 0.5  # 秒，两次真实检索之间的最小间隔
+# Rate-limit protection for the search backend. Measured: fire 4-5 queries back to
+# back and DuckDuckGo cuts you off — and an agent loves to fire several per turn.
+# Two mechanisms: a minimum interval, plus backoff retries.
+# Measured with three parallel searches: a 1.5s interval takes 8.3s, no interval
+# takes 4.7s — our own throttle was the bottleneck, not the network. Settled on
+# 0.5s: six back-to-back searches, zero failures, 8.9s. Retries cover the rest.
+_MIN_INTERVAL = 0.5  # seconds between two real searches
 _RETRIES = 3
 _last_search_at = 0.0
-_throttle_lock = threading.Lock()  # 工具会被并行执行，这个全局量必须加锁
+_throttle_lock = threading.Lock()  # tools run in parallel, so this global needs a lock
 
 
 def _throttle() -> None:
-    """给真实检索之间垫上最小间隔。
+    """Space out real searches.
 
-    锁保证「等待 + 记账」是原子的：并行的三个检索会被排开成 0s / 1.5s / 3.0s 起跑，
-    而不是同时冲出去撞限流。注意起跑被排开不等于失去并行 —— 各自的网络往返仍然重叠。
+    The lock makes "wait then record" atomic: three parallel searches start at
+    0s / 0.5s / 1.0s instead of stampeding into the rate limiter. Staggered starts
+    do not mean lost parallelism — the network round-trips still overlap.
     """
     global _last_search_at
     with _throttle_lock:
@@ -156,12 +172,14 @@ def _throttle() -> None:
 
 
 def _search_web_backend(query: str, max_results: int) -> str:
-    """真实检索后端：DuckDuckGo，不需要 API key。
+    """Real search backend: DuckDuckGo, no API key required.
 
-    失败会退避重试（1s / 2s / 4s）。检索失败和「查无此事」是**完全不同**的两件事，
-    绝不能让前者伪装成后者 —— 那会让模型得出「世界上没有这件事」的结论。
+    Failures are retried with backoff (1s / 2s / 4s). "The search failed" and
+    "there is nothing to find" are **completely different** statements, and the
+    former must never masquerade as the latter — that is how a model concludes
+    that something does not exist in the world.
     """
-    from ddgs import DDGS  # 延迟导入，离线路径不依赖它
+    from ddgs import DDGS  # imported lazily so the offline path does not need it
 
     last_error: Exception | None = None
     for attempt in range(_RETRIES):
@@ -169,15 +187,17 @@ def _search_web_backend(query: str, max_results: int) -> str:
             _throttle()
             results = DDGS().text(query, max_results=max_results)
             break
-        except Exception as e:  # 多半是限流，退避后再试
+        except Exception as e:  # usually rate limiting — back off and try again
             last_error = e
             if attempt < _RETRIES - 1:
                 time.sleep(2**attempt)
     else:
-        raise RuntimeError(f"检索重试 {_RETRIES} 次仍失败：{last_error}") from last_error
+        raise RuntimeError(
+            f"search failed after {_RETRIES} attempts: {last_error}"
+        ) from last_error
 
     if not results:
-        return f"没有搜到与 {query!r} 相关的网页结果。"
+        return f"No web results for {query!r}."
     lines = []
     for i, r in enumerate(results, 1):
         title = (r.get("title") or "").strip()
@@ -189,16 +209,17 @@ def _search_web_backend(query: str, max_results: int) -> str:
 
 @tool(
     description=(
-        "联网搜索，返回带标题、链接和摘要的结果列表。"
-        "引用结论时请附上返回的链接；同一问题最多搜 2-3 次不同关键词即可。"
+        "Search the web. Returns a list of results with title, link and snippet. "
+        "Cite the returned links when you use them; two or three differently worded "
+        "searches per question is usually enough."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "query": {"type": "string", "description": "搜索关键词"},
+            "query": {"type": "string", "description": "search keywords"},
             "max_results": {
                 "type": "integer",
-                "description": "返回条数，1-10，默认 5",
+                "description": "how many results, 1-10, default 5",
                 "minimum": 1,
                 "maximum": 10,
             },
@@ -207,11 +228,13 @@ def _search_web_backend(query: str, max_results: int) -> str:
     },
 )
 def search_web(query: str, max_results: int = 5) -> str:
-    """三种模式由环境变量 MINI_AGENT_SEARCH 控制：
+    """Three modes, selected by the MINI_AGENT_SEARCH environment variable:
 
-    auto（默认）：能联网就联网，失败自动退回离线语料并注明原因
-    web        ：只用真实检索，失败直接报错（避免模型误以为「世界上没有」）
-    offline    ：只用本地语料，不发任何网络请求（评测/单测用）
+    auto (default): use the network; on failure fall back to the offline corpus
+                    and say why.
+    web           : network only; on failure return an error (so the model never
+                    reads a broken search as "this does not exist").
+    offline       : local corpus only, zero network calls (evals and unit tests).
     """
     mode = os.getenv("MINI_AGENT_SEARCH", "auto").lower()
     max_results = max(1, min(int(max_results), 10))
@@ -223,22 +246,27 @@ def search_web(query: str, max_results: int = 5) -> str:
         return _search_web_backend(query, max_results)
     except ImportError:
         if mode == "web":
-            return "ERROR: 未安装 ddgs，无法联网检索。请执行 uv sync，或设 MINI_AGENT_SEARCH=offline。"
-        return f"[联网检索不可用（未装 ddgs），以下为离线语料结果]\n{_search_corpus(query)}"
+            return (
+                "ERROR: ddgs is not installed, web search unavailable. "
+                "Run `uv sync`, or set MINI_AGENT_SEARCH=offline."
+            )
+        return f"[web search unavailable (no ddgs); offline corpus below]\n{_search_corpus(query)}"
     except Exception as e:
         fallback = _search_corpus(query)
-        # 只有本地语料**真的命中**时才降级；否则必须明确报错，
-        # 不能把「检索坏了」伪装成「没有找到」——模型会把后者当成「不存在」。
-        if mode == "web" or fallback.startswith("没有找到"):
+        # Only degrade to the corpus when it actually has something. Otherwise say
+        # ERROR: dressing up "the search broke" as "no results" makes the model
+        # conclude the information does not exist.
+        if mode == "web" or fallback.startswith("No results"):
             return (
-                f"ERROR: 检索失败（{type(e).__name__}: {e}）。"
-                "这**不代表**该信息不存在，只说明检索通道暂时不可用；"
-                "可稍后重试、换关键词，或基于已有结果作答并标注该项未能核实。"
+                f"ERROR: search failed ({type(e).__name__}: {e}). This does **not** "
+                "mean the information does not exist, only that the search channel "
+                "is temporarily unavailable. Retry later, reword the query, or "
+                "answer from what you already have and mark this item unverified."
             )
-        return f"[联网检索失败：{type(e).__name__}，以下为离线语料结果]\n{fallback}"
+        return f"[web search failed: {type(e).__name__}; offline corpus below]\n{fallback}"
 
 
-# 安全的算术求值：只允许字面量和四则运算，不用 eval()。
+# Safe arithmetic: literals and basic operators only, no eval().
 _OPS = {
     ast.Add: operator.add,
     ast.Sub: operator.sub,
@@ -258,14 +286,19 @@ def _eval_node(node: ast.AST) -> float:
         return _OPS[type(node.op)](_eval_node(node.left), _eval_node(node.right))
     if isinstance(node, ast.UnaryOp) and type(node.op) in _OPS:
         return _OPS[type(node.op)](_eval_node(node.operand))
-    raise ValueError(f"不支持的表达式片段：{ast.dump(node)}")
+    raise ValueError(f"unsupported expression node: {ast.dump(node)}")
 
 
 @tool(
-    description="计算一个算术表达式，例如 '(1200 * 0.85) / 3'。只支持 + - * / ** %。",
+    description=(
+        "Evaluate an arithmetic expression, e.g. '(1200 * 0.85) / 3'. "
+        "Only + - * / ** % are supported."
+    ),
     parameters={
         "type": "object",
-        "properties": {"expression": {"type": "string", "description": "算术表达式"}},
+        "properties": {
+            "expression": {"type": "string", "description": "arithmetic expression"}
+        },
         "required": ["expression"],
     },
 )
@@ -274,24 +307,27 @@ def calculate(expression: str) -> str:
 
 
 @tool(
-    description="读取当前项目目录下的一个文本文件（最多返回 2000 字符）。",
+    description="Read a text file inside the current project directory (first 2000 characters).",
     parameters={
         "type": "object",
-        "properties": {"path": {"type": "string", "description": "相对当前目录的路径"}},
+        "properties": {
+            "path": {"type": "string", "description": "path relative to the project root"}
+        },
         "required": ["path"],
     },
 )
 def read_file(path: str) -> str:
     root = pathlib.Path.cwd().resolve()
     target = (root / path).resolve()
-    if not str(target).startswith(str(root)):  # 简单的越界保护
-        return "ERROR: 只允许读取当前项目目录内的文件"
+    if not str(target).startswith(str(root)):  # simple traversal guard
+        return "ERROR: only files inside the current project directory can be read"
     if not target.is_file():
-        return f"ERROR: 文件不存在：{path}"
+        return f"ERROR: no such file: {path}"
     return target.read_text(encoding="utf-8", errors="replace")[:2000]
 
 
-# 长期记忆的写入口。为了保持简单，这里用模块级绑定，由 loop.run() 注入。
+# Write side of long-term memory. Kept simple: a module-level binding injected by
+# loop.run().
 _memory = None
 
 
@@ -301,42 +337,85 @@ def bind_memory(memory) -> None:
 
 
 @tool(
-    description="把一条值得跨会话保留的事实写进长期记忆（例如用户偏好、稳定结论）。",
+    description=(
+        "Store a fact worth keeping across sessions in long-term memory "
+        "(user preferences, stable conclusions)."
+    ),
     parameters={
         "type": "object",
-        "properties": {"fact": {"type": "string", "description": "一句话事实"}},
+        "properties": {"fact": {"type": "string", "description": "a one-line fact"}},
         "required": ["fact"],
     },
 )
 def remember(fact: str) -> str:
     if _memory is None:
-        return "ERROR: 当前没有可用的长期记忆"
+        return "ERROR: no long-term memory is available"
     _memory.remember(fact)
-    return f"已记住：{fact}"
+    return f"Remembered: {fact}"
+
+
+# The run's checklist, bound by loop.run() the same way memory is.
+_todo = None
+
+
+def bind_todo(todo) -> None:
+    global _todo
+    _todo = todo
 
 
 @tool(
     description=(
-        "给某人发一封邮件。**这是有外部副作用、无法撤销的操作，执行前需要人工批准。**"
-        "演示实现：不真发，只把内容追加到项目下的 outbox.jsonl。"
+        "Mark an item on the checklist as done (or blocked). Call this as soon as you "
+        "finish an item, so the remaining work stays accurate. Use status='blocked' "
+        "with a reason when an item cannot be completed."
     ),
     parameters={
         "type": "object",
         "properties": {
-            "to": {"type": "string", "description": "收件人邮箱"},
-            "subject": {"type": "string", "description": "主题"},
-            "body": {"type": "string", "description": "正文"},
+            "index": {"type": "integer", "description": "1-based item number"},
+            "status": {"type": "string", "enum": ["done", "blocked"]},
+            "note": {"type": "string", "description": "why, when blocked"},
+        },
+        "required": ["index", "status"],
+    },
+)
+def update_todo(index: int, status: str, note: str = "") -> str:
+    if not _todo:
+        return "ERROR: this run has no checklist"
+    if not 1 <= index <= len(_todo):
+        return f"ERROR: no item {index}; the checklist has {len(_todo)} items"
+    item = _todo[index - 1]
+    item.done = True  # blocked items are settled too: they stop being outstanding
+    item.note = note if status == "blocked" else ""
+    label = "done" if status == "done" else f"blocked ({note or 'no reason given'})"
+    return f"Item {index} marked {label}: {item.text}"
+
+
+@tool(
+    description=(
+        "Send an email to someone. **This has external side effects and cannot be "
+        "undone, so it requires human approval before it runs.** Demo implementation: "
+        "nothing is really sent, the message is appended to outbox.jsonl."
+    ),
+    parameters={
+        "type": "object",
+        "properties": {
+            "to": {"type": "string", "description": "recipient address"},
+            "subject": {"type": "string", "description": "subject line"},
+            "body": {"type": "string", "description": "message body"},
         },
         "required": ["to", "subject", "body"],
     },
     requires_approval=True,
 )
 def send_email(to: str, subject: str, body: str) -> str:
-    """你原始笔记里工具清单的最后一个就是它 —— 也正是第一个必须加确认门的。
+    """The last entry in the original notes' tool list — and the first one that
+    needs a gate.
 
-    只读工具错了顶多浪费一次调用；这个错了，信已经发出去了。
+    A read-only tool that goes wrong wastes one call; this one going wrong means
+    the mail has already left.
     """
     record = {"to": to, "subject": subject, "body": body}
     with open("outbox.jsonl", "a", encoding="utf-8") as f:
         f.write(json.dumps(record, ensure_ascii=False) + "\n")
-    return f"已发送给 {to}，主题《{subject}》（演示实现：实际写入了 outbox.jsonl）"
+    return f"Sent to {to} with subject {subject!r} (demo: written to outbox.jsonl)"

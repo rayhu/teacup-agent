@@ -1,14 +1,18 @@
-"""落盘与恢复 —— 让一次运行在结束后还留得下东西。
+"""Persistence and resume — so a run leaves something behind when it ends.
 
-之前每次跑完，上下文、留痕、花费全随进程消失：出了问题只能靠终端回滚里那 120 个字符猜。
-（真出现过：模型引用了几条链接，我们没法判断是检索来的还是它编的。）
+Before this, context, trace and cost all died with the process: when something
+looked wrong the only evidence was the 120 characters the terminal had printed.
+(That happened for real — the model cited a few links and we could not tell
+whether they came from search results or were invented.)
 
-存下来之后能做三件事：
-1. 复盘：完整的 messages 和 trace 都在，想看哪一步看哪一步；
-2. 恢复：崩了、Ctrl-C 了、超时了，从上一步接着跑，不重复已完成的工具调用；
-3. 评测：trajectory eval（roadmap #7）要的就是这份轨迹。
+Once a run is on disk you can do three things:
+1. Review it: full messages and trace, any step you like;
+2. Resume it: after a crash, a Ctrl-C or a timeout, continue from the last step
+   without redoing completed tool calls;
+3. Evaluate it: trajectory eval (roadmap #7) takes exactly this file as input.
 
-刻意做成**每步一存**而不是跑完再存 —— 跑完才存的话，最需要它的那次崩溃恰好什么都没留下。
+Saving happens **after every step** rather than at the end on purpose — save only
+at the end and the one crash that needed the data is the one that leaves nothing.
 """
 
 from __future__ import annotations
@@ -18,13 +22,17 @@ import json
 import pathlib
 from typing import Any
 
-from mini_agent.state import AgentState, ToolTrace
+from mini_agent.state import AgentState, TodoItem, ToolTrace
 
 FILENAME = "state.json"
 
 
 def save(state: AgentState, run_dir: str | pathlib.Path) -> pathlib.Path:
-    """把整个状态写进 run_dir/state.json（先写临时文件再改名，避免写到一半崩掉留下残档）。"""
+    """Write the whole state to run_dir/state.json.
+
+    Writes a temp file and renames it, so a crash mid-write cannot leave a
+    half-written state behind.
+    """
     directory = pathlib.Path(run_dir)
     directory.mkdir(parents=True, exist_ok=True)
     path = directory / FILENAME
@@ -38,10 +46,13 @@ def save(state: AgentState, run_dir: str | pathlib.Path) -> pathlib.Path:
 
 
 def load(path: str | pathlib.Path) -> AgentState:
-    """从 state.json（或它所在的目录）读回状态。"""
+    """Read a state back from state.json (or from the directory holding it)."""
     p = pathlib.Path(path)
     if p.is_dir():
         p = p / FILENAME
     data: dict[str, Any] = json.loads(p.read_text(encoding="utf-8"))
+    # Nested dataclasses have to be rebuilt by hand — asdict() flattened them to dicts
+    # on the way out, and everything downstream expects the objects back.
     trace = [ToolTrace(**t) for t in data.pop("trace", [])]
-    return AgentState(**data, trace=trace)
+    todo = [TodoItem(**t) for t in data.pop("todo", [])]
+    return AgentState(**data, trace=trace, todo=todo)

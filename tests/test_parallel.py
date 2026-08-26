@@ -1,7 +1,7 @@
-"""并行执行工具 + 单次超时 + 模型调用退避重试。
+"""Parallel tool execution, per-call timeouts, and backoff retries on model calls.
 
-并行最容易打破的正是消息协议的两条不变量（顺序、每个 id 恰好一条结果），
-所以这里每个用例都顺带验一遍。
+Parallelism is exactly what breaks the two message-protocol invariants (order, and
+one result per id), so every case here re-checks them.
 """
 
 import time
@@ -16,7 +16,7 @@ from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
 
 @pytest.fixture
 def slow_tools(monkeypatch):
-    """注册两个各睡 0.3 秒的假工具，用来量并行度。"""
+    """Register fake tools that sleep 0.3s each, to measure parallelism."""
     registry = dict(tools.REGISTRY)
 
     def make(name):
@@ -24,7 +24,7 @@ def slow_tools(monkeypatch):
             time.sleep(0.3)
             return f"{name} done"
 
-        return tools.Tool(name, "慢工具", {"type": "object", "properties": {}}, fn)
+        return tools.Tool(name, "slow tool", {"type": "object", "properties": {}}, fn)
 
     for n in ("slow_a", "slow_b", "slow_c"):
         registry[n] = make(n)
@@ -35,40 +35,40 @@ def slow_tools(monkeypatch):
 def test_tools_run_in_parallel_and_keep_order(slow_tools):
     started = time.monotonic()
     state = loop.run(
-        "并行测试",
+        "parallelism test",
         ScriptedModel(
             [
                 assistant_calls([("slow_a", {}), ("slow_b", {}), ("slow_c", {})]),
-                assistant_says("好了"),
+                assistant_says("done"),
             ]
         ),
         memory=NullMemory(),
     )
     elapsed = time.monotonic() - started
 
-    assert elapsed < 0.6, f"三个 0.3 秒的工具串行要 0.9 秒，实际 {elapsed:.2f} 秒"
-    assert [t.name for t in state.trace] == ["slow_a", "slow_b", "slow_c"]  # 顺序不乱
+    assert elapsed < 0.6, f"serial would take 0.9s for three 0.3s tools, got {elapsed:.2f}s"
+    assert [t.name for t in state.trace] == ["slow_a", "slow_b", "slow_c"]  # order kept
     assert [t.result for t in state.trace] == ["slow_a done", "slow_b done", "slow_c done"]
     assert tool_results_follow_their_call(state)
 
 
 def test_slow_tool_times_out_but_still_gets_a_result_message(slow_tools):
     state = loop.run(
-        "超时测试",
-        ScriptedModel([assistant_calls([("slow_a", {}), ("calculate", {"expression": "1+1"})]), assistant_says("好")]),
+        "timeout test",
+        ScriptedModel([assistant_calls([("slow_a", {}), ("calculate", {"expression": "1+1"})]), assistant_says("ok")]),
         memory=NullMemory(),
-        tool_timeout=0.1,  # 比慢工具的 0.3 秒短
-        clock=iter([0.0, 0.0, 0.0, 0.0, 0.0]).__next__,  # 别让时间刹车抢戏
+        tool_timeout=0.1,  # shorter than the slow tool's 0.3s
+        clock=iter([0.0, 0.0, 0.0, 0.0, 0.0]).__next__,  # keep the time brake out of it
         time_budget=None,
     )
     slow_result = state.trace[0].result
-    assert slow_result.startswith("ERROR:") and "超过" in slow_result
-    assert "不代表" in slow_result  # 超时 ≠ 该信息不存在
-    assert state.trace[1].result == "2"  # 快的那个照常返回
-    assert tool_results_follow_their_call(state)  # 超时的调用也回填了
+    assert slow_result.startswith("ERROR:") and "did not return within" in slow_result
+    assert "does **not** mean" in slow_result  # a timeout is not "it does not exist"
+    assert state.trace[1].result == "2"  # the fast one still returns
+    assert tool_results_follow_their_call(state)  # the timed-out call was filled too
 
 
-# --- 模型调用的退避重试（roadmap #3 的另一半）--------------------------------
+# --- backoff retries on model calls (the other half of roadmap #3) -----------
 
 
 class _FlakyModel:
@@ -80,7 +80,7 @@ class _FlakyModel:
         self.attempts += 1
         if self.errors:
             raise self.errors.pop(0)
-        return assistant_says("终于成功了")
+        return assistant_says("succeeded at last")
 
     def tool_result_item(self, call, result):
         from mini_agent.model import chat_tool_result
@@ -99,19 +99,19 @@ def test_retries_on_429_without_consuming_a_step(monkeypatch):
     slept = []
     monkeypatch.setattr(loop.time, "sleep", slept.append)
 
-    state = loop.run("重试测试", model, memory=NullMemory())
+    state = loop.run("retry test", model, memory=NullMemory())
 
-    assert state.status == "done" and state.answer == "终于成功了"
+    assert state.status == "done" and state.answer == "succeeded at last"
     assert model.attempts == 3
-    assert state.step == 1  # 重试不算 step
-    assert slept == [1, 2]  # 退避 1s、2s
+    assert state.step == 1  # a retry is not a step
+    assert slept == [1, 2]  # backoff of 1s then 2s
 
 
 def test_does_not_retry_client_errors(monkeypatch):
     model = _FlakyModel([_err(400), _err(400), _err(400)])
     monkeypatch.setattr(loop.time, "sleep", lambda *_: None)
 
-    state = loop.run("重试测试", model, memory=NullMemory())
+    state = loop.run("retry test", model, memory=NullMemory())
 
-    assert model.attempts == 1  # 400 重试多少次都一样，别浪费时间
+    assert model.attempts == 1  # a 400 returns the same answer however often you ask
     assert state.status == "error" and "400" in state.answer

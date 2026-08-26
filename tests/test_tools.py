@@ -33,31 +33,33 @@ def test_read_file_cannot_escape_project_dir():
     assert tools.execute("read_file", '{"path": "../../../etc/passwd"}').startswith("ERROR:")
 
 
-# --- search_web 的三种模式与「宁缺毋滥」原则 --------------------------------
+# --- the three search_web modes, and "nothing beats the wrong thing" ---------
 
 
 def test_offline_search_does_not_false_positive(monkeypatch):
-    """回归测试：'OpenAI strategy' 曾因 any() 匹配命中 NVIDIA 那条语料。"""
+    """Regression test: "OpenAI strategy" once matched the NVIDIA corpus entry
+    because matching used any()."""
     monkeypatch.setenv("MINI_AGENT_SEARCH", "offline")
     out = tools.execute("search_web", '{"query": "OpenAI strategy 2026 roadmap"}')
     assert "NVIDIA" not in out
-    assert "没有找到" in out
+    assert "No results" in out
 
 
 def test_offline_search_still_matches_full_key(monkeypatch):
     monkeypatch.setenv("MINI_AGENT_SEARCH", "offline")
-    assert "NVIDIA" in tools.execute("search_web", '{"query": "nvidia gpu strategy 是什么"}')
+    assert "NVIDIA" in tools.execute("search_web", '{"query": "what is the nvidia gpu strategy"}')
 
 
 def test_auto_mode_falls_back_to_corpus_when_network_fails(monkeypatch):
     monkeypatch.setenv("MINI_AGENT_SEARCH", "auto")
     monkeypatch.setattr(tools, "_search_web_backend", lambda q, n: (_ for _ in ()).throw(OSError("no net")))
     out = tools.execute("search_web", '{"query": "cuda"}')
-    assert out.startswith("[联网检索失败") and "CUDA" in out
+    assert out.startswith("[web search failed") and "CUDA" in out
 
 
 def test_web_mode_reports_error_instead_of_pretending(monkeypatch):
-    """严格模式下检索失败必须是 ERROR，不能让模型以为「查过了，不存在」。"""
+    """In strict mode a failed search must be an ERROR, never something the model
+    can read as "I looked and it does not exist"."""
     monkeypatch.setenv("MINI_AGENT_SEARCH", "web")
     monkeypatch.setattr(tools, "_search_web_backend", lambda q, n: (_ for _ in ()).throw(OSError("no net")))
     assert tools.execute("search_web", '{"query": "cuda"}').startswith("ERROR:")
@@ -68,17 +70,17 @@ def test_web_search_formats_results_with_links(monkeypatch):
     monkeypatch.setattr(
         tools,
         "DDGS" if hasattr(tools, "DDGS") else "_search_web_backend",
-        lambda q, n: f"1. 标题\n   https://example.com\n   摘要（n={n}）",
+        lambda q, n: f"1. Title\n   https://example.com\n   snippet (n={n})",
     )
     out = tools.execute("search_web", '{"query": "x", "max_results": 99}')
-    assert "https://example.com" in out and "n=10" in out  # 条数被夹到上限 10
+    assert "https://example.com" in out and "n=10" in out  # count clamped to 10
 
 
-# --- 检索失败：退避重试，且不能伪装成「查无此事」 ---------------------------
+# --- search failures: backoff retries, never disguised as "nothing found" ----
 
 
 class _FlakyDDGS:
-    """前 fail_times 次抛异常，之后返回正常结果。"""
+    """Raise for the first `fail_times` calls, then return results."""
 
     calls = 0
 
@@ -98,7 +100,7 @@ def fake_ddgs(monkeypatch):
     import ddgs
 
     _FlakyDDGS.calls = 0
-    monkeypatch.setattr(tools.time, "sleep", lambda *_: None)  # 测试不真的等
+    monkeypatch.setattr(tools.time, "sleep", lambda *_: None)  # tests never wait
     monkeypatch.setattr(tools, "_last_search_at", 0.0)
 
     def install(fail_times=0):
@@ -113,14 +115,15 @@ def test_search_retries_then_succeeds(monkeypatch, fake_ddgs):
     flaky = fake_ddgs(fail_times=2)
     out = tools.execute("search_web", '{"query": "anything"}')
     assert "https://e.com" in out
-    assert flaky.calls == 3  # 失败两次后第三次成功
+    assert flaky.calls == 3  # two failures, then success on the third
 
 
 def test_search_failure_is_not_disguised_as_no_results(monkeypatch, fake_ddgs):
-    """本地语料没有的题目，检索挂了必须报 ERROR，不能说「没有找到」。"""
+    """For a question the corpus knows nothing about, a broken search must report
+    ERROR rather than "no results"."""
     monkeypatch.setenv("MINI_AGENT_SEARCH", "auto")
     flaky = fake_ddgs(fail_times=99)
-    out = tools.execute("search_web", '{"query": "Anthropic 最近半年融资"}')
-    assert out.startswith("ERROR:") and "不代表" in out
-    assert "没有找到" not in out
-    assert flaky.calls == tools._RETRIES  # 重试次数用满
+    out = tools.execute("search_web", '{"query": "Anthropic funding last six months"}')
+    assert out.startswith("ERROR:") and "does **not** mean" in out
+    assert "No results" not in out
+    assert flaky.calls == tools._RETRIES  # all retries were used

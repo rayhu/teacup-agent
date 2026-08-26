@@ -1,9 +1,10 @@
-# 原始学习笔记（原 main.py 的内容，原样保留）
+# Original study notes (the contents of the old main.py, kept verbatim)
 
-> 这些是改造前的伪代码草稿。真正可运行的实现见 `agent/` 目录。
-> 下面每段后面标注了它对应改造后的哪个文件。
+> These are the pseudo-code sketches from before the refactor. The runnable
+> implementation lives in `src/mini_agent/`.
+> Each section is annotated with the file that now implements it.
 
-## 1. 单次工具调用（Responses API）→ 对应 `agent/model.py` + `agent/tools.py`
+## 1. A single tool call (Responses API) -> `model.py` + `tools.py`
 
 ```python
 from openai import OpenAI
@@ -36,20 +37,23 @@ response = client.responses.create(
 for item in response.output:
     if item.type == "function_call":
         fn = tools[item.name]
-        result = fn(**item.arguments)   # ← 这里有 bug：arguments 是 JSON 字符串
+        result = fn(**item.arguments)   # <- bug: arguments is a JSON string
 ```
 
-**两个关键问题**（改造后已修正）：
-1. `item.arguments` 是 JSON **字符串**，必须 `json.loads()` 之后再 `**` 展开。
-2. 工具结果没有回传给模型，也没有循环 —— 这只是「一次函数调用」，还不是 Agent。
+**Two problems** (both fixed in the implementation):
 
-## 2. 计划 → 对应 system prompt 里的策略说明
+1. `item.arguments` is a JSON **string**; it must go through `json.loads()` before
+   being splatted with `**`.
+2. The tool result never goes back to the model, and there is no loop — so this is a
+   single function call, not an agent.
+
+## 2. Planning -> the strategy section of the system prompt
 
 ```python
 plan = llm("Break this task into steps")
 ```
 
-## 3. 控制循环 → 对应 `agent/loop.py`
+## 3. The control loop -> `loop.py`
 
 ```python
 while not done:
@@ -60,15 +64,16 @@ while not done:
     done = check_completion()
 ```
 
-`check_completion()` 在实现里被替换成两个明确条件：**模型不再请求工具** 或 **步数/预算耗尽**。
+`check_completion()` was replaced by two explicit conditions: **the model stopped
+requesting tools**, or **a step / budget / time ceiling was hit**.
 
-## 4. 工具清单 → 对应 `agent/tools.py` 的 REGISTRY
+## 4. The tool list -> the REGISTRY in `tools.py`
 
 ```python
 tools = [web_search, browser, gmail_search, calendar_lookup, sql_query, python, send_email]
 ```
 
-## 5. 状态 → 对应 `agent/state.py`
+## 5. State -> `state.py`
 
 ```python
 state = {
@@ -81,8 +86,8 @@ state = {
 }
 ```
 
-## 6. 一句话本质
+## 6. The whole thing in one line
 
 ```
-LLM → tool call → tool result → LLM
+LLM -> tool call -> tool result -> LLM
 ```

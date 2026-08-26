@@ -1,7 +1,7 @@
-"""State —— Agent 在一次任务里携带的全部可变数据。
+"""State — everything mutable the agent carries through one task.
 
-对应你笔记里的那个 dict，只是换成 dataclass，字段都是真的会被用到的：
-step / remaining_budget 会在每轮被更新，并且是循环的终止条件之一。
+Every field is actually used: `step` and `remaining_budget` are updated each turn and are two of
+the loop's termination conditions.
 """
 
 from __future__ import annotations
@@ -16,14 +16,28 @@ Status = Literal[
 
 @dataclass
 class ToolTrace:
-    """一次工具调用的留痕，方便事后调试/评测。"""
+    """One tool call, recorded for debugging and evaluation."""
 
     step: int
     name: str
     arguments: str
     result: str
-    executed: bool = True  # False = 没有真正执行
+    executed: bool = True  # False = never actually ran
     skip_reason: str = ""  # "throttled" | "denied"
+
+
+@dataclass
+class TodoItem:
+    """One action the goal asks for.
+
+    The model can hold a plan in its head, but it cannot be reminded of one it has
+    forgotten. Keeping the list in the state means the loop can put unfinished items
+    back in front of it every turn — and can refuse to finish while one is open.
+    """
+
+    text: str
+    done: bool = False
+    note: str = ""  # why it was skipped, when it is not done
 
 
 @dataclass
@@ -32,20 +46,22 @@ class AgentState:
     messages: list[dict[str, Any]] = field(default_factory=list)
     step: int = 0
     max_steps: int = 8
-    max_tool_calls_per_step: int = 3  # 每轮最多真正执行几个工具调用，0 = 不限
-    remaining_budget: float = 0.05  # 单位：美元，每轮按 token 用量扣减
-    time_budget: float | None = None  # 墙上时间上限（秒），None = 不限
-    elapsed: float = 0.0  # 已经跑了多久（秒）
-    context_tokens: int = 0  # 上一轮送进模型的上下文有多大
-    compactions: int = 0  # 压缩过几次
-    input_tokens_total: int = 0  # 累计送进模型的 token
-    cached_tokens_total: int = 0  # 其中命中 prompt cache 的
+    max_tool_calls_per_step: int = 3  # tool calls actually run per turn, 0 = unlimited
+    remaining_budget: float = 0.05  # USD, charged per turn from token usage
+    time_budget: float | None = None  # wall-clock limit in seconds, None = unlimited
+    elapsed: float = 0.0  # seconds spent so far
+    context_tokens: int = 0  # size of the context sent on the last turn
+    compactions: int = 0  # how many times the context was compacted
+    input_tokens_total: int = 0  # cumulative input tokens
+    cached_tokens_total: int = 0  # of which served from the prompt cache
     status: Status = "idle"
     answer: str = ""
-    salvaged: bool = False  # True = 资源耗尽后靠强制收尾轮抢回来的答案
+    salvaged: bool = False  # True = answer rescued by the forced wrap-up turn
+    todo: list[TodoItem] = field(default_factory=list)
+    completion_checked: bool = False  # the "anything left undone?" push-back fired
     trace: list[ToolTrace] = field(default_factory=list)
 
-    # ---- 循环的守卫条件 -------------------------------------------------
+    # ---- the loop's guards ----------------------------------------------
     def can_continue(self) -> bool:
         return self.stop_reason() == "running"
 
@@ -59,7 +75,7 @@ class AgentState:
         return "running"
 
     def time_left(self) -> float | None:
-        """还剩多少秒；没设时间预算则返回 None。"""
+        """Seconds remaining, or None when no time budget was set."""
         if self.time_budget is None:
             return None
         return round(self.time_budget - self.elapsed, 3)
@@ -73,7 +89,7 @@ class AgentState:
         return f"{self.cached_tokens_total / self.input_tokens_total:.0%}"
 
     def snapshot(self) -> dict[str, Any]:
-        """给人看的状态摘要（不含完整 messages）。"""
+        """Human-readable summary (without the full message list)."""
         return {
             "goal": self.goal,
             "step": self.step,
@@ -85,6 +101,9 @@ class AgentState:
             "cache_hit": self.cache_hit_rate(),
             "status": self.status,
             "salvaged": self.salvaged,
+            "todo_done": f"{sum(t.done for t in self.todo)}/{len(self.todo)}"
+            if self.todo
+            else "n/a",
             "messages": len(self.messages),
             "tool_calls": sum(t.executed for t in self.trace),
             "throttled": sum(not t.executed for t in self.trace),

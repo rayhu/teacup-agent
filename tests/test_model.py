@@ -1,6 +1,7 @@
-"""用假 client 验证 OpenAIModel 的解析逻辑（不联网、不花钱）。
+"""Verify OpenAIModel's parsing with a fake client — no network, no cost.
 
-它检查的是三件容易写错的事：tool_calls 的取法、assistant 消息的原样回填、费用换算。
+It covers the three things that are easy to get wrong: how tool_calls are read, how
+the assistant message is carried back verbatim, and how cost is computed.
 """
 
 import pytest
@@ -50,7 +51,7 @@ def test_parses_tool_calls_and_cost():
         ("calculate", '{"expression":"1+1"}')
     ]
     assert reply.items[0]["role"] == "assistant"
-    assert reply.cost == 1.25  # 1M 输入 token × $1.25/M
+    assert reply.cost == 1.25  # 1M input tokens x $1.25/M
     assert sent["model"] == "gpt-5"
 
 
@@ -60,11 +61,11 @@ def test_plain_answer_has_no_tool_calls():
     assert reply.tool_calls == [] and reply.text == "42"
 
 
-# --- prompt caching 计价 ------------------------------------------------------
+# --- prompt caching and pricing ----------------------------------------------
 
 
 def test_cached_input_tokens_are_billed_at_a_tenth():
-    """缓存命中的输入只按十分之一计价 —— 这是保持前缀稳定的直接回报。"""
+    """Cached input bills at a tenth — the direct payoff for a stable prefix."""
     from types import SimpleNamespace as NS
 
     from mini_agent.model import estimate_cost

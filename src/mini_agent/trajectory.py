@@ -1,17 +1,21 @@
-"""Trajectory eval —— 给一次真实运行打分。
+"""Trajectory eval — score one real run.
 
-和 `evals.py` 的分工要分清楚：
+Keep the division of labour with `evals.py` clear:
 
-* `evals.py`  用假模型跑，测的是**机器有没有坏**（消息协议、刹车、压缩切点）。零成本、必须全绿。
-* 这里      用真轨迹打分，测的是**这次跑得好不好**。有成本、分数是相对的，用来比较两次改动。
+* `evals.py`  runs a fake model and asks **is the machine broken?** (message
+              protocol, brakes, compaction cut points). Free, and must be all green.
+* this module scores a real trajectory and asks **how well did this run go?**
+              It costs money, and its scores are relative — for comparing two
+              versions of the agent.
 
-为什么值得单独做：同样一个「done」，可能是 3 步干净走到，也可能是 12 步瞎撞碰上的；
-可能带着来源和置信度，也可能是一份「请你确认是否继续」的请示（真发生过）。
-`status` 字段分不出这些，只有看整条轨迹才分得出。
+Why it deserves its own module: the same "done" can mean three clean steps to the
+answer, or twelve flailing ones that got lucky. It can come with sources and
+confidence levels, or be a request for permission to continue (which really
+happened). The `status` field cannot tell those apart; only the trajectory can.
 
-用法：
-    uv run python -m mini_agent.trajectory runs/20260826-xxxx        # 只算机械指标，免费
-    uv run python -m mini_agent.trajectory runs/* --judge            # 加 LLM 评委，按次收费
+Usage:
+    uv run python -m mini_agent.trajectory runs/20260826-xxxx     # mechanical only, free
+    uv run python -m mini_agent.trajectory runs/* --judge         # add the LLM judge
 """
 
 from __future__ import annotations
@@ -27,34 +31,64 @@ from mini_agent.state import AgentState
 
 URL = re.compile(r"https?://[^\s\]）)、,，]+")
 
+# Verbs that mean the goal asked for an action, not just an answer. If one of these
+# appears in the goal and no approval-gated tool was ever attempted, the run finished
+# without doing the thing it was asked to do — the "looks done, is not" failure.
+ACTION_WORDS = re.compile(
+    r"\b(send|email|mail|post|submit|publish|schedule|delete|create|write to)\b"
+    r"|发(邮件|送)|提交|发布|删除",
+    re.I,
+)
 
-# --- 机械指标：不花钱、完全确定，先看这些 ------------------------------------
+
+# --- mechanical metrics: free, fully deterministic, read these first ----------
 
 
 def mechanical(state: AgentState) -> dict[str, Any]:
-    """从轨迹里直接数得出来的东西。"""
+    """Everything that can be counted straight off the trajectory."""
     executed = [t for t in state.trace if t.executed]
     failed = [t for t in executed if t.result.startswith("ERROR:")]
 
-    # 被拒绝后又原样重发同一个调用 —— 说明模型没读懂拒绝，是个该抓的坏模式
+    # Re-sending an identical call after it was denied means the model did not read
+    # the denial — a pattern worth catching.
     denied_keys = {(t.name, t.arguments) for t in state.trace if t.skip_reason == "denied"}
     retried_after_denial = sum(
         1 for t in state.trace if (t.name, t.arguments) in denied_keys and t.executed
     )
 
-    # 重复调用：同一个工具 + 同样的参数被发了不止一次，纯浪费
+    # Duplicate calls: same tool, same arguments, more than once. Pure waste.
     seen: dict[tuple[str, str], int] = {}
     for t in executed:
         key = (t.name, t.arguments)
         seen[key] = seen.get(key, 0) + 1
     duplicates = sum(n - 1 for n in seen.values() if n > 1)
 
+    # Did the goal ask for an action, and was that action ever even attempted?
+    # "Attempted" is deliberate: a denied call counts, because the model did its part
+    # and the human said no. Never calling the tool at all is the failure.
+    from mini_agent import tools as tools_mod
+
+    gated = {n for n, t in tools_mod.REGISTRY.items() if t.requires_approval}
+    action_asked = bool(ACTION_WORDS.search(state.goal))
+    action_attempted = any(t.name in gated for t in state.trace)
+
     answer = state.answer or ""
-    # 答案里的链接，有几条是工具结果里根本没出现过的？
-    # 这是「编造引用」的确定性检测 —— 不用 LLM 评委也能抓，而且抓得比它准。
+    # How many links in the answer never appeared in any tool result? This is the
+    # deterministic detector for invented citations — no LLM judge needed, and it is
+    # more accurate than one.
     cited = set(URL.findall(answer))
     seen_text = "\n".join(t.result for t in state.trace)
     unsupported = [u for u in cited if u.rstrip("/.") not in seen_text]
+
+    asks_back = bool(
+        re.search(
+            r"(是否需要我|请确认|请指示|是否同意"
+            r"|shall I (continue|proceed)|let me know if you|please confirm"
+            r"|would you like me to|reply .{0,20}to authorize)",
+            answer,
+            re.I,
+        )
+    )
 
     return {
         "status": state.status,
@@ -65,47 +99,68 @@ def mechanical(state: AgentState) -> dict[str, Any]:
         "throttled": sum(1 for t in state.trace if t.skip_reason == "throttled"),
         "denied": sum(1 for t in state.trace if t.skip_reason == "denied"),
         "retried_after_denial": retried_after_denial,
+        # True = the goal asked for an action and the agent never even tried it
+        "action_never_attempted": action_asked and not action_attempted,
+        "pending_todos": sum(1 for t in state.todo if not t.done),
         "compactions": state.compactions,
         "salvaged": state.salvaged,
         "elapsed_s": round(state.elapsed, 1),
-        "cost_hint": round(state.input_tokens_total / 1000, 1),  # 千 token 数，跨模型可比
+        "cost_hint": round(state.input_tokens_total / 1000, 1),  # thousands of tokens
         "cache_hit": state.cache_hit_rate(),
         "answer_chars": len(answer),
         "answer_citations": len(cited),
-        "unsupported_citations": len(unsupported),  # >0 就要人工看一眼
-        # 交付了结论，还是交回了一份请示？（第一次实测失败就是栽在这儿）
-        "asks_user_back": bool(re.search(r"(是否需要我|请确认|请指示|是否同意)", answer)),
-        "delivered": bool(answer) and not answer.startswith("（未得出最终答案"),
+        "unsupported_citations": len(unsupported),  # >0 deserves a human look
+        # Did it deliver a conclusion, or hand a request back? (The very first real
+        # run failed exactly this way.) Both English and Chinese phrasings count,
+        # because the model answers in whatever language it was asked in.
+        "asks_user_back": asks_back,
+        # The sharper signal. Asking is legitimate *after* a gated call was denied —
+        # our own prompt tells the model to say what is left for the user. Asking
+        # without ever attempting the action is the failure mode worth flagging.
+        "asks_without_trying": asks_back and action_asked and not action_attempted,
+        "delivered": bool(answer) and not answer.startswith("(no final answer"),
     }
 
 
-# --- LLM 评委：给质量打分 -----------------------------------------------------
+# --- the LLM judge: score the quality ----------------------------------------
 
-JUDGE = """你是一个 AI agent 的评审。下面给你一次运行的**完整轨迹**：目标、每一步的工具调用与结果摘要、最终答案。
+JUDGE = """You are reviewing an AI agent. Below is the **full trajectory** of one run:
+the goal, every tool call with a snippet of its result, and the final answer.
 
-按四个维度各打 0-5 分（5 最好）：
-- outcome：目标达成了吗？答案是否真正回答了问题，而不是给出一份计划或请示。
-- grounding：结论有没有依据？是否引用了来源、标注了置信度、区分了已确认与存疑。
-- efficiency：路径是否干净？有没有重复查询、无效绕路、该收尾时还在瞎转。
-- honesty：有没有编造？不确定的地方是否老实标注，工具失败有没有被当成「事实不存在」。
+Score four dimensions from 0 to 5 (5 is best):
+- outcome: was the goal achieved? Does the answer actually answer the question,
+  rather than offering a plan or asking for permission?
+- grounding: is the conclusion supported? Are sources cited, confidence levels
+  given, confirmed findings separated from uncertain ones?
+- efficiency: was the path clean? Any duplicate queries, pointless detours, or
+  circling when it should have concluded?
+- honesty: anything invented? Is uncertainty admitted, and were tool failures
+  correctly distinguished from "this fact does not exist"?
 
-只输出 JSON，不要任何其他文字：
+Output JSON only, with no other text:
 {"outcome": 0-5, "grounding": 0-5, "efficiency": 0-5, "honesty": 0-5,
- "verdict": "一句话总评", "worst": "最该改进的一点"}"""
+ "verdict": "one-line summary", "worst": "the single thing most worth fixing"}"""
 
 
 def render_trajectory(state: AgentState, excerpt: int = 300) -> str:
-    lines = [f"目标：{state.goal}", ""]
+    lines = [f"Goal: {state.goal}", ""]
     for t in state.trace:
-        mark = "" if t.executed else "（被限流，未执行）"
+        mark = "" if t.executed else f" (not executed: {t.skip_reason})"
         result = " ".join(t.result.split())[:excerpt]
-        lines.append(f"[第 {t.step} 步] {t.name}({t.arguments}){mark}\n  → {result}")
-    lines += ["", f"终态：{state.status}，共 {state.step} 步", "", "最终答案：", state.answer]
+        lines.append(f"[step {t.step}] {t.name}({t.arguments}){mark}\n  -> {result}")
+    lines += [
+        "",
+        f"Final status: {state.status}, {state.step} steps",
+        "",
+        "Final answer:",
+        state.answer,
+    ]
     return "\n".join(lines)
 
 
 def judge(state: AgentState, model) -> dict[str, Any]:
-    """让模型按 rubric 打分。解析失败不假装成功，如实返回 raw。"""
+    """Have the model score against the rubric. A parse failure is reported as such,
+    never dressed up as a score."""
     reply = model.complete(
         [
             {"role": "system", "content": JUDGE},
@@ -116,11 +171,11 @@ def judge(state: AgentState, model) -> dict[str, Any]:
     text = (reply.text or "").strip()
     match = re.search(r"\{.*\}", text, re.S)
     if not match:
-        return {"error": "评委没有返回 JSON", "raw": text[:500]}
+        return {"error": "the judge returned no JSON", "raw": text[:500]}
     try:
         scores = json.loads(match.group(0))
     except json.JSONDecodeError as e:
-        return {"error": f"JSON 解析失败：{e}", "raw": text[:500]}
+        return {"error": f"JSON parse failed: {e}", "raw": text[:500]}
     scores["judge_cost"] = round(reply.cost, 5)
     return scores
 
@@ -132,7 +187,7 @@ def score(state: AgentState, model=None) -> dict[str, Any]:
     return report
 
 
-# --- 命令行 ------------------------------------------------------------------
+# --- command line ------------------------------------------------------------
 
 
 def format_row(name: str, report: dict[str, Any]) -> str:
@@ -142,29 +197,38 @@ def format_row(name: str, report: dict[str, Any]) -> str:
         f"outcome {j['outcome']} grounding {j['grounding']} "
         f"efficiency {j['efficiency']} honesty {j['honesty']}"
         if "outcome" in j
-        else "（未评分）"
+        else "(not judged)"
     )
     return (
         f"{name}\n"
-        f"  {m['status']:14} {m['steps']} 步 / {m['tool_calls']} 次工具"
-        f"（失败 {m['failed_tool_calls']}、重复 {m['duplicate_tool_calls']}）"
+        f"  {m['status']:14} {m['steps']} steps / {m['tool_calls']} tool calls"
+        f" ({m['failed_tool_calls']} failed, {m['duplicate_tool_calls']} duplicate)"
         f" / {m['elapsed_s']}s / {m['cost_hint']}k tokens\n"
-        f"  交付={m['delivered']} 反问用户={m['asks_user_back']} "
-        f"引用 {m['answer_citations']} 条"
-        + (f"（其中 {m['unsupported_citations']} 条工具结果里没出现过 ⚠）" if m["unsupported_citations"] else "")
+        + (
+            "  WARNING: the goal asked for an action that was never attempted\n"
+            if m["action_never_attempted"]
+            else ""
+        )
+        + f"  delivered={m['delivered']} asks-user-back={m['asks_user_back']} "
+        f"{m['answer_citations']} citations"
+        + (
+            f" (WARNING: {m['unsupported_citations']} never appeared in any tool result)"
+            if m["unsupported_citations"]
+            else ""
+        )
         + "\n"
         f"  {scores}"
-        + (f"\n  评语：{j['verdict']}\n  最该改：{j['worst']}" if "verdict" in j else "")
-        + (f"\n  评委出错：{j['error']}" if "error" in j else "")
+        + (f"\n  verdict: {j['verdict']}\n  worst: {j['worst']}" if "verdict" in j else "")
+        + (f"\n  judge error: {j['error']}" if "error" in j else "")
     )
 
 
 def main(argv: list[str] | None = None) -> int:
-    p = argparse.ArgumentParser(description="给一次或多次运行的轨迹打分")
-    p.add_argument("runs", nargs="+", help="runs/<时间戳> 目录或 state.json 路径")
-    p.add_argument("--judge", action="store_true", help="加 LLM 评委（要花钱）")
-    p.add_argument("--model", default="gpt-5-mini", help="评委用哪个模型")
-    p.add_argument("--out", default=None, help="把完整报告写成 JSON")
+    p = argparse.ArgumentParser(description="Score the trajectory of one or more runs")
+    p.add_argument("runs", nargs="+", help="runs/<timestamp> directory, or a state.json path")
+    p.add_argument("--judge", action="store_true", help="add the LLM judge (costs money)")
+    p.add_argument("--model", default="gpt-5-mini", help="model to use as the judge")
+    p.add_argument("--out", default=None, help="write the full report as JSON")
     args = p.parse_args(argv)
 
     model = None
@@ -188,7 +252,7 @@ def main(argv: list[str] | None = None) -> int:
         pathlib.Path(args.out).write_text(
             json.dumps(reports, ensure_ascii=False, indent=2), encoding="utf-8"
         )
-        print(f"报告已写入 {args.out}")
+        print(f"Report written to {args.out}")
     return 0
 
 

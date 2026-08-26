@@ -1,7 +1,8 @@
-"""上下文管理：外置大结果 + 超限压缩。
+"""Context management: externalizing big results, and compacting over the limit.
 
-压缩最危险的地方不是「摘要写得好不好」，而是**把工具调用和它的结果拆散** ——
-那会让下一轮请求直接 400。所以这里每条用例都顺带验一遍消息协议不变量。
+The dangerous part of compaction is not summary quality, it is **splitting a tool
+call from its result** — that makes the next request fail with a 400. So every case
+here also re-checks the message-protocol invariant.
 """
 
 import pytest
@@ -14,7 +15,7 @@ from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
 
 
 def test_estimate_tokens_weighs_cjk_heavier():
-    assert ctx.estimate_tokens("中文" * 100) > ctx.estimate_tokens("ab" * 100)
+    assert ctx.estimate_tokens("中文" * 100) > ctx.estimate_tokens("ab" * 100)  # CJK is denser
 
 
 def test_safe_cut_points_never_split_a_call_from_its_result():
@@ -27,7 +28,7 @@ def test_safe_cut_points_never_split_a_call_from_its_result():
         {"role": "assistant", "content": "done"},
     ]
     points = ctx.safe_cut_points(messages)
-    assert 3 not in points and 4 not in points  # 切在这里会拆散调用与结果
+    assert 3 not in points and 4 not in points  # cutting here splits call from result
     assert 5 in points and 6 in points
 
 
@@ -42,62 +43,63 @@ def test_safe_cut_points_handles_responses_shape():
     assert ctx.safe_cut_points(messages) == [1, 2, 3, 5]
 
 
-# --- 外置 --------------------------------------------------------------------
+# --- externalization ---------------------------------------------------------
 
 
 @pytest.fixture
 def big_tool(monkeypatch):
     registry = dict(tools.REGISTRY)
     registry["dump"] = tools.Tool(
-        "dump", "吐一大坨", {"type": "object", "properties": {}}, lambda **_: "X" * 5000
+        "dump", "returns a wall of text", {"type": "object", "properties": {}}, lambda **_: "X" * 5000
     )
     monkeypatch.setattr(tools, "REGISTRY", registry)
 
 
 def test_big_tool_result_is_written_to_disk_and_shrunk(big_tool, tmp_path):
     state = loop.run(
-        "外置测试",
-        ScriptedModel([assistant_calls([("dump", {})]), assistant_says("好")]),
+        "externalization test",
+        ScriptedModel([assistant_calls([("dump", {})]), assistant_says("ok")]),
         memory=NullMemory(),
         run_dir=tmp_path,
     )
     kept = [m for m in state.messages if m.get("role") == "tool"][0]["content"]
-    assert len(kept) < 1200  # 上下文里只剩摘要
-    assert "read_file" in kept  # 并且告诉模型怎么取回全文
+    assert len(kept) < 1200  # only an excerpt is left in the context
+    assert "read_file" in kept  # and it tells the model how to get the rest
 
     files = list(tmp_path.glob("*.txt"))
-    assert len(files) == 1 and len(files[0].read_text()) == 5000  # 全文一个字没丢
-    # 留痕记录的是「模型实际看到的东西」（精简版），全文在盘上 ——
-    # trajectory eval 关心的是前者，复盘细节去读文件。
+    assert len(files) == 1 and len(files[0].read_text()) == 5000  # full text intact
+    # The trace records what the model actually saw (the trimmed version); the full
+    # text lives on disk. Trajectory eval cares about the former; read the file for
+    # the details.
     assert state.trace[0].result == kept
 
 
-# --- 压缩 --------------------------------------------------------------------
+# --- compaction --------------------------------------------------------------
 
 
 def test_compaction_replaces_history_and_keeps_protocol_valid():
-    # 前几轮不断产生工具调用，把上下文撑大
+    # A few turns of tool calls to inflate the context
     script = [assistant_calls([("calculate", {"expression": "1+1"})]) for _ in range(6)]
-    script.append(assistant_says("结束"))
+    script.append(assistant_says("finished"))
     model = ScriptedWithSummarizer(script)
 
     state = loop.run(
-        "压缩测试",
+        "compaction test",
         model,
         memory=NullMemory(),
         max_steps=8,
-        context_limit=200,  # 故意设得很小，逼它压缩
+        context_limit=200,  # deliberately tiny, to force compaction
         run_dir=None,
     )
 
     assert model.summaries >= 1 and state.compactions >= 1
-    assert any("[上下文摘要]" in str(m.get("content", "")) for m in state.messages)
-    assert tool_results_follow_their_call(state)  # 压缩后消息协议依然完整
-    assert state.messages[0]["role"] == "system"  # 前缀没动，prompt caching 还在
-    assert state.messages[1]["content"] == "压缩测试"  # 原始目标永远留着
+    assert any("[context summary]" in str(m.get("content", "")) for m in state.messages)
+    assert tool_results_follow_their_call(state)  # protocol survives compaction
+    assert state.messages[0]["role"] == "system"  # prefix untouched, cache intact
+    assert state.messages[1]["content"] == "compaction test"  # the original goal always stays
 
 
 def test_no_compaction_below_the_limit():
-    model = ScriptedWithSummarizer([assistant_says("短任务")])
-    loop.run("小任务", model, memory=NullMemory(), context_limit=100_000)
+    model = ScriptedWithSummarizer([assistant_says("short task")])
+    loop.run("small task", model, memory=NullMemory(), context_limit=100_000)
     assert model.summaries == 0

@@ -1,13 +1,13 @@
 [project]
 name = "mini-agent"
 version = "0.1.0"
-description = "一个最小但完整的 AI Agent：Model + State + Tools + Control Loop + Memory/Evals"
+description = "A minimal but complete AI agent: Model + State + Tools + Control Loop + Memory/Evals"
 readme = "README.md"
 requires-python = ">=3.11"
 dependencies = [
     "openai>=1.60",
     "python-dotenv>=1.0",
-    "ddgs>=9.0",          # 免 key 的网页检索后端（DuckDuckGo）
+    "ddgs>=9.0",          # key-less web search backend (DuckDuckGo)
 ]
 
 [project.scripts]

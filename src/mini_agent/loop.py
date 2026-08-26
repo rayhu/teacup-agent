@@ -1,13 +1,16 @@
-"""Control Loop —— 把 Model / State / Tools / Memory 串起来的那 40 行。
+"""Control Loop — the ~40 lines that wire Model / State / Tools / Memory together.
 
-一句话本质：
+In one line:
 
-    LLM → tool call → tool result → LLM → ...
+    LLM -> tool call -> tool result -> LLM -> ...
 
-三个容易踩的坑，代码里都标了注释：
-1. 带 tool_calls 的 assistant 消息必须**先** append，再 append 工具结果；
-2. 一轮里可能有**多个** tool_call，每一个 id 都必须有对应的 role=tool 消息；
-3. 终止条件不是玄学的 check_completion()，而是「模型不再要工具」+ 步数/预算上限。
+Three traps, all marked in the code below:
+1. The assistant message carrying tool_calls must be appended **before** the tool
+   results;
+2. One turn may contain **several** tool_calls, and every id needs its own
+   role=tool message;
+3. Termination is not a mysterious check_completion(): it is "the model stopped
+   asking for tools" plus the step / budget / time ceilings.
 """
 
 from __future__ import annotations
@@ -22,109 +25,169 @@ from typing import Any, Callable
 
 from mini_agent import context as ctx
 from mini_agent import persist
+from mini_agent import plan as plan_mod
 from mini_agent import tools as tools_mod
 from mini_agent.memory import Memory, NullMemory
 from mini_agent.model import Model, ToolCall, chat_tool_result
 from mini_agent.state import AgentState, ToolTrace
 
-SYSTEM_PROMPT = """你是一个会使用工具的自主 Agent，运行在**无人值守**的自动模式下。
+SYSTEM_PROMPT = """You are an autonomous, tool-using agent running **unattended**.
 
-今天是 {today}。
+Today is {today}.
 
-关于时效性（重要）：
-- 你的训练数据截止时间早于今天，世界在那之后继续发生了变化。
-- 检索结果与你的记忆冲突时，**以检索结果为准**。不要因为「这个数字比我印象中大得多」
-  就判定信息不实 —— 那通常只说明你的记忆过期了。
-- 正确做法是来源分级 + 交叉验证，而不是整体拒绝：
-  一手来源（公司官网/公告/监管文件）> 主流媒体 > 二手聚合与 SEO 站点；
-  多个独立来源一致就可以采信并标注来源，只有低质来源支持则标注「存疑」。
-- 但仍然不许凭空编造具体数字。没查到就说没查到。
+About recency (important):
+- Your training data ends before today; the world kept moving after that.
+- When a search result conflicts with your memory, **trust the search result**. Do
+  not dismiss something as false because "that number is far larger than I
+  remember" — that usually only means your memory is out of date.
+- The right response is source grading plus cross-checking, not blanket rejection:
+  primary sources (company sites, filings, regulators) > major media > secondary
+  aggregators and SEO pages. Several independent sources agreeing is enough to
+  accept and cite; only low-quality support means you mark it "unverified".
+- You still may not invent specific numbers. If you did not find it, say so.
 
-关于怎么提问（同样重要）：
-- 检索词里的时间锚点要用**今天**来算，不要用你记忆里的年份。
-  比如「最近半年」指的是今天往前推六个月这个区间，不是你印象中的某一年。
-- 也不要把记忆里的具体事件（某轮融资金额、某个模型版本号）当作检索词的前提 ——
-  那些多半已经过时，会把你带回旧新闻。先用宽泛的近期关键词摸清现状，再针对性深挖。
+About how you search (equally important):
+- Anchor time expressions in your queries to **today**, not to the years you
+  remember. "The last six months" means the six months before today.
+- Do not build queries on specific facts from memory (a funding amount, a model
+  version number) — those are usually stale and drag you back to old news. Start
+  broad and recent, then drill down.
 
-自动模式的硬约束：
-- **没有人会回答你的提问。** 不要请求许可、不要问「是否需要我继续」、不要把待办清单
-  交回给用户 —— 你自己想做的下一步，直接做。
-- 每轮开头会告诉你剩余步数、预算和时间。**任何一项**见底都要立刻收尾，别只盯着最宽松的那个。
-- 绝不能空手而归：即使信息不全，也要给出「目前能得出的最佳结论 + 置信度 + 待核实项」，
-  而不是一份行动计划。
+Hard constraints of unattended mode:
+- **Nobody will answer your questions.** Do not ask for permission, do not ask
+  "should I continue", do not hand a to-do list back to the user. If you think a
+  step is worth doing, do it.
+- Each turn starts with your remaining steps, budget and time. If **any one** of
+  them is running out, wrap up now — do not fixate on whichever is most generous.
+- Never come back empty-handed: even with partial information, give "the best
+  conclusion available now + confidence + what remains unverified" rather than a
+  plan of action.
 
-工作方式：
-- 需要外部信息时就调用工具，不要凭空编造；一轮可以同时发起多个工具调用，但每轮最多执行 {max_tool_calls} 个，
-  超出的会被拒绝执行并要求你下一轮重发 —— 所以请先挑最关键的几个。
-- 工具返回以 ERROR: 开头时，说明调用有问题，请修正参数后重试，不要放弃。
-- 少数工具（有外部副作用、无法撤销，比如发邮件）执行前需要人工批准，可能被拒绝。
-  被拒绝时**不要重复发起同一个调用** —— 换一种做法，或在最终答案里说明这一步需要用户自己来做。
-- 不再调用工具 = 你认为任务已完成，这是循环的终止信号 —— 别用它来提问。
-- 遇到值得长期保留的事实（用户偏好、稳定结论），用 remember 工具记下来。
+How to work:
+- Call tools when you need external information; never make it up. You may request
+  several tool calls in one turn, but at most {max_tool_calls} run per turn and the
+  rest are rejected and must be re-sent next turn — so pick the important ones.
+- A tool result starting with ERROR: means the call was wrong. Fix the arguments
+  and retry instead of giving up.
+- A few tools have external, irreversible side effects (sending email, for example)
+  and need human approval before running. **Attempt the call anyway.** The approval
+  prompt is exactly where the user grants or refuses permission, so:
+  1. call the tool when the task asks for it;
+  2. only if the call comes back denied should you take another route, or state in
+     your final answer that this step is left to the user;
+  3. never re-send an identical call that was denied.
+  Do not ask for authorization in your answer instead of calling the tool. Nobody
+  reads the answer before the run ends, and that is not how approval works here.
+- No tool calls = you consider the task complete. That is the loop's stop signal;
+  do not use it to ask a question.
+- When you learn something worth keeping across sessions (user preferences, stable
+  conclusions), write it down with the remember tool.
+- Each turn shows a checklist of what the request asked for. Work through every item,
+  including any side-effecting one, and mark each finished item with update_todo. An
+  item you cannot complete is marked blocked with a reason — never left silently
+  undone.
 
-请保持回答简洁，关键结论标注来源与置信度。"""
+Keep answers concise, and label key conclusions with their source and confidence."""
 
 
 def status_note(state: AgentState) -> dict[str, Any]:
-    """每轮开头告诉模型它的资源状况。
+    """Tell the model where it stands at the start of each turn.
 
-    为什么不写进 system prompt：那样会让上下文前缀每轮都变，
-    prompt caching（roadmap #2）就废了。追加在末尾则不影响前缀。
+    Why this is not part of the system prompt: putting it there would change the
+    context prefix every turn and void prompt caching (roadmap #2). Appended at the
+    end, it leaves the prefix untouched.
     """
-    left = state.max_steps - state.step  # 本轮之后还剩几轮
+    left = state.max_steps - state.step  # turns remaining after this one
     time_left = state.time_left()
-    # 时间和步数谁更紧张就听谁的 —— 第三次实测里模型被「预算还剩 91%」误导，
-    # 忽略了步数已经见底。多个刹车并存时，必须把**最紧的那个**摆到台面上。
+    # Whichever brake is tightest gets the spotlight. In one real run the model was
+    # misled by "91% of the budget left" and ignored that its steps were nearly
+    # gone. With several brakes running, surface the **tightest** one.
     tight_on_time = time_left is not None and time_left <= max(15.0, (state.time_budget or 0) * 0.25)
 
     if left <= 0:
         urgency = (
-            "⚠ **这是最后一轮**，工具已被收走。立刻基于已有信息给出最终结论 —— "
-            "包括已确认的结论、置信度、以及未能核实的项。绝不能空手而归。"
+            "WARNING: **this is the FINAL turn** and the tools have been taken away. "
+            "Give your final conclusion from what you already have — confirmed "
+            "findings, confidence, and what you could not verify. Do not come back "
+            "empty-handed."
         )
     elif left <= 2 or tight_on_time:
-        why = f"只剩 {left} 轮" if left <= 2 else f"只剩 {time_left:.0f} 秒"
-        urgency = f"⚠ {why}，请开始收尾：最多再查一轮，然后必须给出结论。"
+        why = f"only {left} turn(s) left" if left <= 2 else f"only {time_left:.0f}s left"
+        urgency = f"WARNING: {why}. Start wrapping up: at most one more lookup, then conclude."
     else:
-        urgency = "资源充足就继续查证，不足就立刻给出最终结论。"
+        urgency = "Keep verifying while resources allow; conclude as soon as they run low."
 
-    resources = f"第 {state.step}/{state.max_steps} 轮；预算剩余 ${state.remaining_budget:.4f}"
+    resources = f"turn {state.step}/{state.max_steps}; budget ${state.remaining_budget:.4f} left"
     if time_left is not None:
-        resources += f"；剩余时间 {time_left:.0f} 秒"
-    return {"role": "system", "content": f"[运行状态] {resources}。{urgency}"}
+        resources += f"; {time_left:.0f}s left"
+
+    content = f"[run status] {resources}. {urgency}"
+    if checklist := plan_mod.render(state.todo):
+        # The checklist rides along with the resource line for the same reason the
+        # resource line exists at all: the model cannot act on what it is not told.
+        content += f"\n{checklist}"
+    return {"role": "system", "content": content}
+
+
+COMPLETION_CHECK = """[completion check] You stopped calling tools, but the checklist
+still has open items:
+
+{pending}
+
+Either do them now — including any step that needs approval, where attempting the call
+is how the user is asked — or, if an item genuinely cannot be done, call update_todo
+with status='blocked' and a reason, then give your final answer. Do not simply answer
+around the missing item."""
 
 
 def finalize(state: AgentState, model: Model, emit: Callable[..., None]) -> None:
-    """强制收尾轮：资源耗尽时，不给工具再问一次，把已有信息榨成结论。
+    """Forced wrap-up turn: when resources run out, ask once more with no tools and
+    squeeze a conclusion out of what is already there.
 
-    第三次实测运行的教训：模型把 8 轮全用在检索上，一个字的结论都没留下 ——
-    十次检索的钱全白花。刹车不能只是「停」，还得把车上的东西卸下来。
+    The lesson from a real run: the model spent all 8 turns searching and left not
+    one line of conclusion — ten searches paid for and nothing to show. A brake must
+    not only stop the car, it must also unload it.
     """
     state.messages.append(
         {
             "role": "system",
             "content": (
-                f"[强制收尾] 资源已耗尽（{state.status}），工具不再可用。"
-                "立刻基于已经获得的信息给出最终结论：已确认的结论 + 置信度 + 未能核实的项。"
+                f"[forced wrap-up] Resources are exhausted ({state.status}) and tools "
+                "are no longer available. Give your final conclusion from the "
+                "information you already have: confirmed findings + confidence + "
+                "what remains unverified."
+                + (
+                    "\nThese checklist items were never completed; say so plainly and "
+                    "tell the user what is left for them to do: "
+                    + "; ".join(t.text for t in plan_mod.pending(state.todo))
+                    if plan_mod.pending(state.todo)
+                    else ""
+                )
             ),
         }
     )
     try:
-        reply = model.complete(state.messages, [])  # 空工具清单 = 只能说话
+        reply = model.complete(state.messages, [])  # empty tool list = talking only
     except Exception as e:
-        emit("error", message=f"强制收尾失败：{type(e).__name__}: {e}")
+        emit("error", message=f"forced wrap-up failed: {type(e).__name__}: {e}")
         return
     state.charge(reply.cost)
     state.messages.extend(reply.items)
 
-    # 收尾轮传的是空工具清单，但模型仍可能硬发工具调用。**每个宣告过的 id 都必须有结果**，
-    # 否则消息协议断裂：下一次请求（包括 --resume 接着跑）会直接 400。
+    # The wrap-up turn is given no tools, but a model can still emit tool calls.
+    # **Every announced id must have a result**, or the message protocol breaks and
+    # the next request (including a later --resume) fails with a 400.
     for call in reply.tool_calls:
         state.messages.append(
-            result_item(model, call, "ERROR: 已进入强制收尾阶段，工具不再可用，请直接给出结论。")
+            result_item(
+                model,
+                call,
+                "ERROR: the run has entered forced wrap-up; tools are no longer "
+                "available. Give your conclusion directly.",
+            )
         )
 
-    if not reply.text:  # 没榨出东西就别声称抢救成功
+    if not reply.text:  # nothing salvaged — do not claim otherwise
         return
     state.answer = reply.text
     state.salvaged = True
@@ -132,15 +195,17 @@ def finalize(state: AgentState, model: Model, emit: Callable[..., None]) -> None
 
 
 def result_item(model: Model, call: ToolCall, result: str) -> dict[str, Any]:
-    """问模型后端要工具结果的形状；没实现就退回 Chat Completions 的老形状。"""
+    """Ask the backend for the tool-result shape; fall back to the Chat shape."""
     fn = getattr(model, "tool_result_item", None)
     return fn(call, result) if fn else chat_tool_result(call, result)
 
 
 def is_retryable(error: Exception) -> bool:
-    """限流(429)、服务端错误(5xx)、以及没有状态码的网络类错误值得重试。
+    """Rate limits (429), server errors (5xx) and network errors without a status
+    code are worth retrying.
 
-    4xx（参数错、鉴权错）重试多少次都是同样的结果，只是白烧时间。
+    A 4xx (bad arguments, bad credentials) returns the same answer however many
+    times you ask; retrying only burns time.
     """
     status = getattr(error, "status_code", None) or getattr(error, "status", None)
     if status is None:
@@ -156,10 +221,10 @@ def complete_with_retries(
     attempts: int = 3,
     sleep: Callable[[float], None] | None = None,
 ):
-    """模型调用的退避重试。
+    """Backoff retries around the model call.
 
-    重试**不算一个 step** —— 步数衡量的是「模型做了几次决策」，
-    一次 429 不该消耗 agent 的思考额度。
+    A retry is **not a step**: steps measure how many decisions the model made, and
+    one rate limit should not eat into the agent's thinking allowance.
     """
     for attempt in range(attempts):
         try:
@@ -169,24 +234,26 @@ def complete_with_retries(
                 raise
             delay = 2**attempt
             emit("retry", error=f"{type(e).__name__}: {e}", attempt=attempt + 1, delay=delay)
-            (sleep or time.sleep)(delay)  # 调用时才取，测试才拦得住
+            (sleep or time.sleep)(delay)  # resolved at call time so tests can patch it
 
 
 DENIED = (
-    "ERROR: 该操作需要人工批准，本次未获批准，**没有执行**。"
-    "请不要重复发起同一个调用；换一种不需要批准的方式，或在最终答案里说明这一步需要用户自己来做。"
+    "ERROR: this operation requires human approval, which was not granted, so it "
+    "**was NOT executed**. Do not re-send the same call; take an approach that needs "
+    "no approval, or state in your final answer that the user has to do this step."
 )
 
 
 def deny_all(call: ToolCall, tool: Any) -> bool:
-    """默认策略：无人值守时，需要批准的操作一律拒绝。
+    """Default policy: unattended runs deny anything that needs approval.
 
-    「没人看着就默认放行」是最危险的默认值 —— 出事的恰恰是没人看着的那次。
+    "Nobody is watching, so allow it" is the most dangerous default there is — the
+    run that goes wrong is precisely the one nobody was watching.
     """
     return False
 
 
-EXTERNALIZE_OVER = 2000  # 超过这么多字符的工具结果就写盘，上下文里只留摘要 + 路径
+EXTERNALIZE_OVER = 2000  # tool results longer than this go to disk, excerpt inline
 
 
 def execute_calls(
@@ -198,22 +265,25 @@ def execute_calls(
     run_dir: pathlib.Path | None = None,
     approve: Callable[[ToolCall, Any], bool] = deny_all,
 ) -> None:
-    """并行执行一轮里的所有工具调用，然后**按原顺序**回填。
+    """Run all of a turn's tool calls in parallel, then feed results back **in the
+    original order**.
 
-    两条必须守住的不变量（并行最容易打破的正是它们）：
-    1. 回填顺序与 tool_calls 顺序一致，且每个 id 恰好一条结果；
-    2. 被限流拦下的调用不执行，但同样要有结果消息。
+    Two invariants that must hold (and that parallelism breaks most easily):
+    1. results are appended in tool_calls order, and every id gets exactly one;
+    2. a call the throttle rejected still needs a result message.
 
-    超时说明：Python 杀不掉一个卡住的线程。超时后我们给模型一条 ERROR 结果继续往下走，
-    那个线程被丢在后台自生自灭（daemon）。这是权衡，不是疏漏 —— 真要硬隔离得上子进程。
+    On timeouts: Python cannot kill a stuck thread. After a timeout we hand the model
+    an ERROR result and move on, leaving that thread to finish on its own. That is a
+    trade-off, not an oversight — real isolation would need a subprocess.
     """
     cap = state.max_tool_calls_per_step
     if cap > 0 and len(calls) > cap:
         emit("throttled", requested=len(calls), cap=cap, step=state.step)
 
     throttled_msg = (
-        f"ERROR: 本轮工具调用数已达上限（{cap} 个），该调用未执行。"
-        "请先看已返回的结果，若仍有必要，下一轮再发起（可合并成更少的查询）。"
+        f"ERROR: this turn's tool-call limit ({cap}) is reached, so this call was not "
+        "executed. Read the results you already have; if it is still needed, send it "
+        "again next turn (ideally merged into fewer queries)."
     )
     results: dict[int, str] = {}
     reasons: dict[int, str] = {}
@@ -222,7 +292,8 @@ def execute_calls(
         if cap > 0 and i >= cap:
             results[i], reasons[i] = throttled_msg, "throttled"
             continue
-        # 批准检查必须在**提交线程池之前**、而且串行做 —— 它要么问人，要么直接拒绝
+        # The approval check must happen **before** the thread pool and serially —
+        # it either asks a human or denies outright.
         spec = tools_mod.REGISTRY.get(call.name)
         if spec is not None and spec.requires_approval:
             emit("approval_required", name=call.name, arguments=call.arguments, step=state.step)
@@ -234,7 +305,8 @@ def execute_calls(
         to_run.append((i, call))
 
     if to_run:
-        # 时间刹车也管得住工具：剩余时间比单次超时还短时，以剩余时间为准
+        # The time brake reaches tools too: if less time remains than the per-call
+        # timeout, the remaining time wins.
         left = state.time_left()
         deadline = tool_timeout if left is None else min(tool_timeout, max(1.0, left))
         with ThreadPoolExecutor(max_workers=len(to_run)) as pool:
@@ -247,20 +319,24 @@ def execute_calls(
                     results[i] = future.result(timeout=deadline)
                 except FuturesTimeout:
                     results[i] = (
-                        f"ERROR: 工具执行超过 {deadline:.0f} 秒未返回，已放弃本次调用。"
-                        "这**不代表**该操作失败或该信息不存在，可换个更小的请求重试。"
+                        f"ERROR: the tool did not return within {deadline:.0f}s and the "
+                        "call was abandoned. This does **not** mean the operation "
+                        "failed or the information does not exist; retry with a "
+                        "smaller request."
                     )
                     future.cancel()
-                except Exception as e:  # execute() 内部已兜底，这里是最后一道
+                except Exception as e:  # execute() already catches; this is the net
                     results[i] = f"ERROR: {type(e).__name__}: {e}"
 
-    for i, call in enumerate(calls):  # 严格按原顺序回填
+    for i, call in enumerate(calls):  # strictly in the original order
         result = results[i]
         executed = i not in reasons
         if executed:
             emit("tool_result", name=call.name, result=result, step=state.step)
-            # 外置：大块结果写盘，上下文里只留开头 + 路径（模型可用 read_file 取回）。
-            # 留痕记的是精简版 —— 它代表「模型实际看到了什么」，全文在盘上。
+            # Externalize: a big result goes to disk and the context keeps an excerpt
+            # plus the path (the model can read it back with read_file). The trace
+            # records the trimmed version — it represents what the model actually
+            # saw; the full text lives on disk.
             if run_dir is not None and len(result) > EXTERNALIZE_OVER:
                 full_len = len(result)
                 result = ctx.externalize(result, run_dir, state.step, i, call.name)
@@ -285,43 +361,51 @@ def run(
     max_steps: int = 8,
     budget: float = 0.05,
     max_tool_calls_per_step: int = 3,
-    time_budget: float | None = 600.0,  # 默认 10 分钟；None = 不限
-    tool_timeout: float = 30.0,  # 单个工具调用的超时（秒）
-    context_limit: int = 30_000,  # 上下文超过这么多 token 就压缩
-    run_dir: str | pathlib.Path | None = None,  # 落盘与外置目录；None = 都不做
-    resume: AgentState | None = None,  # 从上次落盘的状态接着跑
-    approve: Callable[[ToolCall, Any], bool] = deny_all,  # 危险操作的批准策略
+    time_budget: float | None = 600.0,  # default 10 minutes; None = unlimited
+    tool_timeout: float = 30.0,  # per tool call, in seconds
+    context_limit: int = 30_000,  # compact once the context exceeds this many tokens
+    run_dir: str | pathlib.Path | None = None,  # persistence + externalization dir
+    resume: AgentState | None = None,  # continue from a previously saved state
+    plan: bool = False,  # decompose the goal into a checklist first (one extra call)
+    approve: Callable[[ToolCall, Any], bool] = deny_all,  # approval policy
     today: str | None = None,
     clock: Callable[[], float] = time.monotonic,
     on_event: Callable[[str, dict[str, Any]], None] | None = None,
 ) -> AgentState:
-    """跑一次任务，返回终态（含答案、留痕、花费、耗时）。
+    """Run one task and return the final state (answer, trace, cost, elapsed time).
 
-    time_budget 是**墙上时间**上限（秒），默认 600（10 分钟），None = 不限。它和预算刹车互补：
-    钱衡量的是模型算力，时间衡量的是人的等待 —— 检索限流、退避重试、网络慢
-    都只烧时间不烧钱，只有时间刹车拦得住。
+    time_budget is the **wall-clock** ceiling in seconds, 600 by default, None for
+    unlimited. It complements the money brake: dollars measure model compute, time
+    measures human waiting — search throttling, backoff retries and slow networks
+    burn time without burning money, and only the time brake catches those.
 
-    注意：时间只在**两轮之间**检查，单个工具调用卡死仍会超时（那需要给工具本身
-    加超时，属于 roadmap #5 并行执行时一起做的事）。
+    Note: time is only checked **between turns**, so a single wedged tool call can
+    still overshoot. That is what tool_timeout is for.
     """
     memory = memory or NullMemory()
-    tools_mod.bind_memory(memory)  # 让 remember 工具能写到这份记忆里
+    tools_mod.bind_memory(memory)  # let the remember tool write into this memory
 
     system = SYSTEM_PROMPT.format(
         max_tool_calls=max_tool_calls_per_step,
-        today=today or date.today().isoformat(),  # 模型不知道今天几号，必须告诉它
+        today=today or date.today().isoformat(),  # the model has no idea what day it is
     )
     if recalled := memory.recall():
         system += f"\n\n{recalled}"
 
-    # run_dir=None 表示「不落盘也不外置」—— 评测和单测要的就是这个，别往仓库里拉屎
+    # run_dir=None means "do not persist and do not externalize" — what evals and
+    # unit tests want, so they leave nothing behind in the repo.
     run_dir = pathlib.Path(run_dir) if run_dir else None
 
+    def emit(event: str, **data: Any) -> None:
+        if on_event:
+            on_event(event, data)
+
     if resume is not None:
-        # 恢复：消息、步数、花费、耗时全部沿用，尤其**不重建 system 消息** ——
-        # 重建会让上下文前缀变化，之前攒下的 prompt cache 全部作废。
+        # Resume: messages, steps, spend and elapsed time all carry over, and above
+        # all the system message is **not rebuilt** — rebuilding changes the context
+        # prefix and voids every prompt-cache entry earned so far.
         state = resume
-        started_at = clock() - state.elapsed  # 把已经花掉的时间接上
+        started_at = clock() - state.elapsed  # splice the already-spent time back on
     else:
         state = AgentState(
             goal=goal,
@@ -335,90 +419,117 @@ def run(
             {"role": "system", "content": system},
             {"role": "user", "content": goal},
         ]
+        if plan:
+            # One extra model call, before any tool exists, to write down what the
+            # request actually asks for. Cheap insurance against finishing half a task.
+            state.todo = plan_mod.decompose(goal, model)
+            if state.todo:
+                emit("planned", items=[t.text for t in state.todo])
+    tools_mod.bind_todo(state.todo)  # let update_todo tick items off
     state.status = "running"
 
-    # prompt cache 的分组键：由**上下文前缀**决定，所以同一套配置的多次运行能互相复用缓存。
-    # 缓存本身是 OpenAI 自动做的，我们要做的只有两件：前缀别变（状态行一律追加在末尾），
-    # 以及告诉它哪些请求该归为一组。注意前缀不足约 1024 token 时根本不会进缓存。
+    # Prompt-cache grouping key, derived from the **context prefix**, so separate
+    # runs with the same configuration can reuse each other's cache. The caching is
+    # OpenAI's job; ours is only to keep the prefix stable (status lines are always
+    # appended at the end) and to say which requests belong together. Note that a
+    # prefix under ~1024 tokens never enters the cache at all.
     set_key = getattr(model, "set_cache_key", None)
     if set_key:
         set_key("mini-agent-" + hashlib.sha256(state.messages[0]["content"].encode()).hexdigest()[:16])
 
-    def emit(event: str, **data: Any) -> None:
-        if on_event:
-            on_event(event, data)
-
     specs = tools_mod.specs()
 
     while True:
-        # ---- 守卫：步数 / 预算 / 时间 --------------------------------------
+        # ---- guards: steps / budget / time ---------------------------------
         state.elapsed = clock() - started_at
         if not state.can_continue():
             state.status = state.stop_reason()
             emit("stopped", reason=state.status)
-            if state.step > 0:  # 跑过至少一轮，就别空手而归
+            if state.step > 0:  # at least one turn ran, so do not leave empty-handed
                 finalize(state, model, emit)
             break
 
         state.step += 1
 
-        # ---- 0a. 上下文超限就先压缩 -----------------------------------------
+        # ---- 0a. compact first if the context is over the limit -------------
         if state.context_tokens > context_limit:
             try:
                 saved = ctx.compact(state, model, context_limit)
-            except Exception as e:  # 压缩失败不该让整个任务垮掉
-                emit("error", message=f"压缩失败：{type(e).__name__}: {e}")
+            except Exception as e:  # a failed compaction must not sink the task
+                emit("error", message=f"compaction failed: {type(e).__name__}: {e}")
                 saved = 0
             if saved:
                 state.context_tokens = ctx.messages_tokens(state.messages)
                 emit("compacted", saved_tokens=saved, now=state.context_tokens, step=state.step)
 
-        # ---- 0. 把资源状况告诉模型 -----------------------------------------
-        # 它得知道自己还剩多少步、多少钱，才谈得上「继续挖还是收尾」。
+        # ---- 0. tell the model where it stands ------------------------------
+        # It cannot choose between "dig further" and "wrap up" without knowing how
+        # many steps and dollars are left.
         state.messages.append(status_note(state))
 
-        # ---- 1. 问模型 ---------------------------------------------------
-        # 最后一轮不给工具：措辞可以被无视，空的工具清单不能。
+        # ---- 1. ask the model ----------------------------------------------
+        # No tools on the final turn: wording can be ignored, an empty tool list
+        # cannot.
         available = [] if state.step >= state.max_steps else specs
         try:
             reply = complete_with_retries(model, state.messages, available, emit)
-        except Exception as e:  # 网络/额度等外部故障，如实记录而不是假装成功
+        except Exception as e:  # external failure — record it instead of faking success
             state.status = "error"
-            state.answer = f"模型调用失败：{type(e).__name__}: {e}"
+            state.answer = f"model call failed: {type(e).__name__}: {e}"
             emit("error", message=state.answer)
             break
 
         state.charge(reply.cost)
         state.input_tokens_total += reply.input_tokens
         state.cached_tokens_total += reply.cached_tokens
-        # 真实 token 数优先，拿不到（如脚本模型）就估算
+        # Prefer the real token count; estimate when there is none (scripted model).
         state.context_tokens = reply.input_tokens or ctx.messages_tokens(state.messages)
 
-        # ---- 2. 先把模型这轮的输出写回状态--------------------------
-        # 用 extend 而不是 append：Responses API 一轮可能产出多个条目
-        # （reasoning 项 + 多个 function_call 项），少带一个就丢了推理状态。
+        # ---- 2. write this turn's output back into the state (trap 1) -------
+        # extend, not append: one Responses turn can produce several entries (a
+        # reasoning item plus function_call items) and dropping one loses the
+        # reasoning state.
         state.messages.extend(reply.items)
 
-        # ---- 3. 没有工具调用 = 任务完成----------------------------
+        # ---- 3. no tool calls = task complete (trap 3) ----------------------
         if not reply.tool_calls:
+            # ...unless the checklist says otherwise. A model that "finishes" with an
+            # untouched action item is the failure this check exists for: it gets one
+            # push-back, once, and then the answer stands either way.
+            outstanding = plan_mod.pending(state.todo)
+            if outstanding and not state.completion_checked and state.step < state.max_steps:
+                state.completion_checked = True
+                state.messages.append(
+                    {
+                        "role": "system",
+                        "content": COMPLETION_CHECK.format(
+                            pending="\n".join(f"- {t.text}" for t in outstanding)
+                        ),
+                    }
+                )
+                emit("completion_check", pending=[t.text for t in outstanding])
+                continue
+
             state.answer = reply.text
             state.status = "done"
             emit("answer", text=reply.text, step=state.step)
             break
 
-        # ---- 4. 并行执行所有工具调用，按原顺序回填（坑 2）------------------
+        # ---- 4. run every tool call in parallel, refill in order (trap 2) ---
         execute_calls(state, reply.tool_calls, model, emit, tool_timeout, run_dir, approve)
 
-        # ---- 5. 落盘：每步都存，崩了才有得恢复 -----------------------------
-        # elapsed 用本轮开头量的那个值，不再多问一次时钟（省掉一处非确定性）
+        # ---- 5. persist: save every step, or there is nothing to resume from -
+        # elapsed uses the value measured at the top of this turn, so we do not ask
+        # the clock twice (one less source of non-determinism).
         if run_dir is not None:
             persist.save(state, run_dir)
-        # 回到循环顶部，把工具结果一起交回模型 —— 这就是「Agent」和「一次函数调用」的区别
+        # Back to the top of the loop, handing the tool results to the model — this
+        # is the difference between an agent and a single function call.
 
     state.elapsed = clock() - started_at
     if state.status != "done" and not state.answer:
-        state.answer = f"（未得出最终答案，停止原因：{state.status}）"
-    if run_dir is not None:  # 终态也存一份，复盘和评测都靠它
+        state.answer = f"(no final answer; stopped because: {state.status})"
+    if run_dir is not None:  # the final state matters most for review and evals
         persist.save(state, run_dir)
         emit("saved", path=str(run_dir / persist.FILENAME))
     return state

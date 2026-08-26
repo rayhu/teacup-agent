@@ -1,11 +1,14 @@
-"""Model —— 唯一会「思考」的部件，其余部件都是管道。
+"""Model — the only part that thinks. Everything else is plumbing.
 
-这里把模型抽象成一个接口 `complete(messages, tools) -> Reply`，于是可以有两种实现：
+The model is behind one interface, `complete(messages, tools) -> Reply`, so there
+can be several implementations:
 
-* OpenAIModel   真实调用（需要 OPENAI_API_KEY）
-* ScriptedModel 按剧本返回，用于离线演示和 evals（零依赖、零费用）
+* OpenAIModel / ResponsesModel  real API calls (need OPENAI_API_KEY)
+* ScriptedModel                 replies from a script, for offline demos and evals
+                                (no dependencies, no cost)
 
-这层抽象不是过度设计：没有它，你就没法在不花钱的情况下测试控制循环。
+This abstraction is not over-engineering: without it there is no way to test the
+control loop without spending money.
 """
 
 from __future__ import annotations
@@ -20,29 +23,30 @@ from typing import Any, Protocol
 class ToolCall:
     id: str
     name: str
-    arguments: str  # 注意是 JSON **字符串**，不是 dict
+    arguments: str  # a JSON **string**, not a dict
 
 
 @dataclass
 class Reply:
-    """模型一轮输出的归一化表示。
+    """One turn of model output, normalized.
 
-    items 是「要原样追加回上下文的条目」，而不是「一条 assistant 消息」——
-    Chat Completions 一轮只产出 1 条；Responses 一轮可能产出多条
-    （reasoning 项 + 若干 function_call 项），把它们原样带回去正是保住推理状态的关键。
+    `items` are "the entries to append back into the context", not "one assistant
+    message": Chat Completions produces exactly one per turn, while Responses can
+    produce several (a reasoning item plus function_call items). Carrying them back
+    verbatim is precisely what preserves the reasoning state.
     """
 
     items: list[dict[str, Any]]
     text: str = ""
     tool_calls: list[ToolCall] = field(default_factory=list)
-    cost: float = 0.0  # 这一轮花掉的美元
-    input_tokens: int = 0  # 这一轮送进去的上下文有多大（压缩决策的依据）
-    cached_tokens: int = 0  # 其中命中 prompt cache 的部分（便宜十倍）
+    cost: float = 0.0  # dollars spent on this turn
+    input_tokens: int = 0  # size of the context sent in (drives compaction)
+    cached_tokens: int = 0  # of which served from the prompt cache (10x cheaper)
 
 
 class Model(Protocol):
     def set_cache_key(self, key: str) -> None:
-        """给 prompt cache 一个稳定的分组键（可选实现）。"""
+        """Give the prompt cache a stable grouping key (optional to implement)."""
         ...
 
     def complete(
@@ -50,12 +54,12 @@ class Model(Protocol):
     ) -> Reply: ...
 
     def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
-        """工具结果要以什么形状塞回上下文 —— 两个 API 这里的形状完全不同。"""
+        """The shape a tool result takes in the context — the two APIs differ here."""
         ...
 
 
 def chat_tool_result(call: ToolCall, result: str) -> dict[str, Any]:
-    """Chat Completions 的工具结果形状。"""
+    """Tool-result shape for Chat Completions."""
     return {
         "role": "tool",
         "tool_call_id": call.id,
@@ -67,24 +71,27 @@ def chat_tool_result(call: ToolCall, result: str) -> dict[str, Any]:
 def estimate_cost(
     model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0
 ) -> float:
-    """input_tokens 是**总输入**（含缓存命中的部分），cached_tokens 是其中命中缓存的。"""
+    """input_tokens is the **total** input (cache hits included); cached_tokens is
+    the part of it served from cache."""
     pin, pcached, pout = PRICES.get(model, _DEFAULT_PRICE)
     fresh = max(0, input_tokens - cached_tokens)
     return (fresh * pin + cached_tokens * pcached + output_tokens * pout) / 1_000_000
 
 
 def cached_from(usage: Any, field: str) -> int:
-    """从 usage 里挖出缓存命中的 token 数（两个 API 的字段名不同）。"""
+    """Dig the cached-token count out of `usage` (the two APIs name the field differently)."""
     details = getattr(usage, field, None)
     return getattr(details, "cached_tokens", 0) or 0 if details else 0
 
 
 # --------------------------------------------------------------------------
-# 真实模型
+# Real models
 # --------------------------------------------------------------------------
 
-# 每百万 token 的价格（美元）：(输入, 命中缓存的输入, 输出)。仅用于预算演示，可能过时。
-# 缓存命中的输入通常只要十分之一 —— 这就是保持上下文前缀稳定的直接回报。
+# Price per million tokens in USD: (input, cached input, output). For the budget
+# demo only, and it goes stale — check the official price list.
+# Cached input usually costs a tenth of fresh input: that is the direct payoff for
+# keeping the context prefix stable.
 PRICES: dict[str, tuple[float, float, float]] = {
     "gpt-5": (1.25, 0.125, 10.00),
     "gpt-5-mini": (0.25, 0.025, 2.00),
@@ -94,22 +101,24 @@ _DEFAULT_PRICE = (1.25, 0.125, 10.00)
 
 
 class OpenAIModel:
-    """用 Chat Completions 接口。
+    """The Chat Completions path.
 
-    为什么不用 Responses API（你笔记里那个）？Chat Completions 的 `messages`
-    列表就是 Agent 的状态本身，"把工具结果 append 回去" 这件事一眼可见，
-    更适合学习。换成 Responses API 只需要改这个类，循环不用动。
+    Why keep it when Responses is the default? Because the `messages` list *is* the
+    agent's state here, so "append the tool result and ask again" is visible at a
+    glance — the clearest version for learning. Switching APIs only touches this
+    class; the loop does not move.
     """
 
     def __init__(self, model: str = "gpt-5", client: Any = None):
         self.model = model
         self.cache_key: str | None = None
         if client is None:
-            from openai import OpenAI  # 延迟导入：离线运行不需要装 openai
+            from openai import OpenAI  # lazy import: offline runs need no openai
 
             if not os.getenv("OPENAI_API_KEY"):
                 raise RuntimeError(
-                    "缺少 OPENAI_API_KEY。请在 .env 里配置，或改用离线模式（去掉 --live）。"
+                    "OPENAI_API_KEY is missing. Set it in .env, or run offline "
+                    "(drop --live)."
                 )
             client = OpenAI()
         self.client = client
@@ -122,7 +131,7 @@ class OpenAIModel:
             "messages": messages,
             "tools": tools,
         }
-        if self.cache_key:  # 让相同前缀的请求路由到同一台机器，提高缓存命中率
+        if self.cache_key:  # route same-prefix requests together for better hits
             kwargs["prompt_cache_key"] = self.cache_key
         resp = self.client.chat.completions.create(**kwargs)
         msg = resp.choices[0].message
@@ -152,23 +161,27 @@ class OpenAIModel:
 
 
 class ResponsesModel:
-    """Responses API —— 面向推理模型（gpt-5 系列）的推荐路径。
+    """The Responses API — the recommended path for reasoning models (gpt-5 family).
 
-    和 Chat Completions 的四处形状差异，全部封在这个类里，loop.py 一行都不用改：
+    All four shape differences from Chat Completions are sealed inside this class,
+    so loop.py needs no changes:
 
-    1. 工具定义是**扁平**的：{"type": "function", "name": ...}，没有嵌套的 "function" 层；
-    2. 输出是 resp.output 列表（可能含 reasoning 项 + 多个 function_call 项），
-       而不是单条 message；
-    3. 工具调用的 id 字段叫 call_id（不是 id）；
-    4. 工具结果回传形状是 {"type": "function_call_output", "call_id", "output"}，
-       而不是 role="tool" 的消息。
+    1. Tool definitions are **flat**: {"type": "function", "name": ...}, with no
+       nested "function" layer;
+    2. Output is the resp.output list (which may contain a reasoning item plus
+       several function_call items) rather than a single message;
+    3. The tool-call id field is called call_id, not id;
+    4. Tool results go back as {"type": "function_call_output", "call_id", "output"}
+       instead of a role="tool" message.
 
-    为什么值得换：把 output 里的 reasoning 项**原样带回下一轮 input**，
-    模型跨工具调用的推理状态就不会丢。Chat Completions 每轮都会把它丢掉。
-    OpenAI 的迁移文档称同 prompt 下 SWE-bench 高约 3%。
+    Why it is worth switching: carrying the reasoning items from `output` back into
+    the next request's `input` **verbatim** preserves the model's reasoning state
+    across tool calls. Chat Completions throws it away every turn. OpenAI's
+    migration guide reports roughly +3% on SWE-bench with the same prompt.
 
-    状态管理这里用「无状态重发」：每轮把完整上下文重新发一遍（含上一轮的 reasoning 项）。
-    另一条路是 previous_response_id + 只发增量，更省钱，等做 #2 prompt caching 时再说。
+    State management here is "stateless resend": the whole context (including last
+    turn's reasoning items) goes out each time. The alternative is
+    previous_response_id plus deltas, which is cheaper — see roadmap #2.
     """
 
     def __init__(
@@ -181,18 +194,19 @@ class ResponsesModel:
         self.reasoning_effort = reasoning_effort
         self.cache_key: str | None = None
         if client is None:
-            from openai import OpenAI  # 延迟导入：离线运行不需要装 openai
+            from openai import OpenAI  # lazy import: offline runs need no openai
 
             if not os.getenv("OPENAI_API_KEY"):
                 raise RuntimeError(
-                    "缺少 OPENAI_API_KEY。请在 .env 里配置，或改用离线模式（去掉 --live）。"
+                    "OPENAI_API_KEY is missing. Set it in .env, or run offline "
+                    "(drop --live)."
                 )
             client = OpenAI()
         self.client = client
 
     @staticmethod
     def _flatten_tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
-        """把 Chat 形状的工具定义摊平成 Responses 形状。"""
+        """Flatten Chat-shaped tool definitions into the Responses shape."""
         flat = []
         for t in tools:
             fn = t.get("function", t)
@@ -216,7 +230,7 @@ class ResponsesModel:
         }
         if self.reasoning_effort:
             kwargs["reasoning"] = {"effort": self.reasoning_effort}
-        if self.cache_key:  # 相同前缀路由到同一台机器，提高缓存命中率
+        if self.cache_key:  # route same-prefix requests together for better hits
             kwargs["prompt_cache_key"] = self.cache_key
 
         resp = self.client.responses.create(**kwargs)
@@ -225,7 +239,7 @@ class ResponsesModel:
         calls: list[ToolCall] = []
         for item in resp.output:
             data = item.model_dump(exclude_none=True) if hasattr(item, "model_dump") else dict(item)
-            items.append(data)  # reasoning 项也要原样带回去 —— 这就是收益来源
+            items.append(data)  # reasoning items go back verbatim — that is the win
             if data.get("type") == "function_call":
                 calls.append(
                     ToolCall(
@@ -260,19 +274,20 @@ class ResponsesModel:
 
 
 # --------------------------------------------------------------------------
-# 脚本模型（离线演示 / 评测）
+# Scripted model (offline demos / evals)
 # --------------------------------------------------------------------------
 
 
 def assistant_says(text: str, cost: float = 0.001) -> Reply:
-    """构造一条「直接回答、不调工具」的模型输出。"""
+    """Build a reply that answers directly and calls no tools."""
     return Reply(items=[{"role": "assistant", "content": text}], text=text, cost=cost)
 
 
 def assistant_calls(calls: list[tuple[str, Any]], cost: float = 0.001) -> Reply:
-    """构造一条「请求调用工具」的模型输出。
+    """Build a reply that requests tool calls.
 
-    calls: [(工具名, 参数)]，参数可以是 dict，也可以直接给字符串（用来模拟坏 JSON）。
+    calls: [(tool name, arguments)]. Arguments may be a dict, or a raw string when
+    you want to simulate malformed JSON.
     """
     tool_calls = []
     for i, (name, args) in enumerate(calls):
@@ -294,13 +309,14 @@ def assistant_calls(calls: list[tuple[str, Any]], cost: float = 0.001) -> Reply:
 
 
 class ScriptedModel:
-    """按剧本逐条返回，剧本用完后无限返回收尾答案。"""
+    """Return scripted replies one by one; once the script runs out, keep returning
+    a closing answer."""
 
-    def __init__(self, script: list[Reply], fallback: str = "（剧本已结束）"):
+    def __init__(self, script: list[Reply], fallback: str = "(script exhausted)"):
         self.script = list(script)
         self.fallback = fallback
-        self.calls: list[list[dict[str, Any]]] = []  # 记录每次收到的 messages，便于断言
-        self.tool_specs: list[list[dict[str, Any]]] = []  # 每次收到的工具清单
+        self.calls: list[list[dict[str, Any]]] = []  # messages seen per call, for assertions
+        self.tool_specs: list[list[dict[str, Any]]] = []  # tool list seen per call
 
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]

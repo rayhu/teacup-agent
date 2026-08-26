@@ -1,14 +1,14 @@
-"""mini_agent —— 一个最小但五脏俱全的 AI Agent。
+"""mini_agent — a minimal AI agent that has all the organs.
 
     Agent = Model + State + Tools + Control Loop + Memory/Evals
 
-对应关系：
-    Model        -> model.py   （可换：真实 OpenAI / 离线脚本模型）
-    State        -> state.py   （目标、消息、步数、预算、状态机）
-    Tools        -> tools.py   （函数 + JSON Schema + 安全执行）
-    Control Loop -> loop.py    （LLM → tool call → tool result → LLM）
-    Memory       -> memory.py  （短期 = messages；长期 = memory.json）
-    Evals        -> evals.py   （用脚本模型跑离线断言，无需 API key）
+Where each part lives:
+    Model        -> model.py   (swappable: real OpenAI / offline scripted model)
+    State        -> state.py   (goal, messages, steps, budget, status machine)
+    Tools        -> tools.py   (function + JSON Schema + safe execution)
+    Control Loop -> loop.py    (LLM -> tool call -> tool result -> LLM)
+    Memory       -> memory.py  (short term = messages; long term = memory.json)
+    Evals        -> evals.py   (offline assertions with a scripted model, no API key)
 """
 
 from mini_agent.loop import run
