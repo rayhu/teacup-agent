@@ -310,17 +310,37 @@ def assistant_calls(calls: list[tuple[str, Any]], cost: float = 0.001) -> Reply:
 
 class ScriptedModel:
     """Return scripted replies one by one; once the script runs out, keep returning
-    a closing answer."""
+    a closing answer.
 
-    def __init__(self, script: list[Reply], fallback: str = "(script exhausted)"):
+    It also answers the framework's own side calls — planning and compaction — so a
+    script only has to cover the turns of the actual conversation. Those side calls
+    are not recorded in `calls`, which keeps assertions about "what the model saw on
+    turn N" honest.
+    """
+
+    def __init__(
+        self,
+        script: list[Reply],
+        fallback: str = "(script exhausted)",
+        plan_items: list[str] | None = None,
+    ):
         self.script = list(script)
         self.fallback = fallback
+        self.plan_items = plan_items or ["research the topic", "email the result"]
+        self.summaries = 0
         self.calls: list[list[dict[str, Any]]] = []  # messages seen per call, for assertions
         self.tool_specs: list[list[dict[str, Any]]] = []  # tool list seen per call
 
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> Reply:
+        first = str(messages[0].get("content", "")) if messages else ""
+        if first.startswith("You are compacting"):
+            self.summaries += 1
+            return assistant_says("[summary] Facts A and B verified; attempt C failed.")
+        if first.startswith("Break the user's request"):
+            return assistant_says(json.dumps(self.plan_items, ensure_ascii=False))
+
         self.calls.append(list(messages))
         self.tool_specs.append(list(tools))
         if self.script:

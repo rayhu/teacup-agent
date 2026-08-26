@@ -23,23 +23,49 @@ DEFAULT_GOAL = "Look up NVIDIA's GPU strategy, and compute 1200 * 0.85 / 3"
 
 
 def _offline_model() -> model_mod.ScriptedModel:
-    """Offline demo script: one turn with two parallel tool calls, then the answer."""
+    """Offline demo script: one turn with two parallel tool calls, then the answer.
+
+    The last two entries only come into play with --plan on, where the checklist
+    push-back asks it to account for the items; with planning off they are never
+    reached.
+    """
+    answer = (
+        "NVIDIA's strategy binds three layers together: full-rack data-center "
+        "systems, the CUDA software moat, and its own networking. Also, "
+        "1200 * 0.85 / 3 = 340.0. (This answer comes from the offline "
+        "scripted model.)"
+    )
     return model_mod.ScriptedModel(
-        [
+        plan_items=[
+            "look up NVIDIA's GPU strategy",
+            "compute 1200 * 0.85 / 3",
+        ],
+        script=[
             model_mod.assistant_calls(
                 [
                     ("search_web", {"query": "nvidia gpu strategy"}),
                     ("calculate", {"expression": "1200 * 0.85 / 3"}),
                 ]
             ),
-            model_mod.assistant_says(
-                "NVIDIA's strategy binds three layers together: full-rack data-center "
-                "systems, the CUDA software moat, and its own networking. Also, "
-                "1200 * 0.85 / 3 = 340.0. (This answer comes from the offline "
-                "scripted model.)"
+            model_mod.assistant_says(answer),
+            model_mod.assistant_calls(
+                [
+                    ("update_todo", {"index": 1, "status": "done"}),
+                    ("update_todo", {"index": 2, "status": "done"}),
+                ]
             ),
-        ]
+            model_mod.assistant_says(answer),
+        ],
     )
+
+
+def _resolve_plan(mode: str, live: bool) -> bool:
+    """Whether to build the upfront checklist.
+
+    `auto` follows the run mode rather than being on everywhere: planning costs a
+    model call, and the offline scripted demo has nothing to plan.
+    """
+    return {"on": True, "off": False}.get(mode, live)
 
 
 def _make_approver(policy: str, quiet: bool):
@@ -199,11 +225,13 @@ def main(argv: list[str] | None = None) -> int:
         help="continue from a runs/<timestamp>/state.json (or the directory holding it)",
     )
     p.add_argument(
-        "--no-plan",
-        action="store_true",
-        help="skip the upfront checklist. By default the goal is decomposed into "
-        "action items (one extra model call) so a multi-part request cannot be "
-        "half-finished silently",
+        "--plan",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="upfront checklist: decompose the goal into action items (one extra "
+        "model call) so a multi-part request cannot be half-finished silently. "
+        "auto (default) = on for --live, off for the offline demo, which has "
+        "nothing to plan",
     )
     p.add_argument("-q", "--quiet", action="store_true", help="print only the final answer")
     args = p.parse_args(argv)
@@ -258,7 +286,7 @@ def main(argv: list[str] | None = None) -> int:
         resume=resumed,
         approve=_make_approver(args.approve, args.quiet),
         max_tool_calls_per_step=args.max_tool_calls,
-        plan=not args.no_plan and args.live,  # the scripted demo has nothing to plan
+        plan=_resolve_plan(args.plan, args.live),
         on_event=_printer(args.quiet),
     )
 

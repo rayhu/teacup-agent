@@ -78,3 +78,21 @@ def test_cli_auto_policy_denies_without_a_terminal(monkeypatch):
 def test_cli_allow_policy_is_explicit_yolo():
     approve = _make_approver("allow", quiet=True)
     assert approve(type("C", (), {"name": "send_email", "arguments": "{}"})(), tools.REGISTRY["send_email"]) is True
+
+
+# --- the --plan flag ----------------------------------------------------------
+
+
+def test_plan_auto_follows_the_run_mode():
+    """auto is honest about what it does: on for live, off for the offline demo."""
+    from mini_agent.cli import _resolve_plan
+
+    assert _resolve_plan("auto", live=True) is True
+    assert _resolve_plan("auto", live=False) is False
+
+
+def test_plan_on_and_off_are_absolute():
+    from mini_agent.cli import _resolve_plan
+
+    assert _resolve_plan("on", live=False) is True  # plan even the offline demo
+    assert _resolve_plan("off", live=True) is False

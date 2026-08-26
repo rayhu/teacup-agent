@@ -122,8 +122,7 @@ first half. A real run did exactly that: excellent research, no email, `status: 
 and it stopped at turn 6 of 14 with 97% of the budget unspent. It was never a resource
 problem — **nothing was keeping track of the second half of the request**.
 
-So the goal is decomposed once at the start (one extra model call, `--no-plan` to skip
-it) into 1-5 action items, and from then on:
+So the goal is decomposed once at the start (one extra model call, `--plan off` to skip it) into 1-5 action items, and from then on:
 
 ```
 [checklist] 1. research the Model Context Protocol | 2. write a summary | 3. email it to a@b.c

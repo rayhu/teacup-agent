@@ -533,7 +533,8 @@ model's head cannot be recovered once it drifts out of attention.
   attempt either way. Once, never a loop (an eval case pins that down).
 - The forced wrap-up turn (C) also names unfinished items, so a run that ran out of
   resources admits what it never did.
-- CLI: on by default for `--live`, `--no-plan` to skip. `snapshot()` reports
+- CLI: `--plan {auto,on,off}`, where auto means on for `--live` and off for the
+  offline demo (which has nothing to plan). `snapshot()` reports
   `todo_done`.
 
 **A bug this caught immediately**: `persist.load()` rebuilt `trace` into dataclasses but

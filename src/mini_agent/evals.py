@@ -21,26 +21,9 @@ from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
 from mini_agent.state import AgentState
 
 
-class ScriptedWithSummarizer(ScriptedModel):
-    """Scripted model that also answers the framework's own side calls.
-
-    Compaction and planning each make an extra model call, and the script should not
-    have to reserve a slot for either.
-    """
-
-    def __init__(self, script, fallback: str = "(script exhausted)", plan_items=None):
-        super().__init__(script, fallback)
-        self.summaries = 0
-        self.plan_items = plan_items or ["research the topic", "email the result"]
-
-    def complete(self, messages, tools):
-        first = str(messages[0].get("content", "")) if messages else ""
-        if first.startswith("You are compacting"):
-            self.summaries += 1
-            return assistant_says("[summary] Facts A and B verified; attempt C failed.")
-        if first.startswith("Break the user's request"):
-            return assistant_says(json.dumps(self.plan_items))
-        return super().complete(messages, tools)
+# ScriptedModel already answers the framework's side calls (planning, compaction),
+# so this name is kept only because tests and examples refer to it.
+ScriptedWithSummarizer = ScriptedModel
 
 
 @dataclass
