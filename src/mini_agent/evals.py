@@ -129,6 +129,32 @@ CASES: list[Case] = [
             and s.status == "done"
         ),
     ),
+    Case(
+        name="绝不空手而归：步数用光后必须强制收尾给出结论",
+        # 前两轮一直调工具把步数耗光，收尾轮没有工具可用，只能给结论
+        script=[
+            assistant_calls([("calculate", {"expression": "1+1"})]),
+            assistant_calls([("calculate", {"expression": "1+1"})]),
+            assistant_says("目前能给出的结论：1+1=2（高置信）；其余项未能核实。"),
+        ],
+        max_steps=2,
+        check=lambda s: (
+            s.status == "max_steps"
+            and s.salvaged  # 走了强制收尾轮
+            and s.answer
+            and not s.answer.startswith("（未得出最终答案")
+        ),
+    ),
+    Case(
+        name="预算烧光同样要收尾，而不是丢下一句「停止原因」",
+        script=[
+            assistant_calls([("calculate", {"expression": "1+1"})], cost=0.02),
+            assistant_calls([("calculate", {"expression": "1+1"})], cost=0.02),
+            assistant_says("预算耗尽前的结论：1+1=2。"),
+        ],
+        budget=0.03,
+        check=lambda s: s.status == "out_of_budget" and s.salvaged and s.answer,
+    ),
 ]
 
 

@@ -1,5 +1,7 @@
 import json
 
+import pytest
+
 from mini_agent import tools
 
 
@@ -70,3 +72,55 @@ def test_web_search_formats_results_with_links(monkeypatch):
     )
     out = tools.execute("search_web", '{"query": "x", "max_results": 99}')
     assert "https://example.com" in out and "n=10" in out  # 条数被夹到上限 10
+
+
+# --- 检索失败：退避重试，且不能伪装成「查无此事」 ---------------------------
+
+
+class _FlakyDDGS:
+    """前 fail_times 次抛异常，之后返回正常结果。"""
+
+    calls = 0
+
+    def __init__(self, fail_times=0, results=None):
+        type(self).fail_times = fail_times
+        type(self).results = results or [{"title": "T", "href": "https://e.com", "body": "B"}]
+
+    def text(self, query, max_results=5):
+        type(self).calls += 1
+        if type(self).calls <= type(self).fail_times:
+            raise RuntimeError("Ratelimit")
+        return type(self).results
+
+
+@pytest.fixture
+def fake_ddgs(monkeypatch):
+    import ddgs
+
+    _FlakyDDGS.calls = 0
+    monkeypatch.setattr(tools.time, "sleep", lambda *_: None)  # 测试不真的等
+    monkeypatch.setattr(tools, "_last_search_at", 0.0)
+
+    def install(fail_times=0):
+        monkeypatch.setattr(ddgs, "DDGS", lambda: _FlakyDDGS(fail_times))
+        return _FlakyDDGS
+
+    return install
+
+
+def test_search_retries_then_succeeds(monkeypatch, fake_ddgs):
+    monkeypatch.setenv("MINI_AGENT_SEARCH", "web")
+    flaky = fake_ddgs(fail_times=2)
+    out = tools.execute("search_web", '{"query": "anything"}')
+    assert "https://e.com" in out
+    assert flaky.calls == 3  # 失败两次后第三次成功
+
+
+def test_search_failure_is_not_disguised_as_no_results(monkeypatch, fake_ddgs):
+    """本地语料没有的题目，检索挂了必须报 ERROR，不能说「没有找到」。"""
+    monkeypatch.setenv("MINI_AGENT_SEARCH", "auto")
+    flaky = fake_ddgs(fail_times=99)
+    out = tools.execute("search_web", '{"query": "Anthropic 最近半年融资"}')
+    assert out.startswith("ERROR:") and "不代表" in out
+    assert "没有找到" not in out
+    assert flaky.calls == tools._RETRIES  # 重试次数用满

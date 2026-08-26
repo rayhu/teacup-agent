@@ -263,11 +263,13 @@ class ScriptedModel:
         self.script = list(script)
         self.fallback = fallback
         self.calls: list[list[dict[str, Any]]] = []  # 记录每次收到的 messages，便于断言
+        self.tool_specs: list[list[dict[str, Any]]] = []  # 每次收到的工具清单
 
     def complete(
         self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
     ) -> Reply:
         self.calls.append(list(messages))
+        self.tool_specs.append(list(tools))
         if self.script:
             return self.script.pop(0)
         return assistant_says(self.fallback)

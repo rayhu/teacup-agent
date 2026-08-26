@@ -33,6 +33,7 @@ class AgentState:
     remaining_budget: float = 0.05  # 单位：美元，每轮按 token 用量扣减
     status: Status = "idle"
     answer: str = ""
+    salvaged: bool = False  # True = 资源耗尽后靠强制收尾轮抢回来的答案
     trace: list[ToolTrace] = field(default_factory=list)
 
     # ---- 循环的守卫条件 -------------------------------------------------
@@ -57,6 +58,7 @@ class AgentState:
             "max_steps": self.max_steps,
             "remaining_budget": self.remaining_budget,
             "status": self.status,
+            "salvaged": self.salvaged,
             "messages": len(self.messages),
             "tool_calls": sum(t.executed for t in self.trace),
             "throttled": sum(not t.executed for t in self.trace),

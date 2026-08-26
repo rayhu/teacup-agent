@@ -13,6 +13,7 @@ import operator
 import os
 import pathlib
 import re
+import time
 from dataclasses import dataclass
 from typing import Any, Callable
 
@@ -118,11 +119,42 @@ def _search_corpus(query: str) -> str:
     return "\n\n".join(hits[:3])
 
 
+# 检索后端的限流保护。实测：连续快速发 4-5 个查询就会被 DuckDuckGo 掐断，
+# 而 agent 恰好最爱一轮甩好几个查询。这里做两件事：请求间隔 + 失败退避重试。
+_MIN_INTERVAL = 1.5  # 秒，两次真实检索之间的最小间隔
+_RETRIES = 3
+_last_search_at = 0.0
+
+
+def _throttle() -> None:
+    global _last_search_at
+    wait = _MIN_INTERVAL - (time.monotonic() - _last_search_at)
+    if wait > 0:
+        time.sleep(wait)
+    _last_search_at = time.monotonic()
+
+
 def _search_web_backend(query: str, max_results: int) -> str:
-    """真实检索后端：DuckDuckGo，不需要 API key。"""
+    """真实检索后端：DuckDuckGo，不需要 API key。
+
+    失败会退避重试（1s / 2s / 4s）。检索失败和「查无此事」是**完全不同**的两件事，
+    绝不能让前者伪装成后者 —— 那会让模型得出「世界上没有这件事」的结论。
+    """
     from ddgs import DDGS  # 延迟导入，离线路径不依赖它
 
-    results = DDGS().text(query, max_results=max_results)
+    last_error: Exception | None = None
+    for attempt in range(_RETRIES):
+        try:
+            _throttle()
+            results = DDGS().text(query, max_results=max_results)
+            break
+        except Exception as e:  # 多半是限流，退避后再试
+            last_error = e
+            if attempt < _RETRIES - 1:
+                time.sleep(2**attempt)
+    else:
+        raise RuntimeError(f"检索重试 {_RETRIES} 次仍失败：{last_error}") from last_error
+
     if not results:
         return f"没有搜到与 {query!r} 相关的网页结果。"
     lines = []
@@ -173,12 +205,16 @@ def search_web(query: str, max_results: int = 5) -> str:
             return "ERROR: 未安装 ddgs，无法联网检索。请执行 uv sync，或设 MINI_AGENT_SEARCH=offline。"
         return f"[联网检索不可用（未装 ddgs），以下为离线语料结果]\n{_search_corpus(query)}"
     except Exception as e:
-        if mode == "web":
+        fallback = _search_corpus(query)
+        # 只有本地语料**真的命中**时才降级；否则必须明确报错，
+        # 不能把「检索坏了」伪装成「没有找到」——模型会把后者当成「不存在」。
+        if mode == "web" or fallback.startswith("没有找到"):
             return (
                 f"ERROR: 检索失败（{type(e).__name__}: {e}）。"
-                "这不代表该信息不存在，可换关键词或稍后重试。"
+                "这**不代表**该信息不存在，只说明检索通道暂时不可用；"
+                "可稍后重试、换关键词，或基于已有结果作答并标注该项未能核实。"
             )
-        return f"[联网检索失败：{type(e).__name__}，以下为离线语料结果]\n{_search_corpus(query)}"
+        return f"[联网检索失败：{type(e).__name__}，以下为离线语料结果]\n{fallback}"
 
 
 # 安全的算术求值：只允许字面量和四则运算，不用 eval()。

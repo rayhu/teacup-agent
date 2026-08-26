@@ -50,6 +50,8 @@ def _printer(quiet: bool):
                 f"  [step {data['step']}] ⚠ 模型一次要了 {data['requested']} 个工具调用，"
                 f"只执行前 {data['cap']} 个，其余退回下一轮"
             )
+        elif event == "salvaged":
+            print("  ♻ 资源耗尽，已强制收尾：下面的答案基于已获得的信息，未再检索")
         elif event == "stopped":
             print(f"  ⏹ 停止：{data['reason']}")
         elif event == "error":
