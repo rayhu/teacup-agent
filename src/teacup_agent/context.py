@@ -25,7 +25,7 @@ import pathlib
 import re
 from typing import Any
 
-from mini_agent.model import Model
+from teacup_agent.model import Model
 
 # --- token estimation --------------------------------------------------------
 

@@ -2,7 +2,7 @@
 
 import pytest
 
-from mini_agent.evals import CASES, run_case
+from teacup_agent.evals import CASES, run_case
 
 
 @pytest.mark.parametrize("case", CASES, ids=[c.name for c in CASES])

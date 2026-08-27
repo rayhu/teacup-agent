@@ -5,9 +5,9 @@ was (so it dismissed real news as "suspicious") nor how much budget it had left 
 it handed a to-do list back to a terminal nobody was reading).
 """
 
-from mini_agent import loop
-from mini_agent.memory import NullMemory
-from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent import loop
+from teacup_agent.memory import NullMemory
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
 
 
 def _run(script, **kw):

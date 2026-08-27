@@ -29,7 +29,7 @@ import re
 from dataclasses import dataclass
 from typing import Any
 
-from mini_agent import tools as tools_mod
+from teacup_agent import tools as tools_mod
 
 NAME = "load_skill"
 DEFAULT_DIR = "skills"

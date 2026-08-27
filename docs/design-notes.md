@@ -11,7 +11,7 @@ Start with [the README](../README.md) if you want to know what the project is. S
 ## The three search_web modes
 
 Web search goes through [`ddgs`](https://pypi.org/project/ddgs/) (DuckDuckGo) and
-needs **no API key**; `uv sync` installs it. Switch with the `MINI_AGENT_SEARCH`
+needs **no API key**; `uv sync` installs it. Switch with the `TEACUP_AGENT_SEARCH`
 environment variable:
 
 | Value | Behaviour | Use for |
@@ -25,8 +25,8 @@ environment variable:
 offline demo.
 
 ```bash
-uv run mini-agent --live "research OpenAI's funding and competition"  # really goes online
-MINI_AGENT_SEARCH=offline uv run mini-agent                           # force offline
+uv run teacup-agent --live "research OpenAI's funding and competition"    # really goes online
+TEACUP_AGENT_SEARCH=offline uv run teacup-agent                           # force offline
 ```
 
 **A design rule: returning "nothing found" always beats returning the wrong thing.**
@@ -50,8 +50,8 @@ tool is broken" as "this does not exist in the world".
 | Reasoning state | **preserved across tool calls** | discarded every turn |
 
 All four differences are sealed inside the two classes in
-[`model.py`](../src/mini_agent/model.py); the control flow in
-[`loop.py`](../src/mini_agent/loop.py) did not move. The loop only needed two
+[`model.py`](../src/teacup_agent/model.py); the control flow in
+[`loop.py`](../src/teacup_agent/loop.py) did not move. The loop only needed two
 generalizations: `state.messages.extend(reply.items)` (a turn can produce several
 entries) and letting the backend's `tool_result_item()` decide the result shape.
 
@@ -77,7 +77,7 @@ convention every other MCP host uses, so it loads automatically from then on.
 ```bash
 cp mcp.example.json mcp.json     # 1. start from the template
 $EDITOR mcp.json                 # 2. keep the servers you want
-uv run mini-agent --live "read <url> and summarise it"   # 3. that is all
+uv run teacup-agent --live "read <url> and summarise it"   # 3. that is all
 ```
 
 ```
@@ -239,8 +239,8 @@ did not read the denial.
 | Verdict | every case must pass | relative scores, for comparing two versions |
 
 ```bash
-uv run python -m mini_agent.trajectory runs/20260826-xxxx           # mechanical, free
-uv run python -m mini_agent.trajectory runs/* --judge --out r.json  # add the LLM judge
+uv run python -m teacup_agent.trajectory runs/20260826-xxxx           # mechanical, free
+uv run python -m teacup_agent.trajectory runs/* --judge --out r.json  # add the LLM judge
 ```
 
 **Mechanical metrics** (deterministic; read these first): steps, tool calls, failures,
@@ -281,8 +281,8 @@ deliberate** — save only at the end and the crash that most needed the data is
 one that leaves nothing.
 
 ```bash
-uv run mini-agent --max-steps 1 --run-dir runs/demo "..."   # hits the ceiling and stops
-uv run mini-agent --resume runs/demo --max-steps 3          # continues from turn 2
+uv run teacup-agent --max-steps 1 --run-dir runs/demo "..."   # hits the ceiling and stops
+uv run teacup-agent --resume runs/demo --max-steps 3          # continues from turn 2
 ```
 
 On resume, the command-line ceilings mean "**give it this much more**" (steps and
@@ -426,7 +426,7 @@ written into the system prompt; otherwise the context prefix changes every turn 
 prompt caching is void.
 
 ```bash
-uv run mini-agent --live --max-tool-calls 2 "research OpenAI's funding and competition"
+uv run teacup-agent --live --max-tool-calls 2 "research OpenAI's funding and competition"
 ```
 
 ---
@@ -439,7 +439,7 @@ of its own and hands back three sentences, and the parent never pays for the pag
 because it never sees them.
 
 ```bash
-uv run mini-agent --live --subagents "research X across several sources and summarise"
+uv run teacup-agent --live --subagents "research X across several sources and summarise"
 ```
 
 ```
@@ -522,7 +522,7 @@ skills/
 ```
 
 ```bash
-uv run mini-agent --live "research X across several sources"
+uv run teacup-agent --live "research X across several sources"
 ```
 
 ```

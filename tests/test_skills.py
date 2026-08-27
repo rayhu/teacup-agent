@@ -6,10 +6,10 @@ about the boundary rather than about the file format.
 
 import pytest
 
-from mini_agent import loop, skills, tools
-from mini_agent.context import estimate_tokens
-from mini_agent.memory import NullMemory
-from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent import loop, skills, tools
+from teacup_agent.context import estimate_tokens
+from teacup_agent.memory import NullMemory
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
 
 SKILL = """---
 name: demo-skill

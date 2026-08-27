@@ -19,7 +19,7 @@ import json
 import re
 from typing import Any
 
-from mini_agent.state import TodoItem
+from teacup_agent.state import TodoItem
 
 PLANNER = """Break the user's request into the concrete actions it asks for.
 

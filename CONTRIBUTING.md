@@ -7,9 +7,9 @@ of where the seams are, so you can cut along them instead of across them.
 
 ```bash
 uv sync
-uv run pytest                        # unit + protocol tests
-uv run python -m mini_agent.evals    # loop health, scripted model, free
-uv run mini-agent                    # offline demo, no API key, instant
+uv run pytest                          # unit + protocol tests
+uv run python -m teacup_agent.evals    # loop health, scripted model, free
+uv run teacup-agent                    # offline demo, no API key, instant
 ```
 
 All three must be green before and after your change. The evals in particular are the
@@ -62,7 +62,7 @@ cutting parent context by a third while raising total cost 35%, a skill catalog 
 unused until its wording became an instruction), and the habit is the reason those
 decisions can be revisited later by someone who was not there.
 
-`uv run python -m mini_agent.trajectory runs/<timestamp>` scores a real run without an
+`uv run python -m teacup_agent.trajectory runs/<timestamp>` scores a real run without an
 LLM; add `--judge` for the qualitative half.
 
 ## Working with a coding agent on this repo

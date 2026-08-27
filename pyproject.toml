@@ -1,5 +1,5 @@
 [project]
-name = "mini-agent"
+name = "teacup-agent"
 version = "0.1.0"
 description = "A minimal but complete AI agent, easy to fork, improve and share: Model + State + Tools + Control Loop + Memory/Evals"
 readme = "README.md"
@@ -22,12 +22,12 @@ dependencies = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/rayhu/mini-agent"
-Repository = "https://github.com/rayhu/mini-agent"
-Roadmap = "https://github.com/rayhu/mini-agent/blob/main/docs/roadmap.md"
+Homepage = "https://github.com/rayhu/teacup-agent"
+Repository = "https://github.com/rayhu/teacup-agent"
+Roadmap = "https://github.com/rayhu/teacup-agent/blob/main/docs/roadmap.md"
 
 [project.scripts]
-mini-agent = "mini_agent.cli:main"
+teacup-agent = "teacup_agent.cli:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]
@@ -37,7 +37,7 @@ requires = ["hatchling"]
 build-backend = "hatchling.build"
 
 [tool.hatch.build.targets.wheel]
-packages = ["src/mini_agent"]
+packages = ["src/teacup_agent"]
 
 [tool.pytest.ini_options]
 testpaths = ["tests"]

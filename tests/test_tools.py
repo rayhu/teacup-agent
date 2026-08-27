@@ -2,7 +2,7 @@ import json
 
 import pytest
 
-from mini_agent import tools
+from teacup_agent import tools
 
 
 def test_specs_are_openai_shaped():
@@ -39,19 +39,19 @@ def test_read_file_cannot_escape_project_dir():
 def test_offline_search_does_not_false_positive(monkeypatch):
     """Regression test: "OpenAI strategy" once matched the NVIDIA corpus entry
     because matching used any()."""
-    monkeypatch.setenv("MINI_AGENT_SEARCH", "offline")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "offline")
     out = tools.execute("search_web", '{"query": "OpenAI strategy 2026 roadmap"}')
     assert "NVIDIA" not in out
     assert "No results" in out
 
 
 def test_offline_search_still_matches_full_key(monkeypatch):
-    monkeypatch.setenv("MINI_AGENT_SEARCH", "offline")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "offline")
     assert "NVIDIA" in tools.execute("search_web", '{"query": "what is the nvidia gpu strategy"}')
 
 
 def test_auto_mode_falls_back_to_corpus_when_network_fails(monkeypatch):
-    monkeypatch.setenv("MINI_AGENT_SEARCH", "auto")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "auto")
     monkeypatch.setattr(tools, "_search_web_backend", lambda q, n: (_ for _ in ()).throw(OSError("no net")))
     out = tools.execute("search_web", '{"query": "cuda"}')
     assert out.startswith("[web search failed") and "CUDA" in out
@@ -60,13 +60,13 @@ def test_auto_mode_falls_back_to_corpus_when_network_fails(monkeypatch):
 def test_web_mode_reports_error_instead_of_pretending(monkeypatch):
     """In strict mode a failed search must be an ERROR, never something the model
     can read as "I looked and it does not exist"."""
-    monkeypatch.setenv("MINI_AGENT_SEARCH", "web")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "web")
     monkeypatch.setattr(tools, "_search_web_backend", lambda q, n: (_ for _ in ()).throw(OSError("no net")))
     assert tools.execute("search_web", '{"query": "cuda"}').startswith("ERROR:")
 
 
 def test_web_search_formats_results_with_links(monkeypatch):
-    monkeypatch.setenv("MINI_AGENT_SEARCH", "web")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "web")
     monkeypatch.setattr(
         tools,
         "DDGS" if hasattr(tools, "DDGS") else "_search_web_backend",
@@ -111,7 +111,7 @@ def fake_ddgs(monkeypatch):
 
 
 def test_search_retries_then_succeeds(monkeypatch, fake_ddgs):
-    monkeypatch.setenv("MINI_AGENT_SEARCH", "web")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "web")
     flaky = fake_ddgs(fail_times=2)
     out = tools.execute("search_web", '{"query": "anything"}')
     assert "https://e.com" in out
@@ -121,7 +121,7 @@ def test_search_retries_then_succeeds(monkeypatch, fake_ddgs):
 def test_search_failure_is_not_disguised_as_no_results(monkeypatch, fake_ddgs):
     """For a question the corpus knows nothing about, a broken search must report
     ERROR rather than "no results"."""
-    monkeypatch.setenv("MINI_AGENT_SEARCH", "auto")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "auto")
     flaky = fake_ddgs(fail_times=99)
     out = tools.execute("search_web", '{"query": "Anthropic funding last six months"}')
     assert out.startswith("ERROR:") and "does **not** mean" in out

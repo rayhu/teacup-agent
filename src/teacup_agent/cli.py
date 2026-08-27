@@ -1,4 +1,4 @@
-"""Command-line entry point: uv run mini-agent "your goal"
+"""Command-line entry point: uv run teacup-agent "your goal"
 
 Offline by default (scripted model: no cost, no API key). Add --live for real
 OpenAI calls.
@@ -16,9 +16,9 @@ from typing import Any
 
 from dotenv import load_dotenv
 
-from mini_agent import loop, model as model_mod, persist
-from mini_agent import tools as tools_mod
-from mini_agent.memory import Memory
+from teacup_agent import loop, model as model_mod, persist
+from teacup_agent import tools as tools_mod
+from teacup_agent.memory import Memory
 
 DEFAULT_GOAL = "Look up NVIDIA's GPU strategy, and compute 1200 * 0.85 / 3"
 
@@ -311,7 +311,7 @@ def main(argv: list[str] | None = None) -> int:
 
     # Search mode is decoupled from model mode: the offline demo also searches
     # offline, so it stays network-free and instant.
-    os.environ["MINI_AGENT_SEARCH"] = args.search or ("auto" if args.live else "offline")
+    os.environ["TEACUP_AGENT_SEARCH"] = args.search or ("auto" if args.live else "offline")
 
     resumed = persist.load(args.resume) if args.resume else None
     if resumed is not None:
@@ -344,12 +344,12 @@ def main(argv: list[str] | None = None) -> int:
         )
     if not args.quiet:
         mode = f"live:{args.model}/{args.api}" if args.live else "offline:scripted"
-        print(f"mode {mode} | search {os.environ['MINI_AGENT_SEARCH']} | goal: {args.goal}\n")
+        print(f"mode {mode} | search {os.environ['TEACUP_AGENT_SEARCH']} | goal: {args.goal}\n")
 
     hub = None
     mcp_config = _resolve_mcp(args.mcp)
     if mcp_config:
-        from mini_agent.mcp_tools import McpHub, load_config
+        from teacup_agent.mcp_tools import McpHub, load_config
 
         if not args.quiet and not args.mcp:
             print(f"  [mcp] using {mcp_config} (pass --mcp off to skip it)")

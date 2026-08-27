@@ -8,11 +8,11 @@ track of the second half of the request.
 
 import json
 
-from mini_agent import loop, plan, tools
-from mini_agent.evals import ScriptedWithSummarizer
-from mini_agent.memory import NullMemory
-from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
-from mini_agent.state import TodoItem
+from teacup_agent import loop, plan, tools
+from teacup_agent.evals import ScriptedWithSummarizer
+from teacup_agent.memory import NullMemory
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent.state import TodoItem
 
 
 class _Planner(ScriptedModel):

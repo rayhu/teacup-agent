@@ -6,9 +6,9 @@ is **what we feed it, and whether a parse failure is ever dressed up as a score*
 
 import json
 
-from mini_agent import trajectory as tj
-from mini_agent.model import Reply, ScriptedModel, assistant_says
-from mini_agent.state import AgentState, ToolTrace
+from teacup_agent import trajectory as tj
+from teacup_agent.model import Reply, ScriptedModel, assistant_says
+from teacup_agent.state import AgentState, ToolTrace
 
 
 def _state(**kw):

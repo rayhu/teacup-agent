@@ -54,9 +54,9 @@ prompts, CLI output and docs are English.
 ## Verification standard
 
 ```bash
-uv run pytest                        # unit + protocol tests
-uv run python -m mini_agent.evals    # loop health, scripted model, free
-uv run mini-agent                    # offline demo, no key, must stay instant
+uv run pytest                          # unit + protocol tests
+uv run python -m teacup_agent.evals    # loop health, scripted model, free
+uv run teacup-agent                    # offline demo, no key, must stay instant
 ```
 
 All three must pass before reporting a change as done. Then:
@@ -69,7 +69,7 @@ All three must pass before reporting a change as done. Then:
 - **Never let a broken tool read as "this does not exist."** A failed search must say it
   failed. That distinction has caused real wrong answers here.
 - Offline paths stay offline: evals and unit tests make no network calls and write
-  nothing into the repo (`run_dir=None`, `MINI_AGENT_SEARCH=offline`).
+  nothing into the repo (`run_dir=None`, `TEACUP_AGENT_SEARCH=offline`).
 
 ## Design rules this repo has settled on
 

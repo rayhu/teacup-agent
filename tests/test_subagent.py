@@ -7,10 +7,10 @@ child from spending or recursing without limit.
 
 import pytest
 
-from mini_agent import loop, subagent, tools
-from mini_agent.evals import tool_results_follow_their_call
-from mini_agent.memory import NullMemory
-from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent import loop, subagent, tools
+from teacup_agent.evals import tool_results_follow_their_call
+from teacup_agent.memory import NullMemory
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
 
 BIG = "PAGE TEXT " * 900  # ~9000 characters the parent must never see
 

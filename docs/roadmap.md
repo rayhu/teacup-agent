@@ -1,4 +1,4 @@
-# mini-agent roadmap
+# teacup-agent roadmap
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
@@ -9,7 +9,7 @@ Next up: #14 (threat model and allowlists) closes a hole that exists today; then
 #13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend).
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
-2026, and not one line of [`loop.py`](../src/mini_agent/loop.py) is "old technology".
+2026, and not one line of [`loop.py`](../src/teacup_agent/loop.py) is "old technology".
 What was missing is the whole layer around it.
 
 Subsystem-level rationale lives in [design-notes.md](design-notes.md); this file is
@@ -26,7 +26,7 @@ lines a little harder to see.
 
 ### 1. Move to the Responses API — DONE (2026-08-25)
 
-**Before**: `OpenAIModel` in [`model.py`](../src/mini_agent/model.py) used Chat
+**Before**: `OpenAIModel` in [`model.py`](../src/teacup_agent/model.py) used Chat
 Completions, throwing away the model's reasoning each turn and pushing only the final
 message back into `messages`.
 
@@ -125,7 +125,7 @@ showing 0% is normal, not a bug.
 ### 3. Retries, backoff, timeouts — DONE (2026-08-26)
 
 **Before**: any exception from a model call in
-[`loop.py`](../src/mini_agent/loop.py) set `status="error"` and ended the run. One 429
+[`loop.py`](../src/teacup_agent/loop.py) set `status="error"` and ended the run. One 429
 or network hiccup threw away everything.
 
 **How**: wrap the model call in exponential backoff (retry on 429/5xx/timeouts, not on
@@ -136,7 +136,7 @@ or network hiccup threw away everything.
 succeeds; the loop completes normally and `step` is unchanged.
 
 **Search side**: measured, DuckDuckGo rate-limits after 4-5 rapid queries — and an
-agent loves to fire several per turn. [`tools.py`](../src/mini_agent/tools.py) now has
+agent loves to fire several per turn. [`tools.py`](../src/teacup_agent/tools.py) now has
 a minimum interval plus backoff retries (1s/2s/4s), and **when retries are exhausted
 it reports `ERROR:` instead of silently degrading to the corpus's "nothing found"** —
 disguising "the search broke" as "there is nothing" makes the model conclude the fact
@@ -169,7 +169,7 @@ window, and everything got more expensive and less focused as it grew.
 context; `state.snapshot()` shows the token count dropping across a compaction; no key
 conclusion is lost in the process (which trajectory eval has to verify, see #7).
 
-**What shipped**: a new [`context.py`](../src/mini_agent/context.py).
+**What shipped**: a new [`context.py`](../src/teacup_agent/context.py).
 
 - Externalization: tool results over 2000 characters go into `runs/<timestamp>/`, and
   the context keeps 600 characters, the path, and "read it back with read_file". A real
@@ -193,7 +193,7 @@ scratch every time; hierarchical summaries (summaries of summaries) are not done
 ### 5. Parallel tool execution — DONE (2026-08-26)
 
 **Before**: the model fired three searches in one turn and
-[`loop.py`](../src/mini_agent/loop.py) ran them one at a time. With real web search
+[`loop.py`](../src/teacup_agent/loop.py) ran them one at a time. With real web search
 that became the most obvious wall-clock waste.
 
 **How**: run tool execution through `asyncio.gather` (or a thread pool, since most
@@ -263,7 +263,7 @@ this allowlist").
 
 ### 7. Trajectory eval — DONE (2026-08-26)
 
-**Before**: the cases in [`evals.py`](../src/mini_agent/evals.py) pin down whether the
+**Before**: the cases in [`evals.py`](../src/teacup_agent/evals.py) pin down whether the
 loop protocol is correct — necessary, but the lowest tier, equivalent to unit tests.
 
 **What an agent eval looks like in 2026**: it scores the **whole trajectory**, not
@@ -283,7 +283,7 @@ path safety, scored with an LLM-as-judge rubric.
 **Definition of done**: change the system prompt and be able to say in numbers whether
 it got better or worse, instead of guessing.
 
-**What shipped**: a new [`trajectory.py`](../src/mini_agent/trajectory.py), taking the
+**What shipped**: a new [`trajectory.py`](../src/teacup_agent/trajectory.py), taking the
 `runs/*/state.json` files persisted by #8 as input. Two layers:
 
 - **Mechanical metrics** (free, deterministic): steps, tool calls / failures /
@@ -323,7 +323,7 @@ stopped.
 **Definition of done**: Ctrl-C halfway through, then resume from the checkpoint
 without redoing completed tool calls.
 
-**What shipped**: a new [`persist.py`](../src/mini_agent/persist.py). Every step writes
+**What shipped**: a new [`persist.py`](../src/teacup_agent/persist.py). Every step writes
 the whole `AgentState` to `runs/<timestamp>/state.json` (temp file plus rename, so no
 half-written files), and `--resume` continues from there. Resume **does not rebuild the
 system message** (rebuilding voids the prompt cache), and command-line ceilings stack
@@ -346,7 +346,7 @@ only surfaces once you actually implement resume.
 ### 9. MCP support — DONE (2026-08-26)
 
 **Now**: tools are hardcoded Python functions, and adding one means editing
-[`tools.py`](../src/mini_agent/tools.py).
+[`tools.py`](../src/teacup_agent/tools.py).
 
 **Why it is worth it**: MCP is the de facto standard for tool integration in 2026.
 Connect to it and off-the-shelf servers (filesystem, databases, GitHub, browsers) work
@@ -362,7 +362,7 @@ naturally, `loop.py` still does not change.
 **Definition of done**: connect to a local MCP server at startup, see its tools in
 `tools.specs()`, and have the model call them normally.
 
-**What shipped**: a new [`mcp_tools.py`](../src/mini_agent/mcp_tools.py) plus `--mcp <config>`,
+**What shipped**: a new [`mcp_tools.py`](../src/teacup_agent/mcp_tools.py) plus `--mcp <config>`,
 which defaults to `./mcp.json` when that file exists and to no MCP at all when it does not.
 Off by default because connecting starts third-party processes and inflates the context
 prefix of every request; auto-loaded once the file exists because at that point the file
@@ -418,7 +418,7 @@ This is also the most effective form of context compression.
 **Definition of done**: for a task that needs five sources, the main context uses
 significantly fewer tokens than the single-context version with no loss of quality.
 
-**What shipped**: [`subagent.py`](../src/mini_agent/subagent.py) plus `--subagents`, off by
+**What shipped**: [`subagent.py`](../src/teacup_agent/subagent.py) plus `--subagents`, off by
 default. `loop.run(subagents=True)` registers a `delegate` tool for the duration of the
 run; calling it starts a child `loop.run()` with a blank context, a slice of the parent's
 remaining budget, its own step ceiling, and every tool except `delegate` itself.
@@ -477,7 +477,7 @@ and wrong for knowledge it needs once an hour. Measured before this landed: 842 
 system prompt plus 643 of tool schemas, resent every turn, and both only grow as servers
 and tools are added.
 
-**What shipped**: [`skills.py`](../src/mini_agent/skills.py), `--skills <dir>` defaulting
+**What shipped**: [`skills.py`](../src/teacup_agent/skills.py), `--skills <dir>` defaulting
 to `./skills` when it exists, and two real skills (`web-research`, `long-document`).
 
 Progressive disclosure, three levels:
@@ -729,7 +729,7 @@ delivered, and neither the loop nor the metrics could tell.
 know it had missed something, because nobody was remembering.** A plan held in the
 model's head cannot be recovered once it drifts out of attention.
 
-**Implementation**: new [`plan.py`](../src/mini_agent/plan.py) plus `AgentState.todo`.
+**Implementation**: new [`plan.py`](../src/teacup_agent/plan.py) plus `AgentState.todo`.
 
 - `decompose()` makes one model call at the start (no tools) and turns the goal into
   1-5 action items. A planner that fails returns an empty list, which degrades exactly

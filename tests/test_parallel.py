@@ -8,10 +8,10 @@ import time
 
 import pytest
 
-from mini_agent import loop, tools
-from mini_agent.evals import tool_results_follow_their_call
-from mini_agent.memory import NullMemory
-from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent import loop, tools
+from teacup_agent.evals import tool_results_follow_their_call
+from teacup_agent.memory import NullMemory
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
 
 
 @pytest.fixture
@@ -83,7 +83,7 @@ class _FlakyModel:
         return assistant_says("succeeded at last")
 
     def tool_result_item(self, call, result):
-        from mini_agent.model import chat_tool_result
+        from teacup_agent.model import chat_tool_result
 
         return chat_tool_result(call, result)
 

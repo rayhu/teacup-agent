@@ -5,7 +5,7 @@ These do not measure how smart the model is; they measure whether the **loop** i
 correct: does a bad argument heal itself, does every tool call get its result back,
 do the ceilings actually stop the car.
 
-Run with: uv run python -m mini_agent.evals   (or uv run pytest)
+Run with: uv run python -m teacup_agent.evals   (or uv run pytest)
 """
 
 from __future__ import annotations
@@ -15,10 +15,10 @@ import os
 from dataclasses import dataclass
 from typing import Callable
 
-from mini_agent import loop
-from mini_agent.memory import NullMemory
-from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
-from mini_agent.state import AgentState
+from teacup_agent import loop
+from teacup_agent.memory import NullMemory
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent.state import AgentState
 
 
 # ScriptedModel already answers the framework's side calls (planning, compaction),
@@ -323,7 +323,7 @@ CASES: list[Case] = [
 
 def run_case(case: Case) -> tuple[bool, AgentState]:
     # Evals must be deterministic: force offline search, no network calls.
-    os.environ.setdefault("MINI_AGENT_SEARCH", "offline")
+    os.environ.setdefault("TEACUP_AGENT_SEARCH", "offline")
     state = loop.run(
         goal=case.name,
         model=ScriptedWithSummarizer(list(case.script), plan_items=case.plan_items),

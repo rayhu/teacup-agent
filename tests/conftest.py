@@ -5,4 +5,4 @@ import pytest
 
 @pytest.fixture(autouse=True)
 def _offline_search(monkeypatch):
-    monkeypatch.setenv("MINI_AGENT_SEARCH", "offline")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "offline")

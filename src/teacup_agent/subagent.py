@@ -24,7 +24,7 @@ from __future__ import annotations
 import pathlib
 from typing import Any
 
-from mini_agent import tools as tools_mod
+from teacup_agent import tools as tools_mod
 
 NAME = "delegate"
 
@@ -102,7 +102,7 @@ def disable() -> None:
 
 
 def _delegate(task: str, wanted: str = "") -> str:
-    from mini_agent import loop  # imported here: loop imports tools, tools imports us
+    from teacup_agent import loop  # imported here: loop imports tools, tools imports us
 
     if _config is None:
         return "ERROR: delegation is not enabled for this run"

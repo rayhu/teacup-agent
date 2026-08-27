@@ -1,4 +1,4 @@
-# mini-agent
+# teacup-agent
 
 A minimal but complete AI agent, built to be easy to fork, improve and share.
 
@@ -17,15 +17,15 @@ MIT licensed. Fork it, take the parts you want, and see
 ## Quick start
 
 ```bash
-uv sync                      # create the environment (.venv + uv.lock)
+uv sync                        # create the environment (.venv + uv.lock)
 
-uv run mini-agent            # offline demo: no API key, no cost, instant
-uv run mini-agent "compute (3200-450)*0.6 and tell me what CUDA is"
+uv run teacup-agent            # offline demo: no API key, no cost, instant
+uv run teacup-agent "compute (3200-450)*0.6 and tell me what CUDA is"
 
-uv run mini-agent --live "research NVIDIA's GPU strategy"   # real OpenAI call, needs .env
+uv run teacup-agent --live "research NVIDIA's GPU strategy"   # real OpenAI call, needs .env
 
-uv run python -m mini_agent.evals   # offline assertions about the control loop
-uv run pytest                       # those cases plus unit tests
+uv run python -m teacup_agent.evals   # offline assertions about the control loop
+uv run pytest                         # those cases plus unit tests
 ```
 
 `--live` reads `OPENAI_API_KEY` from `.env`:
@@ -54,7 +54,7 @@ a real model meets a real network.
 ## Layout
 
 ```
-src/mini_agent/
+src/teacup_agent/
 ├── model.py       Model        the only part that thinks: Responses / Chat / scripted
 ├── state.py       State        goal, messages, steps, budget, status, tool trace
 ├── tools.py       Tools        function + JSON Schema + safe execution

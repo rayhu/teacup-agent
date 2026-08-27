@@ -22,7 +22,7 @@ import json
 import pathlib
 from typing import Any
 
-from mini_agent.state import AgentState, TodoItem, ToolTrace
+from teacup_agent.state import AgentState, TodoItem, ToolTrace
 
 FILENAME = "state.json"
 

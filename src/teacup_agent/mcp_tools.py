@@ -38,7 +38,7 @@ import threading
 from contextlib import AsyncExitStack
 from typing import Any
 
-from mini_agent import tools as tools_mod
+from teacup_agent import tools as tools_mod
 
 CALL_TIMEOUT = 60.0  # seconds a single MCP tool call may take
 _SAFE_NAME = re.compile(r"[^A-Za-z0-9_-]")

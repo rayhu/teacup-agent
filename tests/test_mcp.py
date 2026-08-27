@@ -9,8 +9,8 @@ import sys
 
 import pytest
 
-from mini_agent import tools
-from mini_agent.mcp_tools import McpHub, _result_text, _tool_name, load_config
+from teacup_agent import tools
+from teacup_agent.mcp_tools import McpHub, _result_text, _tool_name, load_config
 
 SERVER = {"command": sys.executable, "args": ["tests/fixtures/demo_mcp_server.py"]}
 
@@ -188,21 +188,21 @@ def test_the_shipped_example_config_parses():
 
 def test_mcp_is_off_when_there_is_no_config(tmp_path):
     """Zero-config runs must not start third-party processes."""
-    from mini_agent.cli import _resolve_mcp
+    from teacup_agent.cli import _resolve_mcp
 
     assert _resolve_mcp(None, root=tmp_path) is None
 
 
 def test_an_mcp_json_in_the_project_is_the_opt_in(tmp_path):
     """The file's existence is the consent; it should not need a flag every run."""
-    from mini_agent.cli import _resolve_mcp
+    from teacup_agent.cli import _resolve_mcp
 
     (tmp_path / "mcp.json").write_text("{}", encoding="utf-8")
     assert _resolve_mcp(None, root=tmp_path) == str(tmp_path / "mcp.json")
 
 
 def test_explicit_path_wins_and_off_disables(tmp_path):
-    from mini_agent.cli import _resolve_mcp
+    from teacup_agent.cli import _resolve_mcp
 
     (tmp_path / "mcp.json").write_text("{}", encoding="utf-8")
     assert _resolve_mcp("other.json", root=tmp_path) == "other.json"

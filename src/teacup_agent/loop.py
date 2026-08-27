@@ -23,15 +23,15 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable
 
-from mini_agent import context as ctx
-from mini_agent import persist
-from mini_agent import plan as plan_mod
-from mini_agent import skills as skills_mod
-from mini_agent import subagent as subagent_mod
-from mini_agent import tools as tools_mod
-from mini_agent.memory import Memory, NullMemory
-from mini_agent.model import Model, ToolCall, chat_tool_result
-from mini_agent.state import AgentState, ToolTrace
+from teacup_agent import context as ctx
+from teacup_agent import persist
+from teacup_agent import plan as plan_mod
+from teacup_agent import skills as skills_mod
+from teacup_agent import subagent as subagent_mod
+from teacup_agent import tools as tools_mod
+from teacup_agent.memory import Memory, NullMemory
+from teacup_agent.model import Model, ToolCall, chat_tool_result
+from teacup_agent.state import AgentState, ToolTrace
 
 SYSTEM_PROMPT = """You are an autonomous, tool-using agent running **unattended**.
 
@@ -462,7 +462,7 @@ def run(
     # prefix under ~1024 tokens never enters the cache at all.
     set_key = getattr(model, "set_cache_key", None)
     if set_key:
-        set_key("mini-agent-" + hashlib.sha256(state.messages[0]["content"].encode()).hexdigest()[:16])
+        set_key("teacup-agent-" + hashlib.sha256(state.messages[0]["content"].encode()).hexdigest()[:16])
 
     if available_skills:
         skills_mod.enable(available_skills, state)

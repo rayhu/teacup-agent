@@ -237,7 +237,7 @@ def _search_web_backend(query: str, max_results: int) -> str:
     },
 )
 def search_web(query: str, max_results: int = 5) -> str:
-    """Three modes, selected by the MINI_AGENT_SEARCH environment variable:
+    """Three modes, selected by the TEACUP_AGENT_SEARCH environment variable:
 
     auto (default): use the network; on failure fall back to the offline corpus
                     and say why.
@@ -245,7 +245,7 @@ def search_web(query: str, max_results: int = 5) -> str:
                     reads a broken search as "this does not exist").
     offline       : local corpus only, zero network calls (evals and unit tests).
     """
-    mode = os.getenv("MINI_AGENT_SEARCH", "auto").lower()
+    mode = os.getenv("TEACUP_AGENT_SEARCH", "auto").lower()
     max_results = max(1, min(int(max_results), 10))
 
     if mode == "offline":
@@ -257,7 +257,7 @@ def search_web(query: str, max_results: int = 5) -> str:
         if mode == "web":
             return (
                 "ERROR: ddgs is not installed, web search unavailable. "
-                "Run `uv sync`, or set MINI_AGENT_SEARCH=offline."
+                "Run `uv sync`, or set TEACUP_AGENT_SEARCH=offline."
             )
         return f"[web search unavailable (no ddgs); offline corpus below]\n{_search_corpus(query)}"
     except Exception as e:

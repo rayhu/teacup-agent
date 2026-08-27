@@ -9,11 +9,11 @@ import json
 
 import pytest
 
-from mini_agent import loop, tools
-from mini_agent.cli import _make_approver
-from mini_agent.evals import tool_results_follow_their_call
-from mini_agent.memory import NullMemory
-from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent import loop, tools
+from teacup_agent.cli import _make_approver
+from teacup_agent.evals import tool_results_follow_their_call
+from teacup_agent.memory import NullMemory
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
 
 
 @pytest.fixture
@@ -85,14 +85,14 @@ def test_cli_allow_policy_is_explicit_yolo():
 
 def test_plan_auto_follows_the_run_mode():
     """auto is honest about what it does: on for live, off for the offline demo."""
-    from mini_agent.cli import _resolve_plan
+    from teacup_agent.cli import _resolve_plan
 
     assert _resolve_plan("auto", live=True) is True
     assert _resolve_plan("auto", live=False) is False
 
 
 def test_plan_on_and_off_are_absolute():
-    from mini_agent.cli import _resolve_plan
+    from teacup_agent.cli import _resolve_plan
 
     assert _resolve_plan("on", live=False) is True  # plan even the offline demo
     assert _resolve_plan("off", live=True) is False

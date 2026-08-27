@@ -14,8 +14,8 @@ confidence levels, or be a request for permission to continue (which really
 happened). The `status` field cannot tell those apart; only the trajectory can.
 
 Usage:
-    uv run python -m mini_agent.trajectory runs/20260826-xxxx     # mechanical only, free
-    uv run python -m mini_agent.trajectory runs/* --judge         # add the LLM judge
+    uv run python -m teacup_agent.trajectory runs/20260826-xxxx     # mechanical only, free
+    uv run python -m teacup_agent.trajectory runs/* --judge         # add the LLM judge
 """
 
 from __future__ import annotations
@@ -26,8 +26,8 @@ import pathlib
 import re
 from typing import Any
 
-from mini_agent import persist
-from mini_agent.state import AgentState
+from teacup_agent import persist
+from teacup_agent.state import AgentState
 
 URL = re.compile(r"https?://[^\s\]）)、,，]+")
 
@@ -66,7 +66,7 @@ def mechanical(state: AgentState) -> dict[str, Any]:
     # Did the goal ask for an action, and was that action ever even attempted?
     # "Attempted" is deliberate: a denied call counts, because the model did its part
     # and the human said no. Never calling the tool at all is the failure.
-    from mini_agent import tools as tools_mod
+    from teacup_agent import tools as tools_mod
 
     gated = {n for n, t in tools_mod.REGISTRY.items() if t.requires_approval}
     action_asked = bool(ACTION_WORDS.search(state.goal))
@@ -235,7 +235,7 @@ def main(argv: list[str] | None = None) -> int:
     if args.judge:
         from dotenv import load_dotenv
 
-        from mini_agent.model import ResponsesModel
+        from teacup_agent.model import ResponsesModel
 
         load_dotenv()
         model = ResponsesModel(args.model)

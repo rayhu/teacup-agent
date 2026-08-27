@@ -7,11 +7,11 @@ here also re-checks the message-protocol invariant.
 
 import pytest
 
-from mini_agent import context as ctx
-from mini_agent import loop, tools
-from mini_agent.evals import ScriptedWithSummarizer, tool_results_follow_their_call
-from mini_agent.memory import NullMemory
-from mini_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent import context as ctx
+from teacup_agent import loop, tools
+from teacup_agent.evals import ScriptedWithSummarizer, tool_results_follow_their_call
+from teacup_agent.memory import NullMemory
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
 
 
 def test_estimate_tokens_weighs_cjk_heavier():

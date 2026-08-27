@@ -1,7 +1,7 @@
 # Original study notes (the contents of the old main.py, kept verbatim)
 
 > These are the pseudo-code sketches from before the refactor. The runnable
-> implementation lives in `src/mini_agent/`.
+> implementation lives in `src/teacup_agent/`.
 > Each section is annotated with the file that now implements it.
 
 ## 1. A single tool call (Responses API) -> `model.py` + `tools.py`

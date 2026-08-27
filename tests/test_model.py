@@ -8,7 +8,7 @@ import pytest
 
 from types import SimpleNamespace
 
-from mini_agent.model import OpenAIModel
+from teacup_agent.model import OpenAIModel
 
 
 class _Msg(SimpleNamespace):
@@ -68,7 +68,7 @@ def test_cached_input_tokens_are_billed_at_a_tenth():
     """Cached input bills at a tenth — the direct payoff for a stable prefix."""
     from types import SimpleNamespace as NS
 
-    from mini_agent.model import estimate_cost
+    from teacup_agent.model import estimate_cost
 
     full = estimate_cost("gpt-5", input_tokens=1_000_000, output_tokens=0)
     half_cached = estimate_cost("gpt-5", 1_000_000, 0, cached_tokens=500_000)

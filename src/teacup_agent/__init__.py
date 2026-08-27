@@ -1,4 +1,4 @@
-"""mini_agent — a minimal AI agent that has all the organs.
+"""teacup_agent — a minimal AI agent that has all the organs.
 
     Agent = Model + State + Tools + Control Loop + Memory/Evals
 
@@ -11,9 +11,9 @@ Where each part lives:
     Evals        -> evals.py   (offline assertions with a scripted model, no API key)
 """
 
-from mini_agent.loop import run
-from mini_agent.memory import Memory
-from mini_agent.state import AgentState
+from teacup_agent.loop import run
+from teacup_agent.memory import Memory
+from teacup_agent.state import AgentState
 
 __all__ = ["run", "Memory", "AgentState"]
 __version__ = "0.1.0"

@@ -1,4 +1,4 @@
-from mini_agent.memory import Memory
+from teacup_agent.memory import Memory
 
 
 def test_memory_roundtrip_and_dedupe(tmp_path):

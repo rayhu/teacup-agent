@@ -12,11 +12,11 @@ import os
 import pathlib
 import tempfile
 
-os.environ["MINI_AGENT_SEARCH"] = "offline"
+os.environ["TEACUP_AGENT_SEARCH"] = "offline"
 
-from mini_agent import loop  # noqa: E402
-from mini_agent.memory import NullMemory  # noqa: E402
-from mini_agent.model import ScriptedModel, assistant_calls, assistant_says  # noqa: E402
+from teacup_agent import loop  # noqa: E402
+from teacup_agent.memory import NullMemory  # noqa: E402
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says  # noqa: E402
 
 EMAIL = {
     "to": "boss@example.com",

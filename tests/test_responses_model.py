@@ -8,10 +8,10 @@ function_call_output.
 
 from types import SimpleNamespace
 
-from mini_agent import loop
-from mini_agent.memory import NullMemory
-from mini_agent.model import Reply, ResponsesModel, ToolCall
-from mini_agent.evals import tool_results_follow_their_call
+from teacup_agent import loop
+from teacup_agent.memory import NullMemory
+from teacup_agent.model import Reply, ResponsesModel, ToolCall
+from teacup_agent.evals import tool_results_follow_their_call
 
 
 class _Item(SimpleNamespace):
