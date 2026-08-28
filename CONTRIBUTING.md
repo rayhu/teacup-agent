@@ -67,7 +67,15 @@ LLM; add `--judge` for the qualitative half.
 
 ## Working with a coding agent on this repo
 
-`CLAUDE.md` is the static context an agent gets here. It carries the same rules as this
-file, plus how to verify, what to ask before spending money, and the convention that
-failures get written down in `docs/roadmap.md` with their root cause. If you fork this
-and work with an agent, that file is the first thing to make yours.
+`AGENTS.md` is the static context an agent gets here — `CLAUDE.md` imports it and states
+no rule of its own, so Claude Code and Codex work from the same conventions. It carries
+the same rules as this file, plus how to verify, what to ask before spending money, and the
+convention that failures get written down in `docs/roadmap.md` with their root cause. If
+you fork this and work with an agent, that file is the first thing to make yours.
+
+The rest of the process is two files: [docs/workflow.md](docs/workflow.md) for how a
+change gets from an idea to `main`, and [REVIEW.md](REVIEW.md) for the review pass it goes
+through on the way — written by one agent, reviewed by a different one, merged by a human.
+CI (`.github/workflows/verify.yml`) runs the three commands above on every pull request
+and on pushes to `main`, so "all three must be green" is checked and not just asked for.
+On a feature branch with no pull request open yet, nothing checks it but you.

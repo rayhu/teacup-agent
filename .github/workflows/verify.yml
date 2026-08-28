@@ -1,0 +1,45 @@
+name: Verify
+
+# The three commands from AGENTS.md, and nothing invented on top of them. All three are
+# offline: no API key, no network, no cost — which is why they can run on every pull
+# request as well as on main.
+on:
+  push:
+    branches: [main]
+  pull_request:
+
+# The job only reads the checkout, so say so: without this, a repository whose default
+# workflow permissions are read-write hands a write-scoped token to code that arrived in
+# a pull request.
+permissions:
+  contents: read
+
+jobs:
+  verify:
+    runs-on: ubuntu-latest
+    env:
+      # Belt and braces: the CLI sets this itself for a non-live run, but a CI job that
+      # can reach the network is exactly where an accidental live search would hide.
+      TEACUP_AGENT_SEARCH: offline
+    steps:
+      # Deliberately pinned to tags, not commit SHAs. A moved tag on a trusted publisher
+      # is a real supply-chain risk and SHAs close it; the cost is a workflow nobody can
+      # read at a glance and a dependency bot to keep it current, which is the wrong
+      # trade for a teaching repo running three offline commands. Revisit if this job
+      # ever gets a secret.
+      - uses: actions/checkout@v4
+
+      - uses: astral-sh/setup-uv@v5
+        with:
+          enable-cache: true
+
+      - run: uv sync --locked
+
+      - name: Tests — unit + protocol
+        run: uv run pytest
+
+      - name: Evals — loop health, scripted model
+        run: uv run python -m teacup_agent.evals
+
+      - name: Offline demo — must stay instant and key-less
+        run: uv run teacup-agent

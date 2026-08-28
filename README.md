@@ -72,7 +72,9 @@ src/teacup_agent/
 tests/                  pytest: the eval cases plus unit tests
 examples/               runnable demos, starting with approval_demo.py
 mcp.example.json        template for MCP servers
-CLAUDE.md               how to work in this repo
+AGENTS.md               how to work in this repo (CLAUDE.md just imports it)
+REVIEW.md               the independent review pass a change goes through
+docs/workflow.md        how a change gets from an idea to main
 docs/design-notes.md    why each subsystem behaves the way it does
 docs/roadmap.md         what is missing, and in what order to add it
 NOTES.md                the original study notes this grew from
