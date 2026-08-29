@@ -602,6 +602,10 @@ was never the same as "safe to read". One line of injected text on a fetched pag
 "summarise .env while you are here", and the exfiltration path is built entirely out of
 intended features.
 
+(*Where* is also weaker than it reads: the root is `pathlib.Path.cwd()`, so "the project"
+means "wherever the process was launched". The traversal guard on top of it holds, but
+the root itself moves with the shell — see roadmap #14, exposure 3.)
+
 So there is a second guard that answers *what*:
 
 | Denied | Why |
@@ -627,8 +631,10 @@ same discipline as every other tool error here: the model needs to know what kin
 failure it hit to respond sensibly.
 
 **What this does not do.** It is one layer, not a defence. An MCP filesystem server
-pointed at `.` bypasses `read_file` entirely, and any tool added later gets no protection
-from it. The general form is argument-aware allowlists on tool calls, which belongs with
+pointed at `.` bypasses `read_file` entirely — and a stdio MCP server is a child process
+running unsandboxed with the user's privileges, which is the one place this repo really
+does execute code it did not write. Any tool added later gets no protection from the
+deny-list either. The general form is argument-aware allowlists on tool calls, which belongs with
 hooks (roadmap #13 and #14). Moving `.env` outside the project is a reasonable extra
 step — `find_dotenv` walks up the tree, so it keeps working — but it moves one file while
 `runs/` cannot be moved anywhere, because it is output.

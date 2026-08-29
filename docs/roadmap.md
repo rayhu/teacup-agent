@@ -556,10 +556,11 @@ by tool name) without touching `loop.py`, and the veto reaches the model as a no
 model reads, and then nothing is done about it. Documenting a risk without marking the
 boundary is worse than not raising it.
 
-**Two exposures that exist today**, both verified rather than hypothetical:
+**Three exposures that exist today**, all verified rather than hypothetical:
 
-1. **`read_file` can read `.env`.** Its only guard is "stay inside the project
-   directory", and the project directory is where the API keys live. Combined with
+1. **`read_file` can read `.env`.** Before the deny-list below, its only guard was
+   "stay inside the project directory", and the project directory is where the API keys
+   live. Combined with
    `send_email` under `--approve allow`, or simply with a model that quotes it into an
    answer, that is an exfiltration path built entirely from existing, intended features.
 2. **MCP servers are third-party processes with our user's privileges.** The SDK passes
@@ -567,12 +568,53 @@ boundary is worse than not raising it.
    *not* `OPENAI_API_KEY`), which is better than we would have managed by hand, but the
    child still has the filesystem and the network. `mcp.example.json` demonstrates a
    filesystem server pointed at `.`.
+3. **`read_file`'s root is wherever the process was launched**, not the project.
+   [`tools.py`](../src/teacup_agent/tools.py) opens with `root = pathlib.Path.cwd()
+   .resolve()`. The traversal guard on top of it holds — `../../../etc/hosts` is
+   refused — but the root it guards moves with the shell. Launched from `~`, every file
+   under the home directory is "inside the project" except what the deny-list patterns
+   happen to catch; launched from a subdirectory, the deny-list's root-relative entries
+   (`.env`, `.git`, `.venv`) stop covering the tree the user thinks they are in.
+   Measured by `chdir`-ing into a scratch directory and reading a file there: the
+   traversal error fired for `../../etc/hosts`, and `notes.txt` in the new directory was
+   returned in full.
 
 **Where the field is**: the 2026 consensus on prompt injection is containment rather than
 prevention. Assume an injection lands and make sure it cannot do much: minimum capability
 per tool, authorization enforced outside the agent's reach, allowlists on tool calls,
 output auditing, and process isolation (Seatbelt on macOS, bubblewrap on Linux) for
 anything that executes code.
+
+**On sandboxing — what is out of scope, and what only looks it.** This section used to
+say "this agent executes no code, so there is nothing to isolate". Half of that is true,
+and the half that is not is the more interesting half:
+
+- **Our own tools execute no code**, and that was a deliberate choice at the smallest
+  possible scale: `calculate` is a hand-written `ast` walker (`_eval_node`), not `eval`.
+  So there is no exec surface of ours to isolate, and the rule stands unchanged — **a
+  code-execution tool must not be added until a sandbox exists to run it in.**
+- **But a stdio MCP server *is* code execution — someone else's, spawned by us.**
+  `MCPTools.connect()` runs `spec["command"]` as a child process holding our user's
+  privileges, the filesystem and the network. Exposure 2 above already says this; the old
+  "nothing to isolate" line contradicted it. MCP isolation stays out of scope by **cost**
+  — a Seatbelt or bubblewrap wrapper around the child command is real work and buys a
+  teaching repo little — not because there is nothing there to isolate. If you fork this
+  and point it at servers you did not write, that is the sentence to re-read.
+
+**"Docker or Seatbelt?" is the wrong first question.** The word "sandbox" bundles four
+properties that different tools buy separately:
+
+| Property | The question it answers | Bought by |
+| --- | --- | --- |
+| Isolation | can it damage the host? | Seatbelt (`sandbox-exec` — `DEPRECATED` in its own man page, still working), bubblewrap, containers, microVMs |
+| Reproducibility | does it see the same world every run? | an image plus a lockfile; Seatbelt gives none of this |
+| Reversibility | can what it did be undone? | a git worktree, or a container over a *copied* tree — a bind-mounted one gives nothing |
+| Credential and egress scope | which secrets and which network does the process hold? | none of the above |
+
+Every exposure listed above lives in the last row, which is why the answer here is
+deny-lists, approval gates and allowlists rather than a container. A container holding
+`OPENAI_API_KEY` with open egress is a perfectly good exfiltration channel. These are
+different axes, not strong and weak versions of one thing.
 
 **Proportionate here** (this is a teaching repo, not a production runtime):
 - ✅ **done**: a deny-list in `read_file` covering `.env*`, `mcp.json`, `memory.json`,
@@ -582,13 +624,19 @@ anything that executes code.
   stay readable because the model already saw them, while a run's `state.json` does not,
   because it holds the system prompt and every result of that run. Both halves are
   tested, and the externalization round trip was verified end to end afterwards;
+- **root `read_file` at an explicit project root instead of `Path.cwd()`** (exposure 3),
+  resolved once at startup from the CLI's working directory and passed in, so the
+  boundary is a stated fact of the run rather than a property of the user's shell;
 - argument-aware allowlists as hooks (#13), e.g. "send_email only to these domains";
 - a `docs/threat-model.md` that states plainly what is trusted, what is not, and what this
-  repo does *not* defend against, so a fork knows what it is inheriting.
+  repo does *not* defend against — including that a stdio MCP server is unsandboxed code
+  execution — so a fork knows what it is inheriting.
 
-**Explicitly out of scope**: real sandboxing. This agent executes no code, so there is
-nothing to isolate; the honest rule is that a code-execution tool must not be added until
-a sandbox exists to run it in.
+**Definition of done**:
+- `read_file` refuses a file that is outside the project root but inside the directory
+  the process was launched from, with a test that pins it by launching from elsewhere;
+- `docs/threat-model.md` exists and names MCP child processes as the one unsandboxed
+  code-execution path.
 
 **Reference**: <https://www.sysdig.com/learn-cloud-native/prompt-injection> ·
 <https://www.firecrawl.dev/blog/ai-agent-sandbox>
