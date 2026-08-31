@@ -18,8 +18,7 @@ intent  ->  phase  ->  plan  ->  implement  ->  independent review  ->  answer  
 
 **1. Intent.** What the project is for, and what a change can fail against. Stated once,
 not per change; `README.md` says what this is, and the success criteria a fork owes it
-belong in `docs/intent.md`. *(That file is drafted on a branch and is the one artifact in
-this table not yet on `main`.)*
+are in `docs/intent.md`.
 
 **2. Phase.** One item from `docs/roadmap.md`, ordered by payoff over cost. An item is
 the unit of work: it names what to change, what counts as done, and where to read more.
@@ -30,6 +29,11 @@ possible.
 written up in the roadmap, that write-up *is* the plan; for anything else, propose the
 shape before writing the code and get agreement on it. Claude Code's plan mode is the
 convenient way to do this, not the required one.
+
+When a change defines something that outlives it — a file format, a contract another
+project implements against — the argument goes in its own `docs/spec-*.md` and the
+roadmap item points at it. A spec is not required for an ordinary item; it is what you
+write when other people's code has to agree with yours.
 
 **4. Implement.** Claude Code writes the change *and* its tests and evals — tests pin the
 deterministic parts, evals pin the loop's behaviour, and both are the contract with the
@@ -64,6 +68,7 @@ record of why the code looks like this.
 | Intent | `README.md`, `docs/intent.md` | what this is for, and the criteria a change can fail |
 | Static context | `AGENTS.md` (imported by `CLAUDE.md`) | conventions, hard rules, how to verify, what to ask before spending money |
 | Phase and plan | `docs/roadmap.md` | the item: what to change, what counts as done, and afterwards what happened |
+| Spec *(when a change defines a format or contract)* | `docs/spec-*.md` | the format itself, its failure modes, and what other code may rely on |
 | Implementation | code, `tests/`, `evals.py` | the change and its contract |
 | Review | `REVIEW.md` + the review thread | the passes, and the findings from this one |
 | Verification | the three commands' output | quoted in the report, and re-run in CI |

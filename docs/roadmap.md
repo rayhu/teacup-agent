@@ -5,8 +5,10 @@ was roughly where the field stood in late 2023 / early 2024.
 **Progress**: #1-#10 and #12 are done (except the fine-grained permissions part of #6).
 Five items that were never on the roadmap were added after reviewing real runs
 (see "Field patches" at the end).
-Next up: #14 (threat model and allowlists) closes a hole that exists today; then
-#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend).
+Next up: #15 (AGENT.md), which turns an agent from an invocation nobody recorded into
+a file a fork edits, and builds the declaration surface the two items after it both
+want; then #14 (threat model and allowlists), which closes a hole that exists today;
+then #13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend).
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/teacup_agent/loop.py) is "old technology".
@@ -643,6 +645,91 @@ different axes, not strong and weak versions of one thing.
 
 ---
 
+### 15. AGENT.md — the agent described by one file
+
+**Why**: the value this repo claims is that it gets **forked**, and forking it currently
+means inheriting an agent nobody wrote down. The model, the ceilings, the skills and the
+instructions live in `cli.py` defaults, `loop.run` defaults, and whichever flags the
+author remembered — so a fork that changes the model has not edited anything, it has
+typed something different. One file, in the repository, that a fork edits is the
+difference between a diff a reviewer can read and a rewrite they cannot.
+
+It is also the seam with [teacup-run](https://github.com/rayhu/teacup-run), the sibling
+project that does discovery, forking, evaluation and publishing. Its package format
+already reserves `AGENT.md` at an agent's root and already carries a `framework:` field
+whose stated purpose is to let a package name a different runtime. teacup-agent reading
+that file, and declaring `framework: teacup-agent`, is how the two pair: teacup-run says
+*which* agent, teacup-agent says what running it means.
+
+**Now**: no such file exists. `mcp.json` and `skills/` established the convention — the
+file's existence is the opt-in — and there is nothing equivalent for the agent itself.
+
+**What to change**:
+
+- `agent_md.py`: a loader for frontmatter (a **flat** YAML mapping, `key: value` plus
+  inline `[a, b]` lists) and a body. Roughly 120 lines including the error messages. Not
+  in `loop.py`.
+- `--agent <path|off>`, defaulting to `./AGENT.md` when it exists.
+- `cli.py`: the flags a file can set move to `default=None`, and one resolver computes
+  `flag if given else file else default`. This is the broad part of the change, and it is
+  necessary — with today's argparse defaults the loader cannot tell "the user asked for
+  gpt-5" from "the user said nothing", so every flag would silently win and the file would
+  be decorative.
+- `AGENT.md` at the repo root describing the agent this repo actually runs, plus a second
+  agent under `examples/` that differs in model, skills and budget.
+- **`loop.run` gains exactly one parameter**: `instructions: str | None`, the body,
+  appended to the system prompt between the formatted prefix and the recalled memory.
+  Every other key maps to a parameter it already takes, `exclude_tools` included. The
+  control loop itself does not move.
+
+**Definition of done** — the full list is in [spec-agent-md.md](spec-agent-md.md); the
+two that decide whether this landed:
+
+- a test asserting the root `AGENT.md` **reproduces today's built-in defaults**, so the
+  file cannot drift from the agent it describes;
+- an **eval**, not only parser tests: a scripted-model run configured from a fixture file
+  honours it — declared ceilings visible in the state, a declared skill in the catalog and
+  an undeclared one absent, the body reaching the system prompt after the stable prefix.
+  Parser tests prove the parser; only an eval proves the wiring.
+
+**Design decisions**, argued in the spec and repeated here because they are the parts a
+reviewer should push back on:
+
+- **Flat frontmatter, parsed by hand.** Same call as #12 — no PyYAML for a handful of
+  fields — and the flat subset is still valid YAML, so teacup-run reads the identical
+  file with a real parser. A restriction on what an author may write, not a dialect.
+- **A file that does not parse is fatal.** No fallback to defaults, ever. This repo has
+  already been burned by a config that silently loaded nothing (`@AGENTS.md.` inline, in
+  `workflow.md`), and a run built on an empty config looks completely normal.
+- **The body is appended to the system prompt, never replaces it.** The prefix carries the
+  date and the run status; field patches A and B were runs that failed for want of exactly
+  those. Appended at the end of the prefix, so caching survives (rule 6).
+- **A file may restrict or request capability; it may never grant it.** `approve: allow`
+  from a file is refused, `--live` cannot be turned on by a file, `mcp:` is honoured only
+  when the named config already exists locally, and `tools:`/`skills:` subtract from what
+  the code provides rather than adding to it.
+- **Precedence is plain: CLI > file > default.** No floors, no clamping. Asymmetric rules
+  about which budget wins produce runs nobody can explain.
+- **teacup-run's `goal:` and `checks:` are not adopted.** Predicate functions are its
+  completion mechanism; this repo's is the checklist plus the model no longer asking for
+  tools. Two answers to "when is it done" in one format is one too many.
+
+**Where it sits in the order**: before #14 and #13. Both want a place where a policy is
+*declared* — #14's argument-aware allowlists and #13's hooks are configuration before they
+are code — and this item builds that place. The exposure #14 names is also the one already
+half-patched (`read_file`'s deny-list is done; the root-scoping and the threat-model
+document are not), so the ordering costs less than it reads.
+
+**Left open**: the body means different things in the two repos — the prompt here, a human
+card in teacup-run's example — bridged by an `instructions:` key and not yet settled on
+teacup-run's side. And whether `tools:` is the same mechanism as #14's allowlist, seen
+from the configuration side, is #14's call to make.
+
+**Read**: [spec-agent-md.md](spec-agent-md.md) for the format and the compatibility
+contract, [intent.md](intent.md) for why forkability is a criterion a change can fail.
+
+---
+
 ## Deliberately not doing
 
 - **No agent framework** (LangGraph and friends). The value of this repo is that the
@@ -661,6 +748,7 @@ Want it to sustain **longer work** -> #4 (context compaction).
 Want it **faster** -> #5 (parallel tools).
 Want it **trustworthy** -> #7 (trajectory eval).
 Want it to **do more** -> #9 (MCP).
+Want it **forkable** -> #15 (AGENT.md).
 
 ---
 

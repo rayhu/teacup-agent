@@ -74,9 +74,11 @@ examples/               runnable demos, starting with approval_demo.py
 mcp.example.json        template for MCP servers
 AGENTS.md               how to work in this repo (CLAUDE.md just imports it)
 REVIEW.md               the independent review pass a change goes through
+docs/intent.md          what this is for, and what a change can fail against
 docs/workflow.md        how a change gets from an idea to main
 docs/design-notes.md    why each subsystem behaves the way it does
 docs/roadmap.md         what is missing, and in what order to add it
+docs/spec-agent-md.md   the AGENT.md format: one file that describes an agent
 NOTES.md                the original study notes this grew from
 ```
 
