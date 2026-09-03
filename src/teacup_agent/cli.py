@@ -318,6 +318,14 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument("-q", "--quiet", action="store_true", help="print only the final answer")
     p.add_argument(
+        "--json",
+        action="store_true",
+        help="print one machine-readable JSON object to stdout instead of the human "
+        "log, and nothing else on stdout; implies --quiet. Meant for an external "
+        "caller (e.g. teacup-run) rather than a human terminal — see "
+        "docs/integration.md for the shape",
+    )
+    p.add_argument(
         "--config",
         default=None,
         help="load models/mcp/tools/skills/runtime from a YAML file (see "
@@ -326,6 +334,8 @@ def main(argv: list[str] | None = None) -> int:
         "once --config is set",
     )
     args = p.parse_args(argv)
+    if args.json:
+        args.quiet = True  # --json is exactly one JSON object on stdout, nothing else
 
     if args.config:
         return _main_config(args)
@@ -395,6 +405,24 @@ def main(argv: list[str] | None = None) -> int:
         if hub is not None:
             hub.close()
 
+    return _finish(state, run_dir, args)
+
+
+def _finish(state, run_dir, args) -> int:
+    """Final output + exit code, shared by both CLI paths (plain flags and --config).
+
+    --json is the one stable, versioned contract an external caller (teacup-run's
+    sandboxed subprocess launcher) can parse; the human log below is free to change
+    shape without breaking anything since nothing parses it. See docs/integration.md.
+    """
+    exit_code = 0 if state.status == "done" else 1
+    if getattr(args, "json", False):
+        result = state.snapshot()
+        result["answer"] = state.answer
+        result["exit_code"] = exit_code
+        print(json.dumps(result, ensure_ascii=False))
+        return exit_code
+
     print(f"\nAnswer: {state.answer}")
     if run_dir is not None and not args.quiet:
         print(
@@ -403,7 +431,7 @@ def main(argv: list[str] | None = None) -> int:
         )
     if not args.quiet:
         print(f"State: {json.dumps(state.snapshot(), ensure_ascii=False)}")
-    return 0 if state.status == "done" else 1
+    return exit_code
 
 
 def _main_config(args) -> int:
@@ -491,15 +519,7 @@ def _main_config(args) -> int:
         if a2a_hub is not None:
             a2a_hub.close()
 
-    print(f"\nAnswer: {state.answer}")
-    if run_dir is not None and not args.quiet:
-        print(
-            f"Trajectory saved to {pathlib.Path(run_dir) / persist.FILENAME} "
-            "(resume it with --resume)"
-        )
-    if not args.quiet:
-        print(f"State: {json.dumps(state.snapshot(), ensure_ascii=False)}")
-    return 0 if state.status == "done" else 1
+    return _finish(state, run_dir, args)
 
 
 def _run_agent(args, the_model, run_dir, resumed):

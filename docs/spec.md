@@ -59,6 +59,7 @@ Environment variables:
 | `--plan` | `auto` \| `on` \| `off` | `auto` | upfront checklist; `auto` = on for `--live`, off offline |
 | `--reflect` | `auto` \| `on` \| `off` | `auto` | write an experience/lesson note after a qualifying run; `auto` = on for `--live` |
 | `-q`, `--quiet` | flag | off | print only the final answer |
+| `--json` | flag | off | one machine-readable JSON object on stdout, nothing else; implies `--quiet`. [`docs/integration.md`](integration.md) |
 | `--config` | path | none | take everything from a YAML file instead of the flags above |
 
 `--config` is a **parallel track, not a merge**: once it is set, every flag except the
