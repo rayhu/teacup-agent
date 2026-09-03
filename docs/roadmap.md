@@ -2,13 +2,12 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #15, #17, #18 and #19 are done (except the fine-grained
+**Progress**: #1-#10, #12, #14, #15, #17, #18 and #19 are done (except the fine-grained
 permissions part of #6). Five items that were never on the roadmap were added after
 reviewing real runs (see "Field patches" at the end).
-Next up: #14 (threat model and allowlists) closes a hole that exists today; then
-#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend) and
-#16 (multi-provider price overrides, a native Anthropic path), both scoped but not
-started.
+Next up: #13 (hooks) is the mechanism #14's deferred argument-aware allowlists still
+want; then #11 (a better search backend) and #16 (multi-provider price overrides, a
+native Anthropic path), both scoped but not started.
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/teacup_agent/loop.py) is "old technology".
@@ -552,7 +551,7 @@ by tool name) without touching `loop.py`, and the veto reaches the model as a no
 
 ---
 
-### 14. Threat model, and tool-call allowlists
+### 14. Threat model, and tool-call allowlists — DONE (2026-09-03)
 
 **Now**: the docs state that web content and MCP tool descriptions are untrusted text the
 model reads, and then nothing is done about it. Documenting a risk without marking the
@@ -626,19 +625,53 @@ different axes, not strong and weak versions of one thing.
   stay readable because the model already saw them, while a run's `state.json` does not,
   because it holds the system prompt and every result of that run. Both halves are
   tested, and the externalization round trip was verified end to end afterwards;
-- **root `read_file` at an explicit project root instead of `Path.cwd()`** (exposure 3),
-  resolved once at startup from the CLI's working directory and passed in, so the
-  boundary is a stated fact of the run rather than a property of the user's shell;
-- argument-aware allowlists as hooks (#13), e.g. "send_email only to these domains";
-- a `docs/threat-model.md` that states plainly what is trusted, what is not, and what this
-  repo does *not* defend against — including that a stdio MCP server is unsandboxed code
-  execution — so a fork knows what it is inheriting.
+- ✅ **done**: `read_file` at an explicit project root instead of `Path.cwd()`
+  (exposure 3), resolved once at startup from the CLI's working directory and passed in,
+  so the boundary is a stated fact of the run rather than a property of the user's shell;
+- argument-aware allowlists as hooks (#13) — **deferred**: #13 (`hooks.py`,
+  `before_tool_call`) has not landed yet, so this stays future work rather than part of
+  this item's own definition of done, which never required it;
+- ✅ **done**: a `docs/threat-model.md` that states plainly what is trusted, what is not,
+  and what this repo does *not* defend against — including that a stdio MCP server is
+  unsandboxed code execution — so a fork knows what it is inheriting.
+
+**What shipped**: [`tools.py`](../src/teacup_agent/tools.py) gained a module-level
+`_project_root` (default `None`, falling back to `Path.cwd()` when unset — every existing
+test keeps working unchanged) plus `set_project_root()`; `read_file` reads it instead of
+recomputing `Path.cwd()` on every call. `cli.py` gained `--project-root PATH`, resolved
+once at the top of `main()` and threaded three places: `tools.set_project_root()`, and
+into the two already-existing (previously unused) `root=` parameters on
+`_resolve_mcp`/`_resolve_skills` — closing the same "implicit `Path.cwd()` per call"
+pattern everywhere it existed, not just in `read_file`. This gives "project root" and "the
+directory the process launched from" a real seam to diverge through, which is what makes
+the definition-of-done test meaningful rather than vacuous: before this, the two were
+definitionally the same value, so there was no way to write a test where a file was
+"outside the project root but inside the launch directory" at all.
 
 **Definition of done**:
-- `read_file` refuses a file that is outside the project root but inside the directory
-  the process was launched from, with a test that pins it by launching from elsewhere;
-- `docs/threat-model.md` exists and names MCP child processes as the one unsandboxed
+- ✅ `read_file` refuses a file that is outside the project root but inside the directory
+  the process was launched from —
+  `tests/test_tools.py::test_project_root_can_be_set_independent_of_the_launch_directory`
+  pins it (launch from one directory, set the root to a different one, confirm the launch
+  directory's own file is refused);
+- ✅ `docs/threat-model.md` exists and names MCP child processes as the one unsandboxed
   code-execution path.
+
+**Verification**:
+```
+uv run pytest                          # 210 passed
+uv run python -m teacup_agent.evals    # 21/21 passed
+uv run teacup-agent                    # offline demo unaffected, still instant
+```
+Manual check (`--project-root` diverging from the launch directory, over the real
+`cli.main()` entry point):
+```
+$ cd /tmp/proot_launch   # holds secret.txt
+$ python -c "cli.main(['--project-root', '/tmp/proot_project', '-q', 'noop']); ..."
+after main(): project root is /tmp/proot_project
+ERROR: no such file: secret.txt          # launch dir's file: refused
+readable                                 # /tmp/proot_project/notes.md: allowed
+```
 
 **Reference**: <https://www.sysdig.com/learn-cloud-native/prompt-injection> ·
 <https://www.firecrawl.dev/blog/ai-agent-sandbox>

@@ -325,7 +325,23 @@ def main(argv: list[str] | None = None) -> int:
         "merge: every flag other than the goal, --quiet and --resume is ignored "
         "once --config is set",
     )
+    p.add_argument(
+        "--project-root",
+        default=None,
+        help="boundary read_file may not read outside of. Defaults to the current "
+        "directory; set this explicitly when that is not the same thing (a cron job, "
+        "a script invoked from elsewhere) rather than relying on whatever the shell's "
+        "cwd happens to be",
+    )
     args = p.parse_args(argv)
+
+    # Resolved once, here, rather than left for read_file() to recompute Path.cwd()
+    # per call: the project-root boundary is a stated fact of the run, not a property
+    # of the shell it happened to be launched from (docs/roadmap.md #14).
+    project_root = (
+        pathlib.Path(args.project_root).resolve() if args.project_root else pathlib.Path.cwd().resolve()
+    )
+    tools_mod.set_project_root(project_root)
 
     if args.config:
         return _main_config(args)
@@ -368,7 +384,7 @@ def main(argv: list[str] | None = None) -> int:
         print(f"mode {mode} | search {os.environ['TEACUP_AGENT_SEARCH']} | goal: {args.goal}\n")
 
     hub = None
-    mcp_config = _resolve_mcp(args.mcp)
+    mcp_config = _resolve_mcp(args.mcp, root=project_root)
     if mcp_config:
         from teacup_agent.mcp_tools import McpHub, load_config
 
@@ -390,7 +406,7 @@ def main(argv: list[str] | None = None) -> int:
                 )
 
     try:
-        state = _run_agent(args, the_model, run_dir, resumed)
+        state = _run_agent(args, the_model, run_dir, resumed, project_root)
     finally:
         if hub is not None:
             hub.close()
@@ -502,7 +518,7 @@ def _main_config(args) -> int:
     return 0 if state.status == "done" else 1
 
 
-def _run_agent(args, the_model, run_dir, resumed):
+def _run_agent(args, the_model, run_dir, resumed, project_root):
     return loop.run(
         goal=args.goal,
         model=the_model,
@@ -520,7 +536,7 @@ def _run_agent(args, the_model, run_dir, resumed):
         # _resolve_plan is a generic auto/on/off resolver, not plan-specific — reused
         # here rather than duplicating the same three-line dict lookup.
         reflect=_resolve_plan(args.reflect, args.live),
-        skills=_resolve_skills(args.skills),
+        skills=_resolve_skills(args.skills, root=project_root),
         subagents=args.subagents,
         subagent_max_steps=args.subagent_steps,
         on_event=_printer(args.quiet),
