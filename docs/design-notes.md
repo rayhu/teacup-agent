@@ -155,6 +155,73 @@ route around, since we do not do elicitation.
 
 ---
 
+## Agent config (`agent.yaml`)
+
+Every flag on `cli.py` describes one invocation. `agent.yaml` describes the *agent*:
+which models it can reach and how, which MCP servers, which built-in tools and skills,
+and the runtime ceilings — a file you can diff, copy between projects, and hand to
+someone else instead of a wall of flags.
+
+### It is a parallel track, not a merge
+
+```bash
+cp agent.example.yaml agent.yaml    # 1. start from the template
+$EDITOR agent.yaml                  # 2. pick a model, MCP servers, ceilings
+uv run teacup-agent --config agent.yaml "your goal"   # 3. that is all
+```
+
+Passing `--config` hands over control entirely: every other behavior flag (`--model`,
+`--api`, `--mcp`, `--max-steps`, ...) is ignored rather than partially overridden. The
+alternative — flags override individual YAML fields — means the effective config for any
+given run is "whichever of ten sources won for this field," which is worse than two clear
+modes. `goal`, `--quiet` and `--resume` stay CLI-only either way: a goal and a resume path
+name one specific invocation, not a property of what the agent is.
+
+### Secrets stay out of the file
+
+A model profile names an environment variable (`api_key_env: OPENAI_API_KEY`), it never
+holds a key. Any string value anywhere in the file may also embed `${VAR}`, expanded from
+`os.environ` (which `.env` already populates). A missing variable is a load-time
+`ValueError`, not a silently blank substitution — the same "fail loudly" instinct as
+everywhere else here. `agent.yaml` is gitignored; `agent.example.yaml` is the template,
+same pairing as `mcp.json`/`mcp.example.json`.
+
+### Reaching more than one model
+
+`models.profiles` names a model; `models.default` picks which one this run uses.
+`provider: openai-compatible` plus `base_url` reaches anything that speaks the OpenAI
+wire format — vLLM, Ollama, OpenRouter, any gateway — for free: `OpenAIModel`/
+`ResponsesModel` already accept a pre-built `client`, so `agent_config.build_model()`
+constructs one with a custom `base_url`/`api_key` instead of letting the class fall back
+to its own `OPENAI_API_KEY`-from-env default. No change to either class was needed.
+
+A native second wire protocol (Anthropic's own Messages API shape, not just a different
+URL) is a distinct follow-up, added the same way `ResponsesModel` was added beside
+`OpenAIModel` — see `docs/roadmap.md` #16.
+
+### A YAML gotcha worth naming: the "Norway problem"
+
+PyYAML (1.1 rules) parses a bare `off`/`on`/`yes`/`no` as a **boolean**, not a string. This
+schema uses `"off"`/`"on"`/`"auto"` as string sentinels in three places (`runtime.plan`,
+`runtime.run_dir`, `skills.dir`), so `plan: off` written unquoted parses to the Python
+`False`, and a naive `== "off"` check would silently fall through to a default instead.
+`agent_config._normalize_off_on()` maps the boolean back to the matching sentinel string
+before anything compares against it, so the field means the same thing quoted or not.
+`tools.subagents.enabled` is a real boolean and deliberately does **not** go through this
+— only the fields that use the words "on"/"off" as enum values do.
+
+### What is in scope, and what is reserved
+
+`models`, `mcp` (identical per-server shape to `mcp.json`, one level deeper), `tools`
+(built-in tool exclusion, the subagent delegate tool), `skills` (which directory), and
+`runtime` (the scalar ceilings) are all live. An `a2a:` block, if present, is parsed as a
+plain dict (env-expanded like everything else, but not otherwise validated) and carried
+on `AgentConfig.a2a` — nothing reads it yet: no `delegate_a2a` tool, no A2A server. It is
+kept in the schema now so the file's shape does not change again once #17/#18 land. See
+`docs/roadmap.md`.
+
+---
+
 ## The checklist
 
 Ask for "research X, **then email me the result**" and an agent will happily do the
