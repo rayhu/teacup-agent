@@ -19,6 +19,7 @@ dependencies = [
     "python-dotenv>=1.0",
     "ddgs>=9.0",          # key-less web search backend (DuckDuckGo)
     "mcp>=2.1",           # MCP client (SDK v2, speaks the 2026-07-28 stateless spec)
+    "pyyaml>=6.0",        # parses agent.yaml (a real nested document, unlike skills' frontmatter)
 ]
 
 [project.urls]
