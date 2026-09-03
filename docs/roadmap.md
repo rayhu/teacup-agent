@@ -643,6 +643,64 @@ different axes, not strong and weak versions of one thing.
 
 ---
 
+### 15. Self-recorded experience and lessons learned — DONE (2026-09-03)
+
+*(Numbered #15 as the next slot on `main` at the time this branch forked; there is
+another open PR also using #15 for something else — renumber whichever lands second.)*
+
+**Now**: when a run goes well, or goes wrong and recovers, that knowledge lived only in
+`runs/<timestamp>/state.json` until a human happened to read it. This file's own "Field
+patches" section is the human-curated version of exactly this idea (symptom, root cause,
+fix, general principle) — this item automates the *first draft* of that, without
+replacing the human curation step.
+
+**Trigger conditions**, computed for free from `trajectory.mechanical()` (no model call
+unless one fires):
+- **Experience** (success): `status == "done"`, not `salvaged`, zero `pending_todos`,
+  zero `duplicate_tool_calls`, `not action_never_attempted` — deliberately strict, so a
+  messy run that happened to finish is not written up as a model to imitate.
+- **Lesson** (recovered error): `failed_tool_calls > 0` (an `ERROR:` appeared in the
+  trace) **and** the run still ended `delivered=True` — proof the error was actually
+  worked around, not just present.
+- Neither firing costs nothing; both can fire in the same run.
+
+**What shipped**: a new [`reflect.py`](../src/teacup_agent/reflect.py), shaped exactly
+like `plan.py` — one extra model call, no tools, fed `trajectory.render_trajectory(state)`
+(already built for the judge), asking for `{"experience": "...", "lesson": "..."}` (only
+the keys that apply), each one sentence, explicitly told to generalize beyond the specific
+query and never invent a mechanism the trace does not support. Any failure (bad JSON, an
+exception) writes nothing — same "a broken planner must never stop the run" discipline as
+`plan.py`. Wired into `loop.run()`'s inner `_loop()`, called once right before the final
+`persist.save()` so the reflection call's own cost is captured in the persisted state; a
+new `reflect: bool` param plus a `--reflect {auto,on,off}` flag, same `auto` =
+on-for-`--live`/off-for-the-offline-demo convention as `--plan` (reuses the same
+`_resolve_plan()` helper — it was already a generic auto/on/off resolver, not
+plan-specific).
+
+**Storage and trust**: a second list on `Memory` (`notes`, not `facts`) in the same
+`memory.json` — inherits `NullMemory`'s no-op-during-evals safety for free, no new file.
+`recall()` renders it as a **separately labeled, lower-trust block** ("unreviewed notes
+... weigh accordingly"), never merged with the model's own `remember`-tool facts. The
+intended workflow: a human periodically skims the notes, promotes the good ones into this
+file's own "Field patches" section, and deletes the rest — the automated log is a feed for
+that review step, not a replacement for it, so `REVIEW.md`'s "the reviewer is not the
+author" holds even here.
+
+**Risk stated plainly, not just mitigated**: this is a feedback loop — the agent grading
+its own work and feeding the grade back into its own future context. A confabulated
+"lesson" or a generous self-assessment of a mediocre run compounds quietly if nothing
+catches it; the strict trigger conditions and the low-trust, human-reviewed framing above
+are the actual mitigation, not a footnote.
+
+**Verification**:
+```
+uv run pytest                          # includes tests/test_reflect.py
+uv run python -m teacup_agent.evals    # loop health, scripted model, free
+uv run teacup-agent                    # offline demo unaffected (reflect defaults off)
+```
+
+---
+
 ## Deliberately not doing
 
 - **No agent framework** (LangGraph and friends). The value of this repo is that the

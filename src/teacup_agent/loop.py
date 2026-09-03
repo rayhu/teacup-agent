@@ -26,6 +26,7 @@ from typing import Any, Callable
 from teacup_agent import context as ctx
 from teacup_agent import persist
 from teacup_agent import plan as plan_mod
+from teacup_agent import reflect as reflect_mod
 from teacup_agent import skills as skills_mod
 from teacup_agent import subagent as subagent_mod
 from teacup_agent import tools as tools_mod
@@ -384,6 +385,7 @@ def run(
     run_dir: str | pathlib.Path | None = None,  # persistence + externalization dir
     resume: AgentState | None = None,  # continue from a previously saved state
     plan: bool = False,  # decompose the goal into a checklist first (one extra call)
+    reflect: bool = False,  # write an experience/lesson note after a qualifying run
     skills: str | pathlib.Path | None = None,  # directory of skills; None = none
     subagents: bool = False,  # offer the delegate tool (a child run with its own context)
     subagent_max_steps: int = 4,
@@ -487,7 +489,7 @@ def run(
     try:
         return _loop(
             state, model, specs, emit, clock, started_at, context_limit,
-            tool_timeout, run_dir, approve,
+            tool_timeout, run_dir, approve, memory, reflect,
         )
     finally:
         if subagents:
@@ -507,6 +509,8 @@ def _loop(
     tool_timeout: float,
     run_dir: pathlib.Path | None,
     approve: Callable[[ToolCall, Any], bool],
+    memory: Memory,
+    reflect: bool,
 ) -> AgentState:
     """The loop itself. Split out only so run() can guarantee the teardown above."""
     while True:
@@ -599,6 +603,12 @@ def _loop(
     state.elapsed = clock() - started_at
     if state.status != "done" and not state.answer:
         state.answer = f"(no final answer; stopped because: {state.status})"
+    if reflect:
+        # Before the final persist, so the reflection call's own cost is captured in
+        # the state that gets written to disk.
+        written = reflect_mod.maybe_record(state, model, memory)
+        if written:
+            emit("reflected", kinds=written)
     if run_dir is not None:  # the final state matters most for review and evals
         persist.save(state, run_dir)
         emit("saved", path=str(run_dir / persist.FILENAME))

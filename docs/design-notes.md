@@ -273,6 +273,72 @@ metrics first, then listen to the judge's qualitative read.
 
 ---
 
+## Self-recorded experience and lessons
+
+A run's own knowledge of how it went used to live only in `runs/<timestamp>/state.json`,
+read by a human if anyone got around to it. `docs/roadmap.md`'s own "Field patches"
+section is the human-curated version of exactly this idea (symptom, root cause, fix,
+general principle) — `reflect.py` automates the *first draft*.
+
+### Trigger conditions, computed for free
+
+Reusing `trajectory.mechanical()` (already free and deterministic — no model call
+happens unless one of these fires):
+
+| Note | Fires when |
+| --- | --- |
+| `experience` | `status == "done"`, not `salvaged`, zero `pending_todos`, zero `duplicate_tool_calls`, and the action asked for was actually attempted |
+| `lesson` | at least one `ERROR:` appeared in the trace **and** the run still ended `delivered=True` — proof the failure was worked around, not just present |
+
+Both conditions are deliberately strict. A run that finished but left something open,
+duplicated a call, or never attempted the action it was asked for is not written up as a
+model to imitate — the whole point of the eval metrics existing is to catch exactly that,
+and this reuses them rather than re-deriving a looser version.
+
+### The write itself
+
+Shaped exactly like `plan.py`'s `decompose()`: one extra model call, no tools, fed
+`trajectory.render_trajectory(state)` (already built for the judge), asked for
+`{"experience": "...", "lesson": "..."}` with only the keys whose trigger fired, each one
+sentence, told explicitly to generalize beyond the specific query and never invent a
+mechanism the trajectory does not support. Any failure — bad JSON, a raised exception, the
+model omitting a field whose trigger fired — writes nothing, the same "a broken planner
+must never stop the run" discipline `plan.py` already has. `ScriptedModel` grew a matching
+`reflection={"experience": ..., "lesson": ...}` constructor arg, so evals can script this
+call the same way they already script the planner and the compaction summarizer.
+
+Called once inside `_loop()`, right before the final `persist.save()` — so the
+reflection call's own cost is captured in the state that gets written to disk, even
+though `state.status` is already final by the time it runs.
+
+### Storage is a second, lower-trust tier
+
+`Memory` gained `notes` alongside `facts`, in the same `memory.json`: written by
+`Memory.note(kind, text)`, never by the model's own `remember` tool. `recall()` renders
+them as a **separately labeled block**, after the facts block, prefixed "unreviewed...
+weigh accordingly" — a fact the model chose to remember mid-task and a note the harness
+wrote about a run after it already ended are not the same kind of claim, and conflating
+them would erase that distinction exactly where it matters most.
+
+### The risk this does not pretend to have solved
+
+This is a feedback loop: the agent grading its own work and feeding the grade back into
+its own future context. A confabulated "lesson", or a generous self-assessment of a
+mediocre run, compounds quietly if nothing ever looks at it. The strict trigger
+conditions and the low-trust framing above are real mitigations, not decoration, but they
+are not a substitute for the actual answer: a human periodically reads the accumulated
+`notes`, promotes the good ones into this file's own "Field patches" section (reviewed,
+durable, attributed to a real run), and deletes the rest. The automated log is a feed for
+that review step. `REVIEW.md`'s "the reviewer is not the author" is not a rule that stops
+applying just because the author is a harness instead of a human.
+
+```bash
+uv run teacup-agent --live --reflect on "..."     # force it (auto already does this for --live)
+uv run teacup-agent --reflect off "..."            # skip it even with --live
+```
+
+---
+
 ## Persistence and resume
 
 Every step writes the full state to `runs/<timestamp>/state.json` (temp file plus

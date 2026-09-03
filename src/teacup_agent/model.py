@@ -323,10 +323,12 @@ class ScriptedModel:
         script: list[Reply],
         fallback: str = "(script exhausted)",
         plan_items: list[str] | None = None,
+        reflection: dict[str, str] | None = None,
     ):
         self.script = list(script)
         self.fallback = fallback
         self.plan_items = plan_items or ["research the topic", "email the result"]
+        self.reflection = reflection or {}  # {"experience": ...} and/or {"lesson": ...}
         self.summaries = 0
         self.calls: list[list[dict[str, Any]]] = []  # messages seen per call, for assertions
         self.tool_specs: list[list[dict[str, Any]]] = []  # tool list seen per call
@@ -340,6 +342,8 @@ class ScriptedModel:
             return assistant_says("[summary] Facts A and B verified; attempt C failed.")
         if first.startswith("Break the user's request"):
             return assistant_says(json.dumps(self.plan_items, ensure_ascii=False))
+        if first.startswith("Below is the full trajectory of one completed agent run"):
+            return assistant_says(json.dumps(self.reflection, ensure_ascii=False))
 
         self.calls.append(list(messages))
         self.tool_specs.append(list(tools))
