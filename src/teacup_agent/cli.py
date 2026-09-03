@@ -337,12 +337,23 @@ def main(argv: list[str] | None = None) -> int:
 
     # Resolved once, here, rather than left for read_file() to recompute Path.cwd()
     # per call: the project-root boundary is a stated fact of the run, not a property
-    # of the shell it happened to be launched from (docs/roadmap.md #14).
+    # of the shell it happened to be launched from (docs/roadmap.md #14). Scoped with
+    # try/finally to this one main() call, the same "set it for the run, clear it
+    # after" discipline REGISTRY-mutating callers (skills, subagents, MCP, A2A) already
+    # follow — without this, _project_root is a module global that would otherwise
+    # leak into whatever calls main() next in the same process (harmless across real
+    # CLI invocations, which each get a fresh process, but not across a test suite's).
     project_root = (
         pathlib.Path(args.project_root).resolve() if args.project_root else pathlib.Path.cwd().resolve()
     )
     tools_mod.set_project_root(project_root)
+    try:
+        return _main(args, project_root)
+    finally:
+        tools_mod.set_project_root(None)
 
+
+def _main(args, project_root: pathlib.Path) -> int:
     if args.config:
         return _main_config(args)
 
