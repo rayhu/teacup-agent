@@ -135,13 +135,41 @@ skills:
 
 
 def test_a2a_card_is_parsed_as_a_plain_dict(tmp_path, monkeypatch):
-    """The card is this item's own concern (building an AgentCard); this module just
-    carries it. Peers (#17's concern) are a separate, independent branch/PR."""
+    """The card is #18's concern (building an AgentCard); this module just carries it.
+    Peers are #17's concern — both landed, so both get real shape here."""
     monkeypatch.setenv("FAKE_KEY", "sk-test")
     text = MINIMAL + "\na2a:\n  card:\n    name: my-agent\n"
     cfg = agent_config.load(_write(tmp_path, text))
     assert cfg.a2a.card == {"name": "my-agent"}
     assert cfg.a2a.peers == {}
+
+
+def test_a2a_peers_get_real_shape(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KEY", "sk-test")
+    text = MINIMAL + (
+        "\na2a:\n  peers:\n    finance:\n      url: https://agents.example.com/finance\n"
+        "      api_key_env: FINANCE_TOKEN\n"
+    )
+    cfg = agent_config.load(_write(tmp_path, text))
+    peer = cfg.a2a.peers["finance"]
+    assert peer.url == "https://agents.example.com/finance"
+    assert peer.api_key_env == "FINANCE_TOKEN"
+
+
+def test_a2a_peer_missing_url_is_rejected(tmp_path, monkeypatch):
+    monkeypatch.setenv("FAKE_KEY", "sk-test")
+    text = MINIMAL + "\na2a:\n  peers:\n    finance:\n      api_key_env: FINANCE_TOKEN\n"
+    with pytest.raises(ValueError, match="a2a.peers.finance"):
+        agent_config.load(_write(tmp_path, text))
+
+
+def test_a2a_defaults_to_no_peers_and_no_card(tmp_path, monkeypatch):
+    """MINIMAL has no a2a: block at all — the default must not crash anything reading
+    cfg.a2a.peers/cfg.a2a.card downstream."""
+    monkeypatch.setenv("FAKE_KEY", "sk-test")
+    cfg = agent_config.load(_write(tmp_path, MINIMAL))
+    assert cfg.a2a.peers == {}
+    assert cfg.a2a.card == {}
 
 
 def test_the_shipped_example_config_parses(monkeypatch):
@@ -154,7 +182,7 @@ def test_the_shipped_example_config_parses(monkeypatch):
         "description": "What this agent does.",
         "version": "0.1.0",
     }
-    assert cfg.a2a.peers == {}  # peers stay commented out in the template (#17)
+    assert cfg.a2a.peers == {}  # peers stay commented out in the template
 
 
 # --- build_model ------------------------------------------------------------------
@@ -252,3 +280,48 @@ def test_main_config_wires_reflect_through_to_the_loop(tmp_path, monkeypatch):
     assert cli._main_config(args) == 0
     memory_file = tmp_path / "memory.json"
     assert "wiring reached the loop" in memory_file.read_text(encoding="utf-8")
+
+
+def test_main_config_wires_delegate_a2a_through_the_cli(tmp_path, monkeypatch):
+    """The --config path's own A2AHub construction (cli.py's _main_config, not the
+    A2AHub unit tests in test_a2a_client.py) actually reaches loop.run(): a scripted
+    model calls delegate_a2a against a real in-process a2a-sdk server."""
+    import pathlib as _pathlib
+    import sys as _sys
+
+    import httpx
+
+    from teacup_agent import cli
+    from teacup_agent.a2a.client import A2AHub
+
+    _sys.path.insert(0, str(_pathlib.Path(__file__).parent / "fixtures"))
+    from demo_a2a_server import build_app  # noqa: E402
+
+    monkeypatch.setenv("FAKE_KEY", "sk-test")
+    # delegate_a2a requires approval by design (AGENTS.md rule 4); "allow" here is the
+    # test explicitly exercising the executed path, not a change to that default.
+    text = MINIMAL.replace("plan: off", "plan: off\n  approve: allow")
+    text += "\na2a:\n  peers:\n    demo:\n      url: http://test\n"
+    cfg_path = _write(tmp_path, text)
+
+    test_transport = httpx.ASGITransport(app=build_app())
+    real_init = A2AHub.__init__
+    monkeypatch.setattr(A2AHub, "__init__", lambda self: real_init(self, transport=test_transport))
+
+    scripted = model_mod.ScriptedModel(
+        script=[
+            model_mod.assistant_calls([("delegate_a2a", {"peer": "demo", "task": "ping"})]),
+            model_mod.assistant_says("done"),
+        ]
+    )
+    monkeypatch.setattr(agent_config, "build_model", lambda profile: scripted)
+    monkeypatch.chdir(tmp_path)
+
+    args = types.SimpleNamespace(
+        goal="delegate something", config=str(cfg_path), quiet=True, resume=None
+    )
+    assert cli._main_config(args) == 0
+    tool_result = next(
+        m for m in scripted.calls[-1] if m.get("name") == "delegate_a2a"
+    )
+    assert tool_result["content"] == "echo: ping"

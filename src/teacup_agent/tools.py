@@ -183,7 +183,7 @@ def _throttle() -> None:
 def _search_web_backend(query: str, max_results: int) -> str:
     """Real search backend: DuckDuckGo, no API key required.
 
-    Failures are retried with backoff (1s / 2s / 4s). "The search failed" and
+    Failures are retried: 3 attempts, sleeping 1s then 2s. "The search failed" and
     "there is nothing to find" are **completely different** statements, and the
     former must never masquerade as the latter — that is how a model concludes
     that something does not exist in the world.
@@ -432,6 +432,15 @@ def update_todo(index: int, status: str, note: str = "") -> str:
         return "ERROR: this run has no checklist"
     if not 1 <= index <= len(_todo):
         return f"ERROR: no item {index}; the checklist has {len(_todo)} items"
+    # The schema declares an enum, but nothing enforces it on the way in. Accepting
+    # an unrecognised status would settle the item anyway — the exact "silently
+    # half-done" failure the checklist exists to prevent, reachable through one
+    # malformed argument. Refuse it as a tool result so the model can re-send.
+    if status not in ("done", "blocked"):
+        return (
+            f"ERROR: unknown status {status!r}; nothing was changed. Use 'done' when the "
+            "item is finished, or 'blocked' with a note saying why it cannot be."
+        )
     item = _todo[index - 1]
     item.done = True  # blocked items are settled too: they stop being outstanding
     item.note = note if status == "blocked" else ""

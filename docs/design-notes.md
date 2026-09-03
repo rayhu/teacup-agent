@@ -214,10 +214,91 @@ before anything compares against it, so the field means the same thing quoted or
 ### What is in scope, and what is reserved
 
 `models`, `mcp` (identical per-server shape to `mcp.json`, one level deeper), `tools`
-(built-in tool exclusion, the subagent delegate tool), `skills` (which directory), and
-`runtime` (the scalar ceilings) are all live. `a2a.card` — this agent's own identity when
-served — is live as of this item (below); `a2a.peers` (the `delegate_a2a` client side) is
-a separate, independent item (#17) landing on its own branch/PR. See `docs/roadmap.md`.
+(built-in tool exclusion, the subagent delegate tool), `skills` (which directory),
+`runtime` (the scalar ceilings), `a2a.peers` and `a2a.card` are all live — the last two
+landed as two independent items (#17 client, #18 server) that happened to give
+`AgentConfig.a2a` the same real shape at the same time; see `docs/roadmap.md`.
+
+---
+
+## Agent2Agent (A2A) client
+
+`subagent.py`'s `delegate` hands a subtask to a child **in-process** loop. `delegate_a2a`
+is the same idea across a process (or machine) boundary, to an agent that may not even be
+teacup-agent — built on the official `a2a-sdk` rather than hand-rolling
+JSON-RPC/task-lifecycle/SSE, the same "depend on the official SDK" choice `mcp_tools.py`
+already made for MCP.
+
+### Setting it up
+
+```yaml
+a2a:
+  peers:
+    finance-agent:
+      url: https://agents.example.com/finance
+      api_key_env: FINANCE_AGENT_TOKEN   # optional; omit for no auth header
+```
+
+Only reachable through `agent.yaml` (`--config`) — there is no bare `--a2a` flag, the
+same choice #15 made for `a2a.peers`' sibling blocks. Once configured, the model sees one
+tool, `delegate_a2a(peer, task)`, regardless of how many peers are listed:
+
+```
+  [a2a] delegate_a2a available for peers: finance-agent
+  [step 1] -> delegate_a2a({"peer": "finance-agent", "task": "..."})
+```
+
+`requires_approval=True` is not a default to reconsider: an outbound call to a
+third-party, possibly-billed agent is exactly the side effect AGENTS.md rule 4 (deny by
+default when nobody is watching) exists for.
+
+### Where the hub lives, and why
+
+`subagent.py` and `skills.py` register their tool(s) *inside* `loop.run()` because they
+need nothing external. `mcp_tools.py`'s `McpHub` instead lives in `cli.py`, constructed
+once per process invocation, because it owns a real external resource (child processes,
+sessions) that doesn't belong to any single `loop.run()` call. An A2A peer connection is
+the second kind — an `httpx` client and a resolved Agent Card, configured once from
+`agent.yaml`, not per-turn — so `A2AHub` (`src/teacup_agent/a2a/client.py`) follows the
+MCP shape: built in `cli.py`'s `_main_config()` next to `McpHub`, torn down in the same
+`finally`. This means **`loop.py` needed no changes at all**: the approval gate already
+reads `Tool.requires_approval` generically, so registering the tool with that flag set is
+everything #17 needed from the loop.
+
+Unlike MCP (one server -> N distinct tools, each with the server's own schema), every A2A
+peer shares one tool shape, so there is no per-peer schema to fetch upfront. Connecting is
+lazy: the first call to a given peer resolves its Agent Card and opens an
+`httpx.AsyncClient`, cached for the rest of the run. Only each peer's `api_key_env` is
+resolved eagerly, at `register()` time — a missing token fails at startup rather than
+silently mid-run, the same discipline `agent_config.build_model()` already holds for
+model profiles.
+
+### The async/sync bridge
+
+`a2a-sdk`'s client is async (`httpx`-based); `loop.py`'s tool-execution thread pool calls
+tool functions synchronously. `A2AHub` solves this exactly the way `McpHub` already does:
+one background thread runs one `asyncio` event loop for the hub's whole lifetime, and
+`_run(coro, timeout)` bridges a synchronous call onto it with
+`asyncio.run_coroutine_threadsafe(coro, self._loop).result(timeout)`. Every failure —
+connection error, a remote task that ends in `TASK_STATE_FAILED`/`REJECTED`/`CANCELED`, or
+one that asks for interactive input (`TASK_STATE_INPUT_REQUIRED`/`AUTH_REQUIRED` — this
+client does not do elicitation, same as MCP's `input_required`) — becomes an
+`"ERROR: ..."` string, never a raised exception, so the model can self-correct.
+
+### An API surface note
+
+`a2a-sdk` (v1.1.2, confirmed against the installed package rather than blog posts, which
+described an older, different shape) builds every message as a **protobuf** type
+(`a2a.types.SendMessageRequest` is literally `a2a_pb2.SendMessageRequest`), with
+`a2a.helpers` providing plain-Python constructors (`new_text_message`,
+`get_stream_response_text`) so callers rarely touch protobuf directly.
+`create_client(agent=<url string>, ...)` looks like the simplest entry point, but its
+internal card resolution does not reliably go through the `httpx_client` passed in
+`ClientConfig` — verified directly against the installed package, not assumed. `A2AHub`
+resolves the card explicitly with `A2ACardResolver` first and passes the resolved
+`AgentCard` to `create_client` instead, which is also what lets the test suite
+(`tests/test_a2a_client.py`, `tests/fixtures/demo_a2a_server.py`) drive a real in-process
+server through `httpx.ASGITransport` with zero real sockets.
 
 ---
 

@@ -41,20 +41,19 @@ tools:
 skills:
   dir: skills          # a path, or "off" to disable
 
-# Agent2Agent (A2A) protocol config. `card` is this agent's own identity, read by
-# teacup-agent-serve (needs `uv sync --extra a2a-server`) when it publishes an Agent
-# Card. `peers` offers the delegate_a2a tool, one entry per remote agent this agent may
-# hand a task to (requires approval by default — see AGENTS.md rule 4); a separate,
-# independent item (docs/roadmap.md #17) on its own branch/PR.
+# Agent2Agent (A2A) protocol config. `peers` offers the delegate_a2a tool, one entry per
+# remote agent this agent may hand a task to (requires approval by default — see
+# AGENTS.md rule 4). `card` is this agent's own identity, read by teacup-agent-serve
+# (needs `uv sync --extra a2a-server`) when it publishes an Agent Card.
 a2a:
   card:
     name: my-agent
     description: "What this agent does."
     version: "0.1.0"
-  # peers:
-  #   finance-agent:
-  #     url: https://agents.example.com/finance
-  #     api_key_env: FINANCE_AGENT_TOKEN
+  peers: {}
+    # finance-agent:
+    #   url: https://agents.example.com/finance
+    #   api_key_env: FINANCE_AGENT_TOKEN
 
 runtime:
   max_steps: 8
