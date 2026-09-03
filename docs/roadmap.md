@@ -2,11 +2,10 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #14, #15, #17, #18 and #19 are done (except the fine-grained
-permissions part of #6). Five items that were never on the roadmap were added after
-reviewing real runs (see "Field patches" at the end).
-Next up: #13 (hooks) is the mechanism #14's deferred argument-aware allowlists still
-want; then #11 (a better search backend) and #16 (multi-provider price overrides, a
+**Progress**: #1-#10, #12, #13, #14, #15, #17, #18 and #19 are done (except the
+fine-grained permissions part of #6). Five items that were never on the roadmap were
+added after reviewing real runs (see "Field patches" at the end).
+Next up: #11 (a better search backend) and #16 (multi-provider price overrides, a
 native Anthropic path), both scoped but not started.
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
@@ -527,27 +526,63 @@ expensive to find, and one successful load is not proof of reliable loading.
 
 ---
 
-### 13. Hooks
+### 13. Hooks — DONE (2026-09-03)
 
-**Now**: every guardrail is hardcoded in the loop. The per-turn cap, the approval gate and
-the forced wrap-up are all good behaviour, but a user who wants their own rule has to edit
+**Now**: every guardrail was hardcoded in the loop. The per-turn cap, the approval gate and
+the forced wrap-up are all good behaviour, but a user who wants their own rule had to edit
 `loop.py`.
 
 **Why it is worth it**: the harness chapter of the SDLC paper lists hooks as a first-class
 component, "deterministic code that runs at specific lifecycle points: before a tool call,
 after a file edit, before a commit. Hooks are the place for things the agent should never
-forget but often does." It is also the mechanism #14 needs: an allowlist and an output
+forget but often does." It is also the mechanism #14 named: an allowlist and an output
 audit are both hooks, and adding them as hooks means the loop does not grow a security
 section.
 
-**How**: a small registry of callbacks at named points, most usefully `before_tool_call`
-(may veto, returning a string that becomes the tool result) and `after_tool_result` (may
-rewrite). Load them from `hooks.py` in the project, the same opt-in-by-file convention as
-`mcp.json` and `skills/`.
+**What shipped**: a new [`hooks.py`](../src/teacup_agent/hooks.py) module — the
+framework's own loader, distinct from the project-local `hooks.py` it loads via
+`importlib.util.spec_from_file_location` under an internal module name so the two never
+collide. A project's `hooks.py` may define either or both of `before_tool_call(name,
+arguments) -> str | None` (a string vetoes the call, auto-prefixed `ERROR:` if it is not
+already) and `after_tool_result(name, arguments, result) -> str | None` (a string replaces
+the result; `None` leaves it unchanged). Both call sites live in `loop.py`'s
+`execute_calls()`: the veto is checked first, in the same serial loop the approval gate
+already runs in and before it — cheaper (a local Python call, not a possibly-interactive
+prompt) and parallel to it, not a replacement, so a hook can block a call the approval
+gate would have allowed and vice versa; the rewrite runs right after `emit("tool_result",
+...)` and before the externalize length check, so ordinary externalization still applies
+to whatever the hook returns. Both flow through the one existing
+`state.messages.append(result_item(...))` — a veto is just a third `skip_reason`
+(`"hook_vetoed"`) alongside `"throttled"`/`"denied"`, no new message-ordering code. A hook
+that raises is caught at the call site, emits a visible `hook_error` event, and falls
+back to "no veto" / "unchanged" — the same "one bad server must not sink the run"
+tolerance `cli.py` already holds MCP connections to. Loaded and torn down the same
+in-process way skills are (`loop.run()`'s own `hooks:` param, a `hooks_mod.disable()` in
+the existing `finally:` teardown) since a project's `hooks.py` is source code with no
+external resource to hold open, unlike MCP/A2A's hubs. Wired into both tracks: `cli.py`
+gets `_resolve_hooks()` (mirrors `_resolve_mcp`/`_resolve_skills`: off / explicit path /
+`./hooks.py` if present) and a `--hooks PATH` flag; `agent_config.py` gets a `hooks:`
+block (`path: hooks.py` / `off`, defaulting off since unlike skills/mcp there is no
+harmless "load it if it happens to be there" for executable code). `hooks.example.py`
+demonstrates both: blocking `send_email` unless the recipient's domain is allowlisted
+(the DoD's own "block by argument, not just by tool name"), and redacting anything that
+looks like a bare API key from a result before it reaches the model.
 
 **Definition of done**: a project-local hook can block a tool call by argument (not just
 by tool name) without touching `loop.py`, and the veto reaches the model as a normal
 `ERROR:` result.
+
+**Verification**:
+```
+uv run pytest                          # includes tests/test_hooks.py, 228 passed
+uv run python -m teacup_agent.evals    # loop health, scripted model, free, 21/21 passed
+uv run teacup-agent                    # offline demo unaffected (no hooks.py by default)
+```
+Manual check: `hooks.example.py` copied to `hooks.py`, a scripted `send_email` call to
+`friend@gmail.com` (not on the allowlist) with the approval gate itself set to allow —
+`result: ERROR: recipient domain 'gmail.com' is not on the allowlist (example.com,
+internal.example.org)`, `executed: False` — the hook blocked a call the approval gate
+would have let through.
 
 ---
 
@@ -628,9 +663,11 @@ different axes, not strong and weak versions of one thing.
 - ✅ **done**: `read_file` at an explicit project root instead of `Path.cwd()`
   (exposure 3), resolved once at startup from the CLI's working directory and passed in,
   so the boundary is a stated fact of the run rather than a property of the user's shell;
-- argument-aware allowlists as hooks (#13) — **deferred**: #13 (`hooks.py`,
-  `before_tool_call`) has not landed yet, so this stays future work rather than part of
-  this item's own definition of done, which never required it;
+- argument-aware allowlists as hooks (#13) — ✅ **now available**: #13's `hooks.py`
+  `before_tool_call` shipped after this item, so a project can add its own allowlist
+  (`hooks.example.py` demonstrates exactly this for `send_email`) without touching
+  `loop.py`; this item's own definition of done never required it, and still stands
+  on its own;
 - ✅ **done**: a `docs/threat-model.md` that states plainly what is trusted, what is not,
   and what this repo does *not* defend against — including that a stdio MCP server is
   unsandboxed code execution — so a fork knows what it is inheriting.

@@ -14,6 +14,7 @@ dist/
 .env.local
 mcp.json          # may carry server credentials in "env"; mcp.example.json is the template
 agent.yaml        # same reason; agent.example.yaml is the template
+hooks.py          # project-specific guardrail code; hooks.example.py is the template
 
 # Tool caches
 .mypy_cache/

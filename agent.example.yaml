@@ -41,6 +41,14 @@ tools:
 skills:
   dir: skills          # a path, or "off" to disable
 
+# Project-local guardrails, run at two points in the loop: before_tool_call may veto
+# a call (by argument, not just by tool name), after_tool_result may rewrite what came
+# back. Off by default — hooks.py is executable code the loop runs on every tool call,
+# so unlike skills/mcp there is no "load it if it happens to be there". See
+# hooks.example.py for a template.
+hooks:
+  path: off            # a path, e.g. hooks.py
+
 # Agent2Agent (A2A) protocol config. `peers` offers the delegate_a2a tool, one entry per
 # remote agent this agent may hand a task to (requires approval by default — see
 # AGENTS.md rule 4). `card` is this agent's own identity, read by teacup-agent-serve

@@ -68,6 +68,7 @@ src/teacup_agent/
 ├── persist.py     persistence  save state every step, resume from it
 ├── mcp_tools.py   MCP          borrow tools from MCP servers
 ├── skills.py      skills       procedures loaded only when the task matches
+├── hooks.py       hooks        project-local before_tool_call veto / after_tool_result rewrite
 ├── subagent.py    delegation   a child run with its own context
 ├── trajectory.py  scoring      grade a real run: mechanical metrics + an LLM judge
 ├── reflect.py     reflection   write down what worked, or what broke and got fixed
@@ -80,6 +81,7 @@ tests/                  pytest: the eval cases plus unit tests
 examples/               runnable demos, starting with approval_demo.py
 mcp.example.json        template for MCP servers
 agent.example.yaml      template for a YAML-described agent (--config)
+hooks.example.py        template for project-local hooks (before_tool_call / after_tool_result)
 AGENTS.md               how to work in this repo (CLAUDE.md just imports it)
 REVIEW.md               the independent review pass a change goes through
 docs/workflow.md        how a change gets from an idea to main
@@ -98,7 +100,7 @@ NOTES.md                the original study notes this grew from
 | Model | `model.py`, `agent_config.py` | Responses API (default) and Chat Completions with cache-aware pricing, an offline scripted model, and `--config agent.yaml` for naming several profiles (including any OpenAI-compatible endpoint via `base_url`) and picking one as the default | Claude's own Messages API, per-profile cost tables (roadmap #16) |
 | State | `state.py` | steps, budget, time, status machine, tool trace; saved every step and resumable | distributed or concurrent runs |
 | Tools | `tools.py`, `mcp_tools.py`, `a2a/client.py` | six built-ins (search, calculate, read file, remember, checklist, send mail) plus anything an MCP server exposes, plus `delegate_a2a` for peers named in `agent.yaml` | more servers |
-| Control Loop | `loop.py` | four brakes, parallel tools, retries, a completion check, delegation to subagents | parallel subagents, delegated planning |
+| Control Loop | `loop.py`, `hooks.py` | four brakes, parallel tools, retries, a completion check, delegation to subagents, plus project-local `before_tool_call`/`after_tool_result` hooks | parallel subagents, delegated planning |
 | Memory | `memory.py`, `reflect.py` | JSON file with dedupe, keeping the last N facts, plus a lower-trust `notes` tier auto-written after a qualifying run (an experience or a lesson) | vector store, summarization, relevance recall |
 | Evals | `evals.py`, `trajectory.py` | offline protocol cases plus real-trajectory scoring | fixed task suites, cross-version regression |
 
@@ -131,6 +133,10 @@ Each of these earned its place by fixing a run that had gone wrong. The stories 
   only its conclusion comes back, so the bulk never enters this context.
 - **Skills**: a procedure's one-line description is always loaded, its body only when the
   task matches, so the agent carries many specialities and pays for the one it uses.
+- **Hooks**: a project's `hooks.py` (opt-in by file, same convention as `mcp.json` and
+  `skills/`) can veto a tool call by argument, not just by name, before it runs, or rewrite
+  a result after — without touching `loop.py`. A veto reaches the model as a normal
+  `ERROR:` result; see `hooks.example.py`.
 - **Self-recorded experience**: a run that finished cleanly, or recovered from an error,
   can write a short note about it — stored as a lower-trust tier, separate from facts the
   model chose to remember, and meant to be reviewed rather than trusted outright.

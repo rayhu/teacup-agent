@@ -202,10 +202,10 @@ URL) is a distinct follow-up, added the same way `ResponsesModel` was added besi
 ### A YAML gotcha worth naming: the "Norway problem"
 
 PyYAML (1.1 rules) parses a bare `off`/`on`/`yes`/`no` as a **boolean**, not a string. This
-schema uses `"off"`/`"on"`/`"auto"` as string sentinels in four places (`runtime.plan`,
-`runtime.reflect`, `runtime.run_dir`, `skills.dir`), so `plan: off` written unquoted parses
-to the Python `False`, and a naive `== "off"` check would silently fall through to a
-default instead.
+schema uses `"off"`/`"on"`/`"auto"` as string sentinels in five places (`runtime.plan`,
+`runtime.reflect`, `runtime.run_dir`, `skills.dir`, `hooks.path`), so `plan: off` written
+unquoted parses to the Python `False`, and a naive `== "off"` check would silently fall
+through to a default instead.
 `agent_config._normalize_off_on()` maps the boolean back to the matching sentinel string
 before anything compares against it, so the field means the same thing quoted or not.
 `tools.subagents.enabled` is a real boolean and deliberately does **not** go through this
@@ -873,6 +873,67 @@ model demonstrably loads the skill on a research task, moving them is a real opt
 it wants its own before-and-after measurement: the rules currently fix a failure that was
 expensive to find, and "it loaded the skill once" is not the same as "it loads the skill
 whenever those rules matter".
+
+---
+
+## Hooks
+
+Every guardrail up to this point lived inside `loop.py`: the per-turn cap, the approval
+gate, the forced wrap-up. Those are the loop's own rules and belong there. A user's own
+rule — block `send_email` outside a domain allowlist, redact anything that looks like a
+key before it reaches the model — should not require editing `loop.py` to add. `hooks.py`
+in the project (opt-in by file, same convention as `mcp.json` and `skills/`) may define
+either or both:
+
+```python
+def before_tool_call(name: str, arguments: dict) -> str | None:
+    ...  # a string vetoes the call; None means allowed
+
+def after_tool_result(name: str, arguments: dict, result: str) -> str | None:
+    ...  # a string replaces the result; None means unchanged
+```
+
+**Two call sites, both already in `execute_calls()`.** `before_tool_call` runs in the same
+serial per-call loop the approval gate does, and **first** — cheaper (a local Python call,
+not a possibly-interactive prompt) and parallel to the gate, not a replacement for it: a
+hook can block a call the approval gate would have allowed, and vice versa, and both stay
+independent. It needs the call's **parsed** arguments to satisfy the roadmap's own "block
+by argument, not just by tool name," unlike every other path here, which works with the
+raw JSON string — a bad parse falls back to `{}` rather than duplicating
+`tools.execute()`'s own error message. `after_tool_result` runs right after
+`emit("tool_result", ...)` and before the externalize length check, so a rewritten result
+still externalizes normally if it is long.
+
+**The veto is just a third skip reason.** `loop.py` already threads `"throttled"` and
+`"denied"` through the one call to `state.messages.append(result_item(...))` that keeps
+the message protocol's invariants (`AGENTS.md` rule 1) intact; `"hook_vetoed"` is a third
+branch into code that already handles this correctly, not new message-ordering logic. The
+returned string is auto-prefixed `ERROR:` (unless it already is one) by `hooks.veto()`
+itself, so a hook author never has to remember the convention "the veto reaches the model
+as a normal `ERROR:` result."
+
+**A broken hook must not sink the run.** `hooks.py`'s `veto()`/`rewrite()` do not swallow
+exceptions themselves; both call sites in `loop.py` wrap the call in `try/except
+Exception`, emit a visible `hook_error` event, and fall back to "no veto" / "unchanged" —
+the same tolerance `cli.py` already holds a bad MCP server connection to ("one bad server
+must not sink the run").
+
+**Where it lives, and why not next to MCP/A2A.** Loaded and torn down the same
+per-run, in-process way skills are — `loop.run()`'s own `hooks` kwarg, `hooks_mod.load()`
+called before the loop starts, `hooks_mod.disable()` in the existing `finally:` teardown —
+rather than in `cli.py` beside `McpHub`/`A2AHub`. A project's `hooks.py` is source code
+executed in-process with no external resource to hold open; MCP and A2A own a real
+connection across the whole CLI process, which is the actual distinction that decides
+where a per-run capability's lifecycle lives in this codebase.
+
+**The framework's loader is not the project's file.** `src/teacup_agent/hooks.py` (this
+repo's module) is what every run imports; the *project's* `hooks.py` is loaded via
+`importlib.util.spec_from_file_location` under an internal module name
+(`_teacup_agent_project_hooks`), so the two files with the same basename never collide in
+`sys.modules`. This is genuinely new territory for the codebase: `mcp_tools.load_config()`
+parses JSON and `skills.discover()` hand-parses Markdown frontmatter — both read *data*.
+A project's `hooks.py` is source that must be **executed** to produce callables, which
+neither existing loader's shape could be stretched to cover.
 
 ---
 

@@ -16,6 +16,7 @@ Three traps, all marked in the code below:
 from __future__ import annotations
 
 import hashlib
+import json
 import pathlib
 import time
 from datetime import date
@@ -24,6 +25,7 @@ from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable
 
 from teacup_agent import context as ctx
+from teacup_agent import hooks as hooks_mod
 from teacup_agent import persist
 from teacup_agent import plan as plan_mod
 from teacup_agent import reflect as reflect_mod
@@ -295,6 +297,25 @@ def execute_calls(
         if cap > 0 and i >= cap:
             results[i], reasons[i] = throttled_msg, "throttled"
             continue
+        # A project hook is checked first — cheaper than the approval gate (a local
+        # Python call, not a possibly-interactive prompt) and parallel to it, not a
+        # replacement: a hook can block a call the approval gate would have allowed,
+        # and vice versa. It needs parsed arguments, unlike the raw JSON string every
+        # other path here works with; a bad parse falls back to {} rather than
+        # duplicating tools.execute()'s own error message.
+        try:
+            parsed_args = json.loads(call.arguments)
+        except (json.JSONDecodeError, TypeError):
+            parsed_args = {}
+        try:
+            veto = hooks_mod.veto(call.name, parsed_args)
+        except Exception as e:  # a broken hook must not sink the run
+            veto = None
+            emit("hook_error", name=call.name, point="before_tool_call", error=f"{type(e).__name__}: {e}")
+        if veto is not None:
+            results[i], reasons[i] = veto, "hook_vetoed"
+            emit("hook_vetoed", name=call.name, step=state.step)
+            continue
         # The approval check must happen **before** the thread pool and serially —
         # it either asks a human or denies outright.
         spec = tools_mod.REGISTRY.get(call.name)
@@ -346,6 +367,14 @@ def execute_calls(
         executed = i not in reasons
         if executed:
             emit("tool_result", name=call.name, result=result, step=state.step)
+            try:
+                parsed_args = json.loads(call.arguments)
+            except (json.JSONDecodeError, TypeError):
+                parsed_args = {}
+            try:
+                result = hooks_mod.rewrite(call.name, parsed_args, result)
+            except Exception as e:  # a broken hook must not sink the run
+                emit("hook_error", name=call.name, point="after_tool_result", error=f"{type(e).__name__}: {e}")
             # Externalize: a big result goes to disk and the context keeps an excerpt
             # plus the path (the model can read it back with read_file). The trace
             # records the trimmed version — it represents what the model actually
@@ -387,6 +416,7 @@ def run(
     plan: bool = False,  # decompose the goal into a checklist first (one extra call)
     reflect: bool = False,  # write an experience/lesson note after a qualifying run
     skills: str | pathlib.Path | None = None,  # directory of skills; None = none
+    hooks: str | pathlib.Path | None = None,  # project hooks.py; None = none
     subagents: bool = False,  # offer the delegate tool (a child run with its own context)
     subagent_max_steps: int = 4,
     exclude_tools: list[str] | None = None,  # names the model must not see this run
@@ -470,6 +500,13 @@ def run(
         skills_mod.enable(available_skills, state)
         emit("skills", names=[s.name for s in available_skills])
 
+    if hooks:
+        # Loaded and torn down the same in-process, no-external-resource way skills
+        # are: a project's hooks.py is source code with no connection to hold open,
+        # unlike MCP/A2A's hubs.
+        hooks_mod.load(hooks)
+        emit("hooks", path=str(hooks))
+
     if subagents:
         # Registered per run, not globally: an unbound tool schema would sit in the
         # context prefix of every request for a capability the run cannot use.
@@ -494,6 +531,8 @@ def run(
     finally:
         if subagents:
             subagent_mod.disable()
+        if hooks:
+            hooks_mod.disable()
         if available_skills:
             skills_mod.disable()
 

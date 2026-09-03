@@ -62,6 +62,7 @@ def _offline_model() -> model_mod.ScriptedModel:
 
 DEFAULT_MCP_CONFIG = "mcp.json"
 DEFAULT_SKILLS_DIR = "skills"
+DEFAULT_HOOKS_FILE = "hooks.py"
 
 
 def _resolve_skills(flag: str | None, root: pathlib.Path | None = None) -> str | None:
@@ -92,6 +93,20 @@ def _resolve_mcp(flag: str | None, root: pathlib.Path | None = None) -> str | No
     if flag:
         return flag
     default = (root or pathlib.Path.cwd()) / DEFAULT_MCP_CONFIG
+    return str(default) if default.is_file() else None
+
+
+def _resolve_hooks(flag: str | None, root: pathlib.Path | None = None) -> str | None:
+    """Which project hooks.py to load, if any.
+
+    Same convention as mcp.json and skills/: a hooks.py in the project is itself the
+    opt-in, since it is executable code the loop runs on every tool call.
+    """
+    if flag == "off":
+        return None
+    if flag:
+        return flag
+    default = (root or pathlib.Path.cwd()) / DEFAULT_HOOKS_FILE
     return str(default) if default.is_file() else None
 
 
@@ -150,6 +165,12 @@ def _printer(quiet: bool):
             )
         elif event == "skills":
             print(f"  [skills] available: {', '.join(data['names'])}")
+        elif event == "hooks":
+            print(f"  [hooks] loaded from {data['path']}")
+        elif event == "hook_vetoed":
+            print(f"  [hook] vetoed {data['name']}")
+        elif event == "hook_error":
+            print(f"  [hook] {data['point']} failed for {data['name']}: {data['error']}")
         elif event == "planned" and data.get("subagent"):
             print(f"    [sub{data['subagent']}] checklist: " + "; ".join(data["items"]))
         elif event == "tool_call" and data.get("subagent"):
@@ -285,6 +306,13 @@ def main(argv: list[str] | None = None) -> int:
         help="directory of skills. Defaults to ./skills when it exists; pass a path to "
         "use another, or off to skip. Only each skill's one-line description is loaded "
         "upfront; the body arrives when the model calls load_skill",
+    )
+    p.add_argument(
+        "--hooks",
+        default=None,
+        help="project hooks.py: before_tool_call may veto a call by argument, "
+        "after_tool_result may rewrite one. Defaults to ./hooks.py when it exists; "
+        "pass a path to use another, or off to skip",
     )
     p.add_argument(
         "--subagents",
@@ -535,6 +563,7 @@ def _main_config(args) -> int:
             plan=_resolve_plan(cfg.runtime.plan, live=True),  # a config run is always "real"
             reflect=_resolve_plan(cfg.runtime.reflect, live=True),
             skills=cfg.skills_dir,
+            hooks=cfg.hooks_path,
             subagents=cfg.tools.subagents,
             subagent_max_steps=cfg.tools.subagent_max_steps,
             exclude_tools=cfg.tools.exclude or None,
@@ -568,6 +597,7 @@ def _run_agent(args, the_model, run_dir, resumed, project_root):
         # here rather than duplicating the same three-line dict lookup.
         reflect=_resolve_plan(args.reflect, args.live),
         skills=_resolve_skills(args.skills, root=project_root),
+        hooks=_resolve_hooks(args.hooks, root=project_root),
         subagents=args.subagents,
         subagent_max_steps=args.subagent_steps,
         on_event=_printer(args.quiet),

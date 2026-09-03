@@ -120,6 +120,7 @@ class AgentConfig:
     skills_dir: str | None
     runtime: RuntimeConfig
     a2a: A2AConfig = field(default_factory=A2AConfig)
+    hooks_path: str | None = None
 
 
 def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
@@ -194,6 +195,11 @@ def load(path: str | pathlib.Path) -> AgentConfig:
     skills_dir = _normalize_off_on(skills_raw.get("dir", "skills"))
     if skills_dir == "off":
         skills_dir = None
+
+    hooks_raw = raw.get("hooks") or {}
+    hooks_path = _normalize_off_on(hooks_raw.get("path", "off"))
+    if hooks_path == "off":
+        hooks_path = None
 
     runtime_raw = raw.get("runtime") or {}
     runtime = RuntimeConfig(
