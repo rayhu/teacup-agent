@@ -23,6 +23,11 @@ dependencies = [
     "a2a-sdk>=1.1.2", # Agent2Agent client (httpx is a hard dep of it; no [http-server] extra needed here)
 ]
 
+[project.optional-dependencies]
+# Only teacup-agent-serve needs this (Starlette + uvicorn); installed via
+# `uv sync --extra a2a-server`, never by default — see docs/roadmap.md #18.
+a2a-server = ["a2a-sdk[http-server]>=1.1.2"]
+
 [project.urls]
 Homepage = "https://github.com/rayhu/teacup-agent"
 Repository = "https://github.com/rayhu/teacup-agent"
@@ -30,6 +35,7 @@ Roadmap = "https://github.com/rayhu/teacup-agent/blob/main/docs/roadmap.md"
 
 [project.scripts]
 teacup-agent = "teacup_agent.cli:main"
+teacup-agent-serve = "teacup_agent.a2a.server:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

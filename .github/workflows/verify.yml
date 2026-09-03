@@ -33,7 +33,10 @@ jobs:
         with:
           enable-cache: true
 
-      - run: uv sync --locked
+      # a2a-server (Starlette + uvicorn) is an optional extra, not installed by
+      # `uv sync` alone — end users of the plain CLI never pull it in. CI installs it
+      # anyway so tests/test_a2a_server.py actually runs rather than silently skipping.
+      - run: uv sync --locked --extra a2a-server
 
       - name: Tests — unit + protocol
         run: uv run pytest

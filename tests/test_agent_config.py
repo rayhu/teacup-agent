@@ -135,7 +135,8 @@ skills:
 
 
 def test_a2a_card_is_parsed_as_a_plain_dict(tmp_path, monkeypatch):
-    """The card is #18's concern (building an AgentCard); this module just carries it."""
+    """The card is #18's concern (building an AgentCard); this module just carries it.
+    Peers are #17's concern — both landed, so both get real shape here."""
     monkeypatch.setenv("FAKE_KEY", "sk-test")
     text = MINIMAL + "\na2a:\n  card:\n    name: my-agent\n"
     cfg = agent_config.load(_write(tmp_path, text))
@@ -176,7 +177,12 @@ def test_the_shipped_example_config_parses(monkeypatch):
     cfg = agent_config.load("agent.example.yaml")
     assert cfg.default_model == "gpt5-responses"
     assert cfg.models["gpt5-responses"].api == "responses"
-    assert cfg.a2a.peers == {}  # the a2a section is commented out in the template
+    assert cfg.a2a.card == {
+        "name": "my-agent",
+        "description": "What this agent does.",
+        "version": "0.1.0",
+    }
+    assert cfg.a2a.peers == {}  # peers stay commented out in the template
 
 
 # --- build_model ------------------------------------------------------------------

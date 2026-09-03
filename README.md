@@ -73,6 +73,8 @@ src/teacup_agent/
 ├── reflect.py     reflection   write down what worked, or what broke and got fixed
 ├── agent_config.py config      describe an agent in agent.yaml instead of flags
 ├── a2a/client.py  A2A client   delegate_a2a: hand a task to a different agent process
+├── a2a/card.py    A2A card     build this agent's Agent Card from agent.yaml + skills
+├── a2a/server.py  A2A server   teacup-agent-serve: be callable by another agent
 └── cli.py         entry point
 tests/                  pytest: the eval cases plus unit tests
 examples/               runnable demos, starting with approval_demo.py
@@ -94,7 +96,7 @@ NOTES.md                the original study notes this grew from
 | --- | --- | --- | --- |
 | Model | `model.py`, `agent_config.py` | Responses API (default) and Chat Completions with cache-aware pricing, an offline scripted model, and `--config agent.yaml` for naming several profiles (including any OpenAI-compatible endpoint via `base_url`) and picking one as the default | Claude's own Messages API, per-profile cost tables (roadmap #16) |
 | State | `state.py` | steps, budget, time, status machine, tool trace; saved every step and resumable | distributed or concurrent runs |
-| Tools | `tools.py`, `mcp_tools.py`, `a2a/client.py` | six built-ins (search, calculate, read file, remember, checklist, send mail) plus anything an MCP server exposes, plus `delegate_a2a` for peers named in `agent.yaml` | more servers, being callable *by* another agent (roadmap #18) |
+| Tools | `tools.py`, `mcp_tools.py`, `a2a/client.py` | six built-ins (search, calculate, read file, remember, checklist, send mail) plus anything an MCP server exposes, plus `delegate_a2a` for peers named in `agent.yaml` | more servers |
 | Control Loop | `loop.py` | four brakes, parallel tools, retries, a completion check, delegation to subagents | parallel subagents, delegated planning |
 | Memory | `memory.py`, `reflect.py` | JSON file with dedupe, keeping the last N facts, plus a lower-trust `notes` tier auto-written after a qualifying run (an experience or a lesson) | vector store, summarization, relevance recall |
 | Evals | `evals.py`, `trajectory.py` | offline protocol cases plus real-trajectory scoring | fixed task suites, cross-version regression |
@@ -130,7 +132,8 @@ Each of these earned its place by fixing a run that had gone wrong. The stories 
   model chose to remember, and meant to be reviewed rather than trusted outright.
 - **Agent2Agent (A2A)**: name a peer agent in `agent.yaml` and `delegate_a2a` can hand it
   a task over the standard A2A protocol, gated by the same approval discipline as
-  `send_email`.
+  `send_email`; `teacup-agent-serve` (a separate console script, behind a separate install
+  extra) is the flip side — lets another agent hand *this* one a task the same way.
 
 ## The three traps in the control loop
 

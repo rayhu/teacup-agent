@@ -215,9 +215,9 @@ before anything compares against it, so the field means the same thing quoted or
 
 `models`, `mcp` (identical per-server shape to `mcp.json`, one level deeper), `tools`
 (built-in tool exclusion, the subagent delegate tool), `skills` (which directory),
-`runtime` (the scalar ceilings), and `a2a.peers` (see below) are all live. `a2a.card` —
-this agent's own identity when served — is still parsed but inert: nothing builds an
-Agent Card from it yet. See `docs/roadmap.md`.
+`runtime` (the scalar ceilings), `a2a.peers` and `a2a.card` are all live — the last two
+landed as two independent items (#17 client, #18 server) that happened to give
+`AgentConfig.a2a` the same real shape at the same time; see `docs/roadmap.md`.
 
 ---
 
@@ -299,6 +299,75 @@ resolves the card explicitly with `A2ACardResolver` first and passes the resolve
 `AgentCard` to `create_client` instead, which is also what lets the test suite
 (`tests/test_a2a_client.py`, `tests/fixtures/demo_a2a_server.py`) drive a real in-process
 server through `httpx.ASGITransport` with zero real sockets.
+
+---
+
+## Agent2Agent (A2A) server
+
+`teacup-agent-serve` is the flip side of `delegate_a2a` (#17): instead of this agent
+calling *out* to a peer, another agent (or `delegate_a2a` itself) can call *in*. Built on
+the same official `a2a-sdk` rather than hand-rolling JSON-RPC/task-lifecycle/SSE.
+
+### The tension worth stating plainly
+
+`docs/roadmap.md`'s "Deliberately not doing" list has said *"no multi-tenancy, service
+layer or web UI"* since that file began, and a long-lived HTTP process accepting inbound
+tasks is, structurally, a service layer. The resolution: make it a second, explicitly
+opt-in surface at **two** levels, not one —
+
+1. **Install time**: `a2a-sdk[http-server]` (Starlette + uvicorn) is gated behind a new
+   `a2a-server` optional dependency group. `uv sync` (what a plain-CLI user runs) never
+   installs it; only `uv sync --extra a2a-server` does.
+2. **Invocation time**: a second console script, `teacup-agent-serve`, entirely separate
+   from `teacup-agent`'s own `main()`. Running `uv run teacup-agent` is unaffected
+   whether or not the extra is even installed.
+
+### What it reuses, deliberately, rather than reinvents
+
+- **The approval gate.** `TeacupAgentExecutor.execute()` calls the existing
+  `cli._make_approver(cfg.runtime.approve, quiet=True)` unmodified. Its `"auto"` branch
+  already denies whenever `sys.stdin.isatty()` is false — always true under `uvicorn` —
+  so a served agent is gated by AGENTS.md rule 4 with **no new approval code**. A remote
+  caller cannot trigger `send_email` (or anything else `requires_approval`) without this
+  instance's own policy allowing it.
+- **`loop.run()` itself, unchanged.** `execute()` reads the incoming message text and
+  calls the same `loop.run(goal=..., model=..., ...)` every CLI invocation calls, via
+  `asyncio.to_thread()` since the handler is async and `loop.run()` is not.
+- **`skills.py`'s catalog, as the Agent Card's `skills` list** (`a2a/card.py`) — a
+  one-line description per skill is exactly the grain an `AgentSkill` wants; enumerating
+  every low-level tool name instead would be noisy and the wrong level of detail. No
+  `skills/` directory configured gets one generic fallback skill rather than an empty
+  list.
+
+### What is honestly left undone
+
+`TeacupAgentExecutor.cancel()` raises `NotImplementedError`, matching `a2a-sdk`'s own
+reference examples for "not supported" — `loop.run()` has no cooperative-cancel hook
+today, so faking cancellation would be worse than refusing it.
+
+**Concurrency is deliberately serialized.** `tools_mod.REGISTRY` is process-global, and
+`skills.enable()`/`subagent.enable()` mutate it with no locking, assuming one `loop.run()`
+at a time. Two inbound tasks arriving concurrently on a server whose `agent.yaml` turns on
+skills or subagents would race on that shared state. `TeacupAgentExecutor` holds an
+`asyncio.Lock` around each `loop.run()` call for exactly this reason — correct, at the
+cost of one served task at a time. Real per-run tool isolation (so concurrent runs do not
+share global registry state at all) is a larger change, out of scope here.
+
+### Verified for real, not just in-process
+
+The automated suite (`tests/test_a2a_server.py`) drives the real `a2a-sdk` client and
+server through `httpx.ASGITransport` — real protocol, zero sockets. Separately, a manual
+check used two actual OS processes over a real loopback TCP port (a `ScriptedModel`
+injected so it cost nothing):
+```
+$ python a2a_server_manual_check.py &
+Serving 'manual-check-agent' at http://127.0.0.1:9877 (Ctrl-C to stop)
+INFO:     Uvicorn running on http://127.0.0.1:9877 (Press CTRL+C to quit)
+
+$ python a2a_client_manual_check.py
+resolved real card over real TCP: manual-check-agent - real two-process verification
+answer over real TCP: manual check: 42
+```
 
 ---
 
