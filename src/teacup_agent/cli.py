@@ -16,6 +16,7 @@ from typing import Any
 
 from dotenv import load_dotenv
 
+from teacup_agent import hooks as hooks_mod
 from teacup_agent import loop, model as model_mod, persist
 from teacup_agent import tools as tools_mod
 from teacup_agent.memory import Memory
@@ -62,6 +63,7 @@ def _offline_model() -> model_mod.ScriptedModel:
 
 DEFAULT_MCP_CONFIG = "mcp.json"
 DEFAULT_SKILLS_DIR = "skills"
+DEFAULT_HOOKS_FILE = "hooks.py"
 
 
 def _resolve_skills(flag: str | None, root: pathlib.Path | None = None) -> str | None:
@@ -95,6 +97,22 @@ def _resolve_mcp(flag: str | None, root: pathlib.Path | None = None) -> str | No
     return str(default) if default.is_file() else None
 
 
+def _resolve_hooks(flag: str | None, root: pathlib.Path | None = None) -> str | None:
+    """Which project-local hooks.py to load, if any.
+
+    Same opt-in-by-file convention as mcp.json/skills: a hooks.py in the project is
+    itself the opt-in, since it can veto calls and (via --approve hooks) approve them
+    on nobody's behalf — costs a reader should see coming from the file's mere
+    existence, not from a flag they might miss.
+    """
+    if flag == "off":
+        return None
+    if flag:
+        return flag
+    default = (root or pathlib.Path.cwd()) / DEFAULT_HOOKS_FILE
+    return str(default) if default.is_file() else None
+
+
 def _resolve_plan(mode: str, live: bool) -> bool:
     """Whether to build the upfront checklist.
 
@@ -110,6 +128,13 @@ def _make_approver(policy: str, quiet: bool):
     Default is auto: ask a human when there is a terminal, deny when there is not
     (CI, background jobs). "Nobody is watching, so allow it" is the most dangerous
     default there is.
+
+    `hooks` is the one policy that can say yes with nobody watching, and only
+    because the project being operated on declared that trust for itself via
+    hooks.py's approve_tool_call (roadmap #13/#14; docs/threat-model.md). When the
+    hook has no opinion (returns None — including when no hooks.py was loaded at
+    all), it falls through to auto's own behaviour below, so "hooks" is safe to
+    leave on even for calls the project never mentioned.
     """
 
     def approve(call, spec) -> bool:
@@ -119,7 +144,15 @@ def _make_approver(policy: str, quiet: bool):
             if not quiet:
                 print(f"  [unlocked] --approve allow: running {call.name} without asking")
             return True
-        if not sys.stdin.isatty():  # auto, but there is nobody to ask
+        if policy == "hooks":
+            decision = hooks_mod.approve(call, spec)
+            if decision is not None:
+                if not quiet:
+                    verb = "approved" if decision else "denied"
+                    print(f"  [hooks] {verb} {call.name} via the project's approve_tool_call")
+                return decision
+            # No opinion: fall through to auto's ask-if-there-is-a-TTY behaviour.
+        if not sys.stdin.isatty():  # auto (or hooks with no opinion): nobody to ask
             return False
         print(f"\n  WARNING: approval needed for a side-effecting operation: {call.name}")
         print(f"    arguments: {call.arguments}")
@@ -169,6 +202,8 @@ def _printer(quiet: bool):
             print(f"  [denied] {data['name']} needs human approval and did not get it")
         elif event == "approved":
             print(f"  [approved] {data['name']}")
+        elif event == "vetoed":
+            print(f"  [vetoed] {data['name']} was blocked by a project hook")
         elif event == "compacted":
             print(
                 f"  [compacted] context: saved ~{data['saved_tokens']} tokens, "
@@ -262,10 +297,12 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("--memory", default="memory.json", help="long-term memory file")
     p.add_argument(
         "--approve",
-        choices=["auto", "deny", "allow"],
+        choices=["auto", "deny", "allow", "hooks"],
         default="auto",
         help="how to handle side-effecting tools such as send_email: auto (default: "
-        "ask you when there is a terminal, deny when there is not) / deny / allow",
+        "ask you when there is a terminal, deny when there is not) / deny / allow / "
+        "hooks (defer to the project's own hooks.py approve_tool_call; falls back "
+        "to auto's behaviour when the hook has no opinion). See --hooks",
     )
     p.add_argument(
         "--resume",
@@ -285,6 +322,14 @@ def main(argv: list[str] | None = None) -> int:
         help="directory of skills. Defaults to ./skills when it exists; pass a path to "
         "use another, or off to skip. Only each skill's one-line description is loaded "
         "upfront; the body arrives when the model calls load_skill",
+    )
+    p.add_argument(
+        "--hooks",
+        default=None,
+        help="project-local hooks.py (before_tool_call/after_tool_result/"
+        "approve_tool_call). Defaults to ./hooks.py when it exists; pass a path to "
+        "use another, or off to skip. See docs/threat-model.md before using "
+        "--approve hooks with one you did not write",
     )
     p.add_argument(
         "--subagents",
@@ -568,6 +613,7 @@ def _run_agent(args, the_model, run_dir, resumed, project_root):
         # here rather than duplicating the same three-line dict lookup.
         reflect=_resolve_plan(args.reflect, args.live),
         skills=_resolve_skills(args.skills, root=project_root),
+        hooks=_resolve_hooks(args.hooks, root=project_root),
         subagents=args.subagents,
         subagent_max_steps=args.subagent_steps,
         on_event=_printer(args.quiet),

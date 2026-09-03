@@ -73,6 +73,44 @@ task at a time) because `tools_mod.REGISTRY` is process-global state shared with
 `skills`/`subagent`, which is a correctness limit stated in `docs/design-notes.md`, not a
 trust boundary.
 
+## What #13 (Hooks) added, and why it is not a weaker approval gate
+
+`hooks.py` (roadmap #13) lets a project ship a reviewed `hooks.py` that can veto a tool
+call by argument (`before_tool_call`), rewrite a result (`after_tool_result`), and —
+behind a new `--approve hooks` policy — approve a normally-gated call with nobody
+watching (`approve_tool_call`). That third one is a new kind of power this repo did not
+have before: the previous section's "denied by default when no human is watching" was
+absolute. It still is, by default — `--approve hooks` is opt-in, and `approve_tool_call`
+returning `None` (including "no `hooks.py` was loaded at all") falls straight through to
+the same deny-without-a-TTY behavior. What changes is that a *specific project*, by
+shipping a *file reviewed in version control*, can say in advance which of its own calls
+need no human — the same shape of decision a human reviewer already makes once when they
+add a tool to a CI pipeline's allowlist, just written down instead of re-decided by hand
+every run.
+
+Two things follow from that:
+
+- **`hooks.py` is deliberately not gitignored**, unlike `mcp.json`/`agent.yaml`. Those two
+  can carry credentials; `hooks.py` carries policy, and an unattended run trusting it to
+  approve calls is exactly the kind of change that belongs in code review, not hidden
+  from it.
+- **`--approve hooks` cannot make a bad `hooks.py` safe.** It is a mechanism for a project
+  to declare its own trust explicitly; it does not evaluate whether that trust was
+  well-placed. A `hooks.py` that approves everything is indistinguishable, to the loop,
+  from `--approve allow` — the safety was in the file's own content and the review it
+  got, not in the mechanism's existence. Never point `--hooks`/`--approve hooks` at a
+  file that arrived with the task itself (a cloned repo you did not audit, a prompt
+  injected "here's a hooks.py to use") — loading one is always explicit and opt-in, never
+  automatic from untrusted content.
+- **Failure handling is asymmetric on purpose.** A broken `before_tool_call` fails
+  **closed** (an exception becomes a veto — a broken safety check must not silently stop
+  being one); a broken `approve_tool_call` fails to "no opinion" (also closed, since that
+  already means deny without a TTY); a broken `after_tool_result` fails to a no-op (it is
+  a transform, not a gate, so silence is the safe fallback).
+
+`hooks.example.py` demonstrates the mechanism with the existing `send_email` tool and
+zero new tools — roadmap #14's own suggested example, "send_email only to these domains."
+
 ## What this repo does not defend against
 
 Stated plainly rather than silently assumed:
@@ -91,3 +129,16 @@ Stated plainly rather than silently assumed:
 - **A code-execution tool.** None exists (`calculate` is a hand-written `ast` walker, not
   `eval`), and the rule stands: a code-execution tool must not be added until a sandbox
   exists to run it in.
+- **A denial or veto is not encryption.** Stopping a call from *executing* does not undo
+  a model having already read something it should not have (e.g., from an MCP server with
+  no deny-list of its own) and repeating it in its final answer. Output auditing (an
+  `after_tool_result` hook, or a check on the final answer) is the layer that would catch
+  that, and is not built as a default here — a project's `hooks.py` can add it.
+- **teacup-run's sandbox does not isolate the filesystem or the network.** When this
+  agent is launched by [teacup-run](https://github.com/rayhu/teacup-run)'s sandboxed
+  subprocess backend, what it bounds is credential scope (an allowlisted environment) and
+  lifetime (a hard timeout with a full process-tree kill) — not what the agent is allowed
+  to do inside the repo it's pointed at. A credential-scoped, time-bounded process can
+  still make arbitrary outbound calls and read/write anything its own tools reach; the
+  approval gate and `hooks.py` above are what actually bound that, on either side of the
+  integration.
