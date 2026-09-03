@@ -64,6 +64,7 @@ runtime:
   context_limit: 30000
   approve: auto        # auto (ask when there's a terminal) | deny | allow
   plan: auto
+  reflect: auto        # write an experience/lesson note after a qualifying run
   search: auto         # auto | web | offline
   memory: memory.json
   run_dir: runs        # a fresh runs/<timestamp> each run; "off" disables persistence

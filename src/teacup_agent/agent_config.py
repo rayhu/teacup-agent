@@ -90,6 +90,7 @@ class RuntimeConfig:
     context_limit: int = 30_000
     approve: str = "auto"
     plan: str = "auto"
+    reflect: str = "auto"
     search: str = "auto"
     memory: str = "memory.json"
     run_dir: str | None = "runs"  # "off" disables persistence + externalization
@@ -183,6 +184,7 @@ def load(path: str | pathlib.Path) -> AgentConfig:
         context_limit=int(runtime_raw.get("context_limit", 30_000)),
         approve=runtime_raw.get("approve", "auto"),
         plan=_normalize_off_on(runtime_raw.get("plan", "auto")),
+        reflect=_normalize_off_on(runtime_raw.get("reflect", "auto")),
         search=runtime_raw.get("search", "auto"),
         memory=runtime_raw.get("memory", "memory.json"),
         run_dir=_normalize_off_on(runtime_raw.get("run_dir", "runs")),

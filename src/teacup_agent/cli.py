@@ -184,6 +184,8 @@ def _printer(quiet: bool):
                 f"  [retry] model call failed ({data['error']}); "
                 f"attempt {data['attempt']} in {data['delay']}s"
             )
+        elif event == "reflected":
+            print(f"  [reflected] wrote {', '.join(data['kinds'])} note(s) for future runs")
         elif event == "salvaged":
             print(
                 "  [wrap-up] resources exhausted: the answer below comes from what "
@@ -305,6 +307,14 @@ def main(argv: list[str] | None = None) -> int:
         "model call) so a multi-part request cannot be half-finished silently. "
         "auto (default) = on for --live, off for the offline demo, which has "
         "nothing to plan",
+    )
+    p.add_argument(
+        "--reflect",
+        choices=["auto", "on", "off"],
+        default="auto",
+        help="write an experience or lesson-learned note after a qualifying run (one "
+        "extra model call), stored as a lower-trust tier in --memory. auto (default) "
+        "= on for --live, off for the offline demo",
     )
     p.add_argument("-q", "--quiet", action="store_true", help="print only the final answer")
     p.add_argument(
@@ -459,6 +469,7 @@ def _main_config(args) -> int:
             approve=_make_approver(cfg.runtime.approve, args.quiet),
             max_tool_calls_per_step=cfg.runtime.max_tool_calls_per_step,
             plan=_resolve_plan(cfg.runtime.plan, live=True),  # a config run is always "real"
+            reflect=_resolve_plan(cfg.runtime.reflect, live=True),
             skills=cfg.skills_dir,
             subagents=cfg.tools.subagents,
             subagent_max_steps=cfg.tools.subagent_max_steps,
@@ -495,6 +506,9 @@ def _run_agent(args, the_model, run_dir, resumed):
         approve=_make_approver(args.approve, args.quiet),
         max_tool_calls_per_step=args.max_tool_calls,
         plan=_resolve_plan(args.plan, args.live),
+        # _resolve_plan is a generic auto/on/off resolver, not plan-specific — reused
+        # here rather than duplicating the same three-line dict lookup.
+        reflect=_resolve_plan(args.reflect, args.live),
         skills=_resolve_skills(args.skills),
         subagents=args.subagents,
         subagent_max_steps=args.subagent_steps,

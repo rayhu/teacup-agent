@@ -68,6 +68,7 @@ src/teacup_agent/
 ├── skills.py      skills       procedures loaded only when the task matches
 ├── subagent.py    delegation   a child run with its own context
 ├── trajectory.py  scoring      grade a real run: mechanical metrics + an LLM judge
+├── reflect.py     reflection   write down what worked, or what broke and got fixed
 ├── agent_config.py config      describe an agent in agent.yaml instead of flags
 └── cli.py         entry point
 tests/                  pytest: the eval cases plus unit tests
@@ -90,7 +91,7 @@ NOTES.md                the original study notes this grew from
 | State | `state.py` | steps, budget, time, status machine, tool trace; saved every step and resumable | distributed or concurrent runs |
 | Tools | `tools.py`, `mcp_tools.py` | six built-ins (search, calculate, read file, remember, checklist, send mail) plus anything an MCP server exposes | more servers |
 | Control Loop | `loop.py` | four brakes, parallel tools, retries, a completion check, delegation to subagents | parallel subagents, delegated planning |
-| Memory | `memory.py` | JSON file with dedupe, keeping the last N facts | vector store, summarization, relevance recall |
+| Memory | `memory.py`, `reflect.py` | JSON file with dedupe, keeping the last N facts, plus a lower-trust `notes` tier auto-written after a qualifying run (an experience or a lesson) | vector store, summarization, relevance recall |
 | Evals | `evals.py`, `trajectory.py` | offline protocol cases plus real-trajectory scoring | fixed task suites, cross-version regression |
 
 ## What keeps it honest
@@ -119,6 +120,9 @@ Each of these earned its place by fixing a run that had gone wrong. The stories 
   only its conclusion comes back, so the bulk never enters this context.
 - **Skills**: a procedure's one-line description is always loaded, its body only when the
   task matches, so the agent carries many specialities and pays for the one it uses.
+- **Self-recorded experience**: a run that finished cleanly, or recovered from an error,
+  can write a short note about it — stored as a lower-trust tier, separate from facts the
+  model chose to remember, and meant to be reviewed rather than trusted outright.
 
 ## The three traps in the control loop
 

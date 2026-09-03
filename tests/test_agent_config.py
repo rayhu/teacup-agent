@@ -39,6 +39,7 @@ def test_loads_the_minimal_shape(tmp_path, monkeypatch):
     assert cfg.default_model == "main"
     assert cfg.models["main"].model == "gpt-5"
     assert cfg.runtime.plan == "off"
+    assert cfg.runtime.reflect == "auto"  # not set in MINIMAL, so the default
     assert cfg.runtime.run_dir == "off"
     assert cfg.mcp == {}
     assert cfg.tools.exclude == []
@@ -98,9 +99,10 @@ def test_bare_off_is_not_silently_swallowed_as_a_boolean(tmp_path, monkeypatch):
     """plan: off (unquoted) parses through PyYAML as the bool False, not the string
     "off" — must still behave like "off", not silently fall through to the default."""
     monkeypatch.setenv("FAKE_KEY", "sk-test")
-    text = MINIMAL + "\nskills:\n  dir: off\n"
+    text = MINIMAL.replace("plan: off", "plan: off\n  reflect: off") + "\nskills:\n  dir: off\n"
     cfg = agent_config.load(_write(tmp_path, text))
     assert cfg.runtime.plan == "off"
+    assert cfg.runtime.reflect == "off"
     assert cfg.runtime.run_dir == "off"
     assert cfg.skills_dir is None
 
@@ -218,3 +220,28 @@ def test_main_config_runs_a_full_loop_offline(tmp_path, monkeypatch):
         goal="what is the answer", config=str(cfg_path), quiet=True, resume=None
     )
     assert cli._main_config(args) == 0
+
+
+def test_main_config_wires_reflect_through_to_the_loop(tmp_path, monkeypatch):
+    """runtime.reflect was added after agent_config.py and reflect.py were built
+    independently — this pins that --config actually reaches loop.run(reflect=...)
+    rather than silently defaulting to off."""
+    from teacup_agent import cli
+
+    monkeypatch.setenv("FAKE_KEY", "sk-test")
+    text = MINIMAL.replace("plan: off", "plan: off\n  reflect: on")
+    cfg_path = _write(tmp_path, text)
+
+    scripted = model_mod.ScriptedModel(
+        script=[model_mod.assistant_says("42")],
+        reflection={"experience": "wiring reached the loop"},
+    )
+    monkeypatch.setattr(agent_config, "build_model", lambda profile: scripted)
+    monkeypatch.chdir(tmp_path)
+
+    args = types.SimpleNamespace(
+        goal="what is the answer", config=str(cfg_path), quiet=True, resume=None
+    )
+    assert cli._main_config(args) == 0
+    memory_file = tmp_path / "memory.json"
+    assert "wiring reached the loop" in memory_file.read_text(encoding="utf-8")
