@@ -23,7 +23,7 @@ class ToolTrace:
     arguments: str
     result: str
     executed: bool = True  # False = never actually ran
-    skip_reason: str = ""  # "throttled" | "denied"
+    skip_reason: str = ""  # "throttled" | "denied" | "vetoed"
 
 
 @dataclass

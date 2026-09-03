@@ -50,10 +50,11 @@ Environment variables:
 | `--context-limit` | int | `30000` | compact once the context exceeds this estimate |
 | `--run-dir` | str | `runs/<timestamp>` | state + externalized results; `off` disables both |
 | `--memory` | str | `memory.json` | long-term memory file |
-| `--approve` | `auto` \| `deny` \| `allow` | `auto` | gate policy; `auto` = ask on a TTY, deny without one |
+| `--approve` | `auto` \| `deny` \| `allow` \| `hooks` | `auto` | gate policy; `auto` = ask on a TTY, deny without one; `hooks` defers to `hooks.py`'s `approve_tool_call`, falling back to `auto` when it has no opinion |
 | `--resume` | path | none | continue from a `state.json` or the directory holding it |
 | `--mcp` | path | `./mcp.json` if present | MCP config; `off` disables |
 | `--skills` | path | `./skills` if present | skills directory; `off` disables |
+| `--hooks` | path | `./hooks.py` if present | project-local hooks module; `off` disables. §19 |
 | `--subagents` | flag | off | offer the `delegate` tool |
 | `--subagent-steps` | int | `4` | step ceiling for one child run |
 | `--plan` | `auto` \| `on` \| `off` | `auto` | upfront checklist; `auto` = on for `--live`, off offline |
@@ -480,6 +481,8 @@ half-written state. `persist.load()` rebuilds `trace` and `todo` into dataclasse
 | `tool_result` | a call returned |
 | `throttled` | a turn exceeded the per-turn cap |
 | `approval_required` / `approved` / `denied` | the gate |
+| `vetoed` | a project-local `hooks.py`'s `before_tool_call` blocked a call |
+| `hooks_loaded` | a project-local `hooks.py` was loaded |
 | `externalized` | a result went to disk |
 | `completion_check` | the checklist push-back fired |
 | `answer` | the model finished |
@@ -551,3 +554,23 @@ Every one of these was set by a measurement; the reasoning is in
 | `budget_share` (subagent) | 0.4 of remaining | `subagent.py` |
 | `timeout` (delegate tool) | 300.0s | `subagent.py` |
 | checklist size | 1–5 items | `plan.py` |
+
+## 19. Hooks (`hooks.py`)
+
+Loaded from a project-local `hooks.py` (`--hooks`, default `./hooks.py` if present;
+`off` disables), the same opt-in-by-file convention as `mcp.json`/`skills/` — but
+**not** gitignored, since it carries policy, not secrets (`docs/threat-model.md`).
+
+| Callback | Signature | Return | Effect |
+| --- | --- | --- | --- |
+| `before_tool_call` | `(call) -> str \| None` | a string vetoes; `None` allows | checked before the approval gate; a veto becomes the call's `ERROR:` result |
+| `after_tool_result` | `(call, result) -> str` | the (possibly rewritten) result | applied to executed calls only, before emit/externalize/trace |
+| `approve_tool_call` | `(call, spec) -> bool \| None` | `True`/`False` decides; `None` = no opinion | only consulted under `--approve hooks`; `None` falls back to `auto`'s behaviour |
+
+Failure handling per callback, all in `hooks.py`'s module docstring: `before_tool_call`
+fails **closed** (an exception becomes a veto), `approve_tool_call` fails to "no
+opinion" (also closed), `after_tool_result` fails to a no-op.
+
+`hooks.example.py` is the committed template, demonstrating an argument-aware
+allowlist ("`send_email` only to these domains" — roadmap #14's own example) using
+only the built-in `send_email` tool.

@@ -2,13 +2,14 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #15, #17, #18 and #19 are done (except the fine-grained
-permissions part of #6). Five items that were never on the roadmap were added after
+**Progress**: #1-#10, #12, #13, #15, #17, #18 and #19 are done (except the
+fine-grained permissions part of #6). #14 is half done: `docs/threat-model.md`
+exists, but `read_file`'s root is still `Path.cwd()`, not an explicit project root
+captured at startup. Five items that were never on the roadmap were added after
 reviewing real runs (see "Field patches" at the end).
-Next up: #14 (threat model and allowlists) closes a hole that exists today; then
-#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend) and
-#16 (multi-provider price overrides, a native Anthropic path), both scoped but not
-started.
+Next up: the remaining half of #14 (root capture); then #11 (a better search
+backend) and #16 (multi-provider price overrides, a native Anthropic path), both
+scoped but not started.
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/teacup_agent/loop.py) is "old technology".
@@ -528,31 +529,72 @@ expensive to find, and one successful load is not proof of reliable loading.
 
 ---
 
-### 13. Hooks
+### 13. Hooks — DONE (2026-09-03)
 
-**Now**: every guardrail is hardcoded in the loop. The per-turn cap, the approval gate and
-the forced wrap-up are all good behaviour, but a user who wants their own rule has to edit
-`loop.py`.
+**Now**: every guardrail was hardcoded in the loop. The per-turn cap, the approval gate and
+the forced wrap-up are all good behaviour, but a user who wants their own rule had to edit
+`loop.py`. It is also the mechanism #14 needs: an allowlist and an output audit are both
+hooks, and adding them as hooks means the loop does not grow a security section.
 
-**Why it is worth it**: the harness chapter of the SDLC paper lists hooks as a first-class
-component, "deterministic code that runs at specific lifecycle points: before a tool call,
-after a file edit, before a commit. Hooks are the place for things the agent should never
-forget but often does." It is also the mechanism #14 needs: an allowlist and an output
-audit are both hooks, and adding them as hooks means the loop does not grow a security
-section.
+**What shipped**: [`hooks.py`](../src/teacup_agent/hooks.py) — a small registry of three
+callbacks, loaded from a project-local `hooks.py` (the same opt-in-by-file convention as
+`mcp.json`/`skills/`, wired via a new `--hooks` flag and `_resolve_hooks()` in `cli.py`,
+mirroring `_resolve_mcp`/`_resolve_skills`):
 
-**How**: a small registry of callbacks at named points, most usefully `before_tool_call`
-(may veto, returning a string that becomes the tool result) and `after_tool_result` (may
-rewrite). Load them from `hooks.py` in the project, the same opt-in-by-file convention as
-`mcp.json` and `skills/`.
+- `before_tool_call(call) -> str | None` — a string vetoes the call (it becomes the
+  call's `ERROR:` result, same shape a denial already gets); `None` allows it through.
+  Wired into `execute_calls()` in `loop.py`, checked **before** the approval gate, so a
+  vetoed call never reaches "ask for approval."
+- `after_tool_result(call, result) -> str` — may rewrite the result that reaches the
+  model. Wired in right before a result is emitted/externalized/traced.
+- `approve_tool_call(call, spec) -> bool | None` — the one hook that can say **yes**
+  with nobody watching, and only because the project itself declared that trust. Kept
+  separate from `before_tool_call` on purpose: a veto hook can only refuse, this one can
+  approve, which is a materially different kind of power and needed its own name and its
+  own opt-in (`--approve hooks`, a new fourth policy alongside `auto`/`deny`/`allow` in
+  `_make_approver`). Returning `None` (including "no `hooks.py` was loaded at all") falls
+  through to `auto`'s own ask-if-there-is-a-TTY / deny-otherwise behaviour, so `--approve
+  hooks` is safe to leave on even for calls the project's `hooks.py` never mentions.
 
-**Definition of done**: a project-local hook can block a tool call by argument (not just
-by tool name) without touching `loop.py`, and the veto reaches the model as a normal
-`ERROR:` result.
+**Failure handling is deliberately asymmetric**, because the three callbacks are not
+symmetric risks: a broken `before_tool_call` fails **closed** (an exception becomes a
+veto — a broken safety check must not silently stop being one); a broken
+`approve_tool_call` fails to "no opinion" (also closed, since that already means deny
+without a TTY); a broken `after_tool_result` fails to a no-op (it is a transform, not a
+gate, so silence is the safe fallback — the same "a broken planner must never stop the
+run" discipline `plan.py`/`reflect.py` already hold).
+
+**A departure from the mcp.json/agent.yaml convention, stated on purpose**: those two are
+gitignored because they can carry credentials. `hooks.py` carries policy, not secrets, and
+an unattended run trusting it to approve calls is exactly the kind of change that should
+be reviewed in version control, not hidden from it — so it is **not** added to
+`.gitignore`. See `docs/threat-model.md`.
+
+`hooks.example.py` demonstrates the mechanism end to end using the existing `send_email`
+tool and zero new tools — exactly the example this item originally asked for
+("send_email only to these domains"): `before_tool_call` refuses a recipient outside the
+allowlist, `approve_tool_call` says yes for one that is on it, so an unattended run can
+actually send the approved mail instead of every send being denied for lack of a TTY.
+
+**Definition of done**: a project-local hook blocks a tool call by argument (not just by
+tool name) without touching `loop.py`'s own code, and the veto reaches the model as a
+normal `ERROR:` result — pinned by `tests/test_hooks.py`.
+
+**Verification**:
+```
+uv run pytest                          # includes tests/test_hooks.py
+uv run python -m teacup_agent.evals    # loop health, scripted model, free
+uv run teacup-agent                    # offline demo unaffected (no hooks.py by default)
+```
 
 ---
 
-### 14. Threat model, and tool-call allowlists
+### 14. Threat model, and tool-call allowlists — half done (2026-09-03)
+
+**Update**: `docs/threat-model.md` now exists, built alongside #13's hooks mechanism
+(the argument-aware allowlist example below, `hooks.example.py`, is real and runnable).
+The other half of this item's definition of done — `read_file` rooted at an explicit
+project root instead of `Path.cwd()` — is still open; see "Definition of done" below.
 
 **Now**: the docs state that web content and MCP tool descriptions are untrusted text the
 model reads, and then nothing is done about it. Documenting a risk without marking the
