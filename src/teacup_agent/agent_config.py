@@ -97,6 +97,21 @@ class RuntimeConfig:
 
 
 @dataclass
+class A2APeer:
+    url: str
+    api_key_env: str | None = None  # bearer token for this peer; unset = no auth header
+
+
+@dataclass
+class A2AConfig:
+    peers: dict[str, A2APeer] = field(default_factory=dict)
+    # This agent's own identity when served (teacup-agent-serve). Kept as a plain dict —
+    # the a2a/ package (not this module) owns turning it into an AgentCard, the same
+    # separation mcp.json's per-server dicts have from mcp_tools.py's own types.
+    card: dict[str, Any] = field(default_factory=dict)
+
+
+@dataclass
 class AgentConfig:
     models: dict[str, ModelProfile]
     default_model: str
@@ -104,11 +119,7 @@ class AgentConfig:
     tools: ToolsConfig
     skills_dir: str | None
     runtime: RuntimeConfig
-    # Agent2Agent config (peer agents to delegate to, this agent's own Agent Card).
-    # Parsed and validated as a plain dict, but not wired into any tool or server yet —
-    # that lands in a follow-up. Keeping the field now means the schema does not have
-    # to change shape again when it does.
-    a2a: dict[str, Any] | None = None
+    a2a: A2AConfig = field(default_factory=A2AConfig)
 
 
 def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
@@ -133,6 +144,16 @@ def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
         base_url=spec.get("base_url"),
         reasoning_effort=spec.get("reasoning_effort"),
     )
+
+
+def _a2a_config(raw: dict[str, Any] | None) -> A2AConfig:
+    raw = raw or {}
+    peers = {}
+    for name, spec in (raw.get("peers") or {}).items():
+        if "url" not in spec:
+            raise ValueError(f"a2a.peers.{name} is missing 'url'")
+        peers[name] = A2APeer(url=spec["url"], api_key_env=spec.get("api_key_env"))
+    return A2AConfig(peers=peers, card=dict(raw.get("card") or {}))
 
 
 def load(path: str | pathlib.Path) -> AgentConfig:
@@ -197,7 +218,7 @@ def load(path: str | pathlib.Path) -> AgentConfig:
         tools=tools_cfg,
         skills_dir=skills_dir,
         runtime=runtime,
-        a2a=raw.get("a2a"),
+        a2a=_a2a_config(raw.get("a2a")),
     )
 
 

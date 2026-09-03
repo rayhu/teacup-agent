@@ -454,6 +454,15 @@ def _main_config(args) -> int:
                     f"({gated} gated) — {', '.join(added)}"
                 )
 
+    a2a_hub = None
+    if cfg.a2a.peers:
+        from teacup_agent.a2a.client import A2AHub
+
+        a2a_hub = A2AHub()
+        a2a_hub.register(cfg.a2a.peers)
+        if not args.quiet:
+            print(f"  [a2a] delegate_a2a available for peers: {', '.join(cfg.a2a.peers)}")
+
     try:
         state = loop.run(
             goal=args.goal,
@@ -479,6 +488,8 @@ def _main_config(args) -> int:
     finally:
         if hub is not None:
             hub.close()
+        if a2a_hub is not None:
+            a2a_hub.close()
 
     print(f"\nAnswer: {state.answer}")
     if run_dir is not None and not args.quiet:

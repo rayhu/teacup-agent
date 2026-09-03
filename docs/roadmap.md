@@ -2,12 +2,13 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #15 and #19 are done (except the fine-grained permissions part
-of #6). Five items that were never on the roadmap were added after reviewing real runs
-(see "Field patches" at the end).
-Next up: #14 (threat model and allowlists) closes a hole that exists today; then
-#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend); #16-#18
-(multi-provider models, Agent2Agent client and server) are scoped but not started.
+**Progress**: #1-#10, #12, #15, #17 and #19 are done (except the fine-grained permissions
+part of #6). Five items that were never on the roadmap were added after reviewing real
+runs (see "Field patches" at the end).
+Next up: #18 (the A2A server side of #17) is scoped and in progress; then #14 (threat
+model and allowlists) closes a hole that exists today; then #13 (hooks), which is the
+mechanism #14 wants; then #11 (a better search backend) and #16 (multi-provider price
+overrides, a native Anthropic path), both scoped but not started.
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/teacup_agent/loop.py) is "old technology".
@@ -704,7 +705,7 @@ tool call through the Messages API shape with a test pinning its `tool_result_it
 
 ---
 
-### 17. Agent2Agent (A2A) client: delegate to a remote agent
+### 17. Agent2Agent (A2A) client: delegate to a remote agent — DONE (2026-09-03)
 
 **Now**: `subagent.py`'s `delegate` tool hands a subtask to a child **in-process** loop.
 There is no way to hand a subtask to a *different* agent process, possibly on a different
@@ -716,19 +717,39 @@ built on Starlette/JSON-RPC/SSE). This repo already has the precedent for "depen
 official SDK rather than hand-roll the protocol" — `mcp_tools.py` wraps the official `mcp`
 package the same way.
 
-**How**: a new `a2a/client.py` — given a peer's Agent Card URL and a bearer token resolved
-from `api_key_env` (`agent.yaml`'s `a2a.peers`, reserved by #15's schema but inert until
-now), submit a task (`message/send`), wait for a terminal state, flatten the result into a
-plain string. Every failure path (network error, remote task failure, timeout) becomes an
+**What shipped**: [`a2a/client.py`](../src/teacup_agent/a2a/client.py)'s `A2AHub` —
+given a peer's URL and a bearer token resolved from `api_key_env` (`agent.yaml`'s
+`a2a.peers`, given real shape here: `agent_config.A2APeer`/`A2AConfig`), resolves the
+Agent Card, submits a task, consumes the response to a terminal state, and flattens it to
+a plain string. Every failure path (connection error, a remote task ending in
+`TASK_STATE_FAILED`/`REJECTED`/`CANCELED`/`INPUT_REQUIRED`/`AUTH_REQUIRED`) becomes an
 `"ERROR: ..."` string, never a raised exception — the same discipline `tools.execute()`
-and `mcp_tools.py` already hold. A new tool, `delegate_a2a(peer, task)`, registered only
-when `a2a.peers` is non-empty (the same "do not cost prefix tokens when unused" pattern as
-`--subagents`/skills), `requires_approval=True` by default — an outbound call to a
-third-party, possibly-billed agent is exactly the side effect the approval gate exists for.
+and `mcp_tools.py` already hold. One tool, `delegate_a2a(peer, task)`, registered in
+`cli.py`'s `_main_config()` only when `a2a.peers` is non-empty (the same "do not cost
+prefix tokens when unused" pattern as `--subagents`/skills), `requires_approval=True` by
+default — an outbound call to a third-party, possibly-billed agent is exactly the side
+effect AGENTS.md rule 4 exists for. Full design rationale (where the hub lives and why,
+the async/sync bridge, an API-surface note about `a2a-sdk` v1.1.2's real shape versus what
+blog posts describe): `docs/design-notes.md`.
 
-**Definition of done**: a local fake A2A server (`a2a-sdk`'s Starlette app, in-process, no
-real network — the same role `tests/fixtures/demo_mcp_server.py` plays for MCP) receives
-and answers a task sent by `delegate_a2a`.
+**No `loop.py` changes were needed.** The approval gate already reads
+`Tool.requires_approval` generically, so registering the tool with that flag set was
+everything this item needed from the loop — resolving the "where does the hub live"
+question the original scoping left open in favor of the MCP shape (`cli.py`-owned),
+not the subagent shape (`loop.run()`-owned).
+
+**Definition of done**: [`tests/fixtures/demo_a2a_server.py`](../tests/fixtures/demo_a2a_server.py)
+(a real `a2a-sdk` `AgentExecutor`, wired into a Starlette app object) receives and answers
+a task sent by `delegate_a2a` — driven through `httpx.ASGITransport`, so the test makes
+zero real socket calls, one step more hermetic than MCP's subprocess-based fixture (A2A
+has no stdio transport to subprocess over).
+
+**Verification**:
+```
+uv run pytest                          # 203 passed
+uv run python -m teacup_agent.evals    # 20/20 passed
+uv run teacup-agent                    # offline demo unaffected, still instant
+```
 
 ---
 
