@@ -1,4 +1,4 @@
-"""Control Loop — the ~40 lines that wire Model / State / Tools / Memory together.
+"""Control Loop — the ~80 lines that wire Model / State / Tools / Memory together.
 
 In one line:
 

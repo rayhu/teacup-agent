@@ -824,7 +824,7 @@ uv run teacup-agent                    # offline demo unaffected (reflect defaul
 ## Deliberately not doing
 
 - **No agent framework** (LangGraph and friends). The value of this repo is that the
-  40-line loop is **yours** and fits on one screen. Wrap it in a framework and the
+  80-line loop is **yours** and fits on one screen. Wrap it in a framework and the
   learning value drops to zero.
 - **No multi-tenancy or web UI.** That is a different project. The one narrow exception
   is #18's optional A2A server: a second console script behind a separate install extra,

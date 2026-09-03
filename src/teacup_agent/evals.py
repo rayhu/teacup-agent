@@ -287,6 +287,25 @@ CASES: list[Case] = [
         ),
     ),
     Case(
+        name="checklist: an unrecognised update_todo status is refused, not silently done",
+        # The failure this pins down: a bogus status used to set done=True, the item
+        # left the pending list, and the run could report finished with the work
+        # never attempted.
+        script=[
+            assistant_calls([("update_todo", {"index": 1, "status": "in_progress"})]),
+            assistant_says("first item handled"),
+            assistant_says("first item handled"),
+        ],
+        plan=True,
+        plan_items=["research the topic"],
+        check=lambda s: (
+            any(t.name == "update_todo" and t.result.startswith("ERROR:") for t in s.trace)
+            and not s.todo[0].done  # the bogus status did not settle the item
+            and s.completion_checked  # so the run pushed back instead of finishing quietly
+            and s.status == "done"
+        ),
+    ),
+    Case(
         name="delegation: a child's reading never lands in the parent's messages",
         script=[
             assistant_calls([("delegate", {"task": "CHILD: look up cuda"})]),

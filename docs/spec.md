@@ -1,0 +1,552 @@
+# Technical specification
+
+The contract: exact values, exact shapes, exact interfaces. Every number here was read
+out of the code, and each one names the symbol it came from so the next reader can
+re-check it rather than trust this file.
+
+This is deliberately not a narrative. **Why** any of it behaves this way is
+[docs/design-notes.md](design-notes.md); what it is *for* is [docs/intent.md](intent.md);
+what is missing is [docs/roadmap.md](roadmap.md).
+
+Names prefixed with `_` are private and may change without notice — the values are given
+because they are load-bearing, not because they are stable interfaces.
+
+## 1. Runtime
+
+| | |
+| --- | --- |
+| Python | >= 3.11 (`pyproject.toml: requires-python`) |
+| Package manager | `uv` only — never `pip install` |
+| Distribution | `teacup-agent`; module `teacup_agent`; console script `teacup-agent` |
+| Runtime deps | `openai>=1.60`, `python-dotenv>=1.0`, `ddgs>=9.0`, `mcp>=2.1`, `pyyaml>=6.0` |
+| Dev deps | `pytest>=8.0` |
+| Build backend | `hatchling`, wheel packages `src/teacup_agent` |
+| License | MIT |
+
+Environment variables:
+
+| Variable | Read by | Meaning |
+| --- | --- | --- |
+| `OPENAI_API_KEY` | `model.py`, via `.env` | required only for `--live` |
+| `TEACUP_AGENT_SEARCH` | `tools.py` | `auto` \| `web` \| `offline`; set by `cli.py` from `--search` |
+| any name in `api_key_env` | `agent_config.py` | per-profile key when running `--config agent.yaml` |
+
+## 2. CLI surface
+
+`teacup-agent [goal] [options]`. The positional `goal` defaults to a built-in demo goal
+(`cli.py: DEFAULT_GOAL`).
+
+| Flag | Type | Default | Effect |
+| --- | --- | --- | --- |
+| `--live` | flag | off | call the real OpenAI API; without it the scripted offline model runs |
+| `--model` | str | `gpt-5` | model name used with `--live` |
+| `--api` | `responses` \| `chat` | `responses` | which OpenAI API backend to construct |
+| `--max-steps` | int | `8` | loop turns before the step brake fires |
+| `--max-tool-calls` | int | `3` | tool calls executed per turn; `0` = unlimited |
+| `--budget` | float | `0.05` | spending ceiling in USD |
+| `--deadline` | float | `600.0` | wall-clock ceiling in seconds; `0` = unlimited |
+| `--search` | `auto` \| `web` \| `offline` | `auto` with `--live`, else `offline` | search backend mode |
+| `--tool-timeout` | float | `30.0` | per-tool-call timeout in seconds |
+| `--context-limit` | int | `30000` | compact once the context exceeds this estimate |
+| `--run-dir` | str | `runs/<timestamp>` | state + externalized results; `off` disables both |
+| `--memory` | str | `memory.json` | long-term memory file |
+| `--approve` | `auto` \| `deny` \| `allow` | `auto` | gate policy; `auto` = ask on a TTY, deny without one |
+| `--resume` | path | none | continue from a `state.json` or the directory holding it |
+| `--mcp` | path | `./mcp.json` if present | MCP config; `off` disables |
+| `--skills` | path | `./skills` if present | skills directory; `off` disables |
+| `--subagents` | flag | off | offer the `delegate` tool |
+| `--subagent-steps` | int | `4` | step ceiling for one child run |
+| `--plan` | `auto` \| `on` \| `off` | `auto` | upfront checklist; `auto` = on for `--live`, off offline |
+| `--reflect` | `auto` \| `on` \| `off` | `auto` | write an experience/lesson note after a qualifying run; `auto` = on for `--live` |
+| `-q`, `--quiet` | flag | off | print only the final answer |
+| `--config` | path | none | take everything from a YAML file instead of the flags above |
+
+`--config` is a **parallel track, not a merge**: once it is set, every flag except the
+goal, `--quiet` and `--resume` is ignored (section 14).
+
+On `--resume`, the ceilings mean **additional** allowance: steps and elapsed time already
+spent live in the saved state, so the flags are added to it rather than replacing it
+(`cli.py`).
+
+## 3. Control loop
+
+`loop.run(...) -> AgentState` sets up; `loop._loop(...)` is the loop itself, split out so
+`run()` can guarantee teardown. One turn, in order:
+
+1. **Guards.** `state.elapsed = clock() - started_at`; if `not state.can_continue()`,
+   set `status`, run the forced wrap-up when `step > 0`, and break.
+2. `state.step += 1`.
+3. **Compact** if `state.context_tokens > context_limit`. A compaction that raises is
+   caught and the turn continues.
+4. **Status note** appended at the end of `messages` — never spliced into the system
+   prompt, which would void the prompt cache.
+5. **Model call** through `complete_with_retries`. On the final turn (`step >= max_steps`)
+   the tool list passed in is empty: wording can be ignored, an empty list cannot.
+6. **Append `reply.items`** (trap 1 — extend, not append: one Responses turn can produce
+   several entries).
+7. **No tool calls = done** (trap 3), unless the checklist has open items and the
+   push-back has not fired yet, in which case one `COMPLETION_CHECK` system message is
+   appended and the loop continues.
+8. **Execute** every call, in parallel, refilling results in the original order (trap 2).
+9. **Persist** `state.json` when `run_dir` is set.
+
+After the loop exits, and **before** the final persist so its cost lands in the saved
+state, `reflect.maybe_record()` runs when `reflect=True` (section 10).
+
+### Termination
+
+`state.stop_reason()` is evaluated in this fixed precedence:
+
+| Order | Condition | `Status` |
+| --- | --- | --- |
+| 1 | `step >= max_steps` | `max_steps` |
+| 2 | `remaining_budget <= 0` | `out_of_budget` |
+| 3 | `time_left() <= 0` | `out_of_time` |
+| — | otherwise | `running` |
+
+Plus two loop-level exits: the model returned no tool calls (`done`), or the model call
+raised after retries (`error`, with the exception text as the answer).
+
+Time is checked **between turns only**; a wedged tool call is `tool_timeout`'s problem.
+
+### Forced wrap-up
+
+`finalize()` appends a `[forced wrap-up]` system message naming the stop reason and any
+unfinished checklist items, then makes one more model call **with no tools**. If that
+produces text, it becomes the answer and `state.salvaged = True`. Tool calls arriving in
+this turn still receive one result message each — dropping them 400s the next resume.
+
+### Retries
+
+`complete_with_retries(model, messages, tools, emit, attempts=3)`: up to 3 attempts with
+`delay = 2**attempt` slept **between** them, so 1s then 2s, and the third failure raises.
+**A retry is not a step.** `is_retryable()` returns True for HTTP 429,
+any status >= 500, and any error carrying no status code at all; a 4xx is not retried.
+
+## 4. `AgentState` (`state.py`)
+
+| Field | Type | Default | Written by |
+| --- | --- | --- | --- |
+| `goal` | str | — | caller |
+| `messages` | list[dict] | `[]` | loop |
+| `step` | int | `0` | loop, once per turn |
+| `max_steps` | int | `8` | caller |
+| `max_tool_calls_per_step` | int | `3` | caller; `0` = unlimited |
+| `remaining_budget` | float | `0.05` | `charge()`, per turn |
+| `time_budget` | float \| None | `None` | caller |
+| `elapsed` | float | `0.0` | loop, top of each turn |
+| `context_tokens` | int | `0` | real `input_tokens`, else an estimate |
+| `compactions` | int | `0` | `context.compact()` |
+| `input_tokens_total` | int | `0` | loop |
+| `cached_tokens_total` | int | `0` | loop |
+| `status` | `Status` | `idle` | loop |
+| `answer` | str | `""` | loop |
+| `salvaged` | bool | `False` | `finalize()` |
+| `todo` | list[TodoItem] | `[]` | `plan.decompose()`, `update_todo` |
+| `completion_checked` | bool | `False` | loop, at most once |
+| `subagent_runs` | int | `0` | `subagent._delegate()` |
+| `loaded_skills` | list[str] | `[]` | `skills._load_skill()` |
+| `trace` | list[ToolTrace] | `[]` | `execute_calls()` |
+
+`Status` = `idle` \| `running` \| `done` \| `max_steps` \| `out_of_budget` \|
+`out_of_time` \| `error`.
+
+`ToolTrace(step, name, arguments, result, executed=True, skip_reason="")`, where
+`skip_reason` is `""` \| `"throttled"` \| `"denied"`.
+`TodoItem(text, done=False, note="")`.
+
+`snapshot()` returns the 16 human-readable keys printed at the end of a run; it omits
+`messages` content and reports `todo_done` as `"n/a"` when there is no checklist.
+
+## 5. Model interface
+
+A fork replaces this Protocol and nothing else (`model.py`):
+
+```python
+class Model(Protocol):
+    def set_cache_key(self, key: str) -> None: ...          # optional
+    def complete(self, messages, tools) -> Reply: ...
+    def tool_result_item(self, call: ToolCall, result: str) -> dict: ...
+```
+
+`ToolCall(id, name, arguments)` — `arguments` is a JSON **string**, not a dict.
+
+`Reply(items, text="", tool_calls=[], cost=0.0, input_tokens=0, cached_tokens=0)`.
+`items` is "the entries to append back", not "one assistant message": Chat produces one
+per turn, Responses can produce several (a reasoning item plus function calls), and
+carrying them back verbatim is what preserves reasoning state.
+
+Three implementations ship: `ResponsesModel` (default), `OpenAIModel` (Chat Completions),
+`ScriptedModel` (offline, deterministic, used by the demo and every eval).
+`agent_config.build_model(profile)` constructs one of the first two from an `agent.yaml`
+profile, including any OpenAI-compatible endpoint via `base_url`.
+
+### Cost
+
+`estimate_cost(model, input_tokens, output_tokens, cached_tokens)` where `input_tokens`
+is the **total** input, cache hits included:
+
+```
+(max(0, input - cached) * p_in + cached * p_cached + output * p_out) / 1_000_000
+```
+
+`PRICES` in USD per million tokens, `(input, cached input, output)`:
+
+| Model | in | cached | out |
+| --- | --- | --- | --- |
+| `gpt-5` | 1.25 | 0.125 | 10.00 |
+| `gpt-5-mini` | 0.25 | 0.025 | 2.00 |
+| `gpt-4.1-mini` | 0.40 | 0.10 | 1.60 |
+| anything else (`_DEFAULT_PRICE`) | 1.25 | 0.125 | 10.00 |
+
+An unknown model is priced as `gpt-5` — deliberately pessimistic, so the budget brake
+never under-charges. Prices are a local table and go stale; they bound spending, they do
+not bill.
+
+### Prompt cache
+
+`loop.run()` calls `set_cache_key("teacup-agent-" + sha256(system_message)[:16])`, derived
+from the context prefix so separate runs of the same configuration share cache entries. A
+prefix under ~1024 tokens never enters the cache at all. On `--resume` the system message
+is **not** rebuilt, or every entry earned so far is voided.
+
+## 6. Tools
+
+Registration is a decorator writing into a module-level `REGISTRY: dict[str, Tool]`:
+
+```python
+@tool(description, parameters, requires_approval=False, timeout=None, externalize=True)
+def my_tool(...) -> str: ...
+```
+
+`specs()` exports the registry in the OpenAI Chat `tools` shape. `execute(name, arguments)`
+runs one call and **never raises** — every failure comes back as an `ERROR: ...` string.
+
+### Built-ins
+
+| Tool | Parameters | Approval | Notes |
+| --- | --- | --- | --- |
+| `search_web` | `query`, `max_results=5` | no | three modes, below |
+| `calculate` | `expression` | no | AST-walked arithmetic, not `eval` |
+| `read_file` | `path` | no | project-relative, first 2000 chars, deny-list |
+| `remember` | `fact` | no | writes long-term memory |
+| `update_todo` | `index` (1-based), `status`, `note=""` | no | see below |
+| `send_email` | `to`, `subject`, `body` | **yes** | the gated example; the demo appends to `outbox.jsonl` |
+
+Conditionally registered: `load_skill` (with `--skills`), `delegate` (with
+`--subagents`), and one entry per MCP tool.
+
+`update_todo` declares `status` as the enum `done` | `blocked`, but the value is **not
+validated**: the implementation sets `item.done = True` unconditionally and only uses
+`status` to decide whether to keep `note`. Any value other than `"blocked"` — including a
+typo — is therefore treated as `done`. The enum is advisory, not enforced.
+
+### `search_web` modes
+
+Selected by `TEACUP_AGENT_SEARCH`: `web` always hits the network, `offline` always uses a
+built-in corpus and makes zero network calls, `auto` tries the network and falls back
+to the corpus **only when the corpus has something** — a broken search over an empty
+corpus returns an ERROR, never "no results".
+
+The real backend is DuckDuckGo via `ddgs`, no API key. `_RETRIES = 3` attempts with 1s
+then 2s backoff; `_MIN_INTERVAL = 0.5`s between real searches, enforced under a lock because
+tools run in parallel. **A failed search says it failed** — it must never read as "there
+is nothing to find".
+
+### `read_file` deny-list
+
+Path must resolve inside `cwd` (traversal guard), then `DENIED_FILES` / `DENIED_DIRS`
+apply:
+
+- files: `.env`, `.env.*`, `*.env`, `mcp.json`, `memory.json`, `state.json`, `*.pem`,
+  `*.key`, `id_rsa*`, `*.p12`
+- directories: `.git`, `.ssh`, `.aws`, `.venv`
+
+A denial returns an ERROR that tells the model this is a fixed rule, not a grantable
+permission, so it does not retry a different spelling.
+
+### Execution semantics
+
+- **Per-turn cap.** Calls beyond `max_tool_calls_per_step` are refused with an ERROR
+  explaining they can be re-sent next turn — and still get a result message each
+  (`skip_reason="throttled"`).
+- **Approval runs first, serially,** before the thread pool: it either asks a human or
+  denies. A denial returns `loop.DENIED` and records `skip_reason="denied"`.
+- **Parallelism.** `ThreadPoolExecutor(max_workers=len(to_run))`, results collected
+  against **absolute** deadlines so waiting on them in sequence does not add the timeouts
+  together. Results are appended strictly in the original call order.
+- **Per-call limit** = the tool's own `timeout` if set, else `tool_timeout`, further
+  clamped to `max(1.0, time_left())`. On timeout the model gets an ERROR saying the call
+  was abandoned — explicitly not that the operation failed — and the thread is left to
+  finish. Python cannot kill a thread; real isolation would need a subprocess.
+- **Externalization.** With a `run_dir`, a result longer than `EXTERNALIZE_OVER = 2000`
+  chars is written to disk and replaced in context by a `context.EXCERPT = 600`-char
+  excerpt plus the path, which the model can read back with `read_file`. Tools with
+  `externalize=False` (`load_skill`) are exempt — a procedure is an instruction, not raw
+  material.
+
+### Approval policies
+
+`deny_all` is the default passed into `loop.run()`. `cli.py` maps `--approve` to
+`auto` (interactive prompt when `stdin.isatty()`, otherwise deny), `deny`, or `allow`.
+
+## 7. Context management (`context.py`)
+
+- `estimate_tokens(text)` ≈ `cjk/1.5 + (len - cjk)/4 + 1`. Used **only** to decide
+  whether to compact; billing uses the real usage numbers.
+- `safe_cut_points(messages)` returns every index where no announced tool-call id is
+  still unfilled — the only places a cut cannot break the message protocol. Recognises
+  both API shapes (`tool_calls`/`role=tool` and `function_call`/`function_call_output`).
+- `compact(state, model, limit, keep_recent=8)` keeps `head = 2` entries (system + the
+  original goal) and the last 8, summarizes everything between the newest safe cut point
+  and replaces it with one `[context summary]` system message. Returns estimated tokens
+  saved. Returns `0` — changing nothing — when there is no safe cut point, or when the
+  summarizer produced no text. The summarizer call is charged to the run's budget.
+
+## 8. Memory (`memory.py`)
+
+Two layers of lifetime, and inside the long-term layer two tiers of **trust**. Short
+term is `AgentState.messages` and dies with the task. Long term is a JSON file:
+
+```json
+{
+  "facts": ["...", "..."],
+  "notes": [{ "kind": "experience", "text": "..." }]
+}
+```
+
+`Memory(path="memory.json", limit=20, note_limit=10)`.
+
+| | `facts` | `notes` |
+| --- | --- | --- |
+| Written by | the model, via the `remember` tool | the harness, via `reflect.py` |
+| When | mid-task, deliberately | after the run has already ended |
+| Reviewed | chosen by the model | unreviewed by construction |
+| Kept | last 20 | last 10 |
+| Entry | a string | `{"kind": "experience" \| "lesson", "text": ...}` |
+
+Both de-duplicate exactly and evict oldest-first. `recall()` returns up to two labelled
+blocks, and the notes block says in the prompt that they are auto-generated and not
+human-verified, so the model can weigh them differently. A corrupt file loads as empty
+rather than taking the agent down. `NullMemory` never touches disk — what evals and unit
+tests use.
+
+The replaceable surface is `remember()` + `note()` + `recall()`.
+
+## 9. Checklist (`plan.py`)
+
+`decompose(goal, model)` makes **one** model call with no tools and returns 1–5
+`TodoItem`s. A planner that fails returns `[]`, which degrades exactly to the unplanned
+behaviour — a broken planner must never stop a run. `render()` produces the `[x]`/`[ ]`
+block carried in every turn's status note; `pending()` returns items still open.
+
+The model ticks items off with `update_todo(index, status, note)`. `blocked` is settled:
+it stops being outstanding but keeps its reason. The completion push-back
+(`COMPLETION_CHECK`) fires **at most once per run**, guarded by
+`state.completion_checked`.
+
+## 10. Reflection (`reflect.py`)
+
+`--reflect` (default `auto`: on for `--live`, off offline). Shaped exactly like
+`plan.py` — one extra model call, no tools, and any failure writes nothing rather than
+sinking an already-finished run.
+
+Triggers are computed for free from `trajectory.mechanical()`; **no model call is made
+unless one fires**:
+
+| Note | Condition |
+| --- | --- |
+| `experience` | `status == "done"` and not `salvaged` and `pending_todos == 0` and `duplicate_tool_calls == 0` and not `action_never_attempted` |
+| `lesson` | `failed_tool_calls > 0` and `delivered` |
+
+The model is asked for JSON with exactly the requested keys; the first `{...}` in the
+reply is parsed, and anything unparseable means nothing is written. `state.charge()` is
+called on the reply, so the cost is honest even though `status` is already final. Notes
+land in `Memory.notes`, never in `facts` (section 8). The kinds written are returned and
+emitted as the `reflected` event.
+
+The intended path for a good note is a human promoting it into `docs/roadmap.md`'s
+"Field patches" — this is the candidate feed for that, not a replacement.
+
+## 11. Skills (`skills.py`)
+
+A skill is a directory under `--skills` (default `./skills`) containing `SKILL.md` with
+YAML frontmatter:
+
+```markdown
+---
+name: web-research
+description: One line. This is the only part always in context.
+---
+<the procedure>
+```
+
+`catalog()` builds the always-loaded block: one `- name: description` line each, prefixed
+by an instruction to call `load_skill(name)` first when the task matches. The body arrives
+only as a `load_skill` tool result, and never enters the system prompt. Loaded names are
+recorded in `state.loaded_skills`.
+
+## 12. Subagents (`subagent.py`)
+
+`--subagents` registers `delegate(task, wanted="")`. Defaults from
+`subagent.enable(...)`: `max_steps=4` (`--subagent-steps`), `budget_share=0.4`,
+`timeout=300.0`s for the tool call itself.
+
+- The child's budget is `parent.remaining_budget * budget_share`, read **at call time**,
+  so a nearly-spent parent cannot fund an expensive child. Zero budget returns an ERROR.
+- The child inherits `time_left()`, the approval policy, and every tool except `delegate`
+  — **one level of delegation only**.
+- Child artifacts go to `<run_dir>/sub<NN>/`.
+- On return the parent is charged `budget - child.remaining_budget` and accumulates the
+  child's token counts; `parent.subagent_runs += 1`.
+- Only `child.answer` crosses back into the parent context. A child that ends without one
+  returns an ERROR naming its status; one that stopped early appends
+  `[subagent stopped early: <status>]`.
+
+## 13. MCP (`mcp_tools.py`)
+
+Config file (`mcp.json`, template `mcp.example.json`), one entry per server under
+`"servers"`:
+
+| Key | Meaning |
+| --- | --- |
+| `url` | HTTP transport — mutually exclusive with `command` |
+| `command`, `args`, `env` | stdio transport |
+| `tools` | optional allowlist; every schema costs prefix tokens on every request |
+| `approve` | `auto` (default) \| `all` \| `none` |
+| `stderr` | `hide` (default) \| `show` |
+
+Tools register as `server__tool`, with anything outside `[A-Za-z0-9_-]` replaced by `_`.
+`CALL_TIMEOUT = 60.0`s per call. Approval under `auto` opens **only** tools the server
+explicitly annotates `read_only_hint`; a server that annotates nothing gets everything
+gated. `McpHub` owns one asyncio loop on a daemon thread and blocks the sync caller on it.
+
+## 14. Declarative config (`agent_config.py`)
+
+`--config agent.yaml` replaces the flags rather than merging with them: everything except
+the goal, `--quiet` and `--resume` comes from the file. Template: `agent.example.yaml`.
+Secrets never go in it — name an env var with `api_key_env`, or embed `${VAR}` — and
+`agent.yaml` is gitignored for the same reason as `mcp.json`.
+
+| Block | Keys |
+| --- | --- |
+| `models.default` | the profile name used for the run |
+| `models.profiles.<name>` | `provider` (`openai` \| `openai-compatible`), `api` (`responses` \| `chat`), `model`, `api_key_env`, optional `base_url`, optional `reasoning_effort` |
+| `mcp` | the same per-server shape as `mcp.json`'s `servers`, nested one level deeper |
+| `tools` | `exclude: [names]`, `subagents.enabled`, `subagents.max_steps` |
+| `skills` | `dir:` a path, or `off` |
+| `runtime` | `max_steps`, `max_tool_calls_per_step`, `budget`, `deadline`, `tool_timeout`, `context_limit`, `approve`, `plan`, `reflect`, `search`, `memory`, `run_dir` |
+| `a2a` | parsed if present, read by nothing yet (roadmap #17-#18) |
+
+`load(path) -> AgentConfig` expands `${VAR}` from the environment;
+`build_model(profile)` returns a `Model`; `resolve_run_dir(value)` turns `runs` into a
+fresh `runs/<timestamp>` and `off` into `None`.
+
+`trajectory.py` takes the same file: `--config agent.yaml [--judge-profile <name>]`
+sources the judge model from `models.profiles` instead of `--model`, so the eval cannot
+silently diverge from what the agent itself runs.
+
+## 15. On-disk formats
+
+| Path | Written by | Shape |
+| --- | --- | --- |
+| `runs/<timestamp>/state.json` | `persist.save()` after every step | `dataclasses.asdict(AgentState)`, UTF-8, indent 2 |
+| `runs/<timestamp>/sub<NN>/` | subagent runs | same, one directory per child |
+| `runs/<timestamp>/step<NN>_<i>_<name>.txt` | `context.externalize()` | the full tool result |
+| `memory.json` | `Memory.save()` | `{"facts": [...], "notes": [{"kind", "text"}]}` |
+| `outbox.jsonl` | `send_email` | one JSON line per approved send (nothing is really sent) |
+| `mcp.json` | you | section 13 |
+| `agent.yaml` | you | section 14 |
+| `skills/<name>/SKILL.md` | you | section 11 |
+
+`persist.save()` writes a `.tmp` file and renames it, so a crash mid-write cannot leave a
+half-written state. `persist.load()` rebuilds `trace` and `todo` into dataclasses by hand
+— `asdict()` flattened them on the way out and everything downstream expects objects.
+
+`runs/` and `memory.json` are gitignored, as are `.env`, `mcp.json` and `agent.yaml`.
+
+## 16. Event stream
+
+`loop.run(on_event=...)` receives `(event: str, data: dict)`. The full set:
+
+| Event | Emitted when |
+| --- | --- |
+| `planned` | the checklist was decomposed |
+| `skills` | the skill catalog was enabled |
+| `compacted` | context was compacted |
+| `retry` | a model call is being retried |
+| `tool_call` | a call is about to run |
+| `tool_result` | a call returned |
+| `throttled` | a turn exceeded the per-turn cap |
+| `approval_required` / `approved` / `denied` | the gate |
+| `externalized` | a result went to disk |
+| `completion_check` | the checklist push-back fired |
+| `answer` | the model finished |
+| `stopped` | a ceiling was hit |
+| `salvaged` | the forced wrap-up produced an answer |
+| `reflected` | a run wrote an experience and/or lesson note |
+| `saved` | the final state was written |
+| `error` | a model call failed, or a compaction raised |
+
+This is the observability contract; `cli.py` is one consumer of it.
+
+## 17. Evaluation
+
+Two kinds, and conflating them is the mistake this repo names explicitly.
+
+**Protocol evals** — `uv run python -m teacup_agent.evals`. 21 cases against
+`ScriptedModel`: no API key, no network, `run_dir=None`, nothing written into the repo.
+They pin the message protocol, the brakes, the wrap-up, compaction, the approval gate,
+the checklist, delegation and skills. They must stay green and must stay free.
+
+All three commands run in CI (`.github/workflows/verify.yml`) on every pull request
+and on pushes to `main`, with `TEACUP_AGENT_SEARCH=offline` forced and read-only token
+permissions.
+
+**Trajectory scoring** — `uv run python -m teacup_agent.trajectory runs/<timestamp>`,
+`--judge` adds the LLM half, `--config` + `--judge-profile` source the judge from
+`agent.yaml` instead of `--model` (section 14).
+
+`mechanical(state)` is deterministic and returns:
+
+| Key | Meaning |
+| --- | --- |
+| `status`, `steps`, `elapsed_s` | how the run ended and what it used |
+| `tool_calls`, `failed_tool_calls` | executed calls; those whose result began `ERROR:` |
+| `duplicate_tool_calls` | same tool, same arguments, more than once |
+| `throttled`, `denied` | calls that never ran, by reason |
+| `retried_after_denial` | an identical call re-sent after being denied |
+| `action_never_attempted` | the goal used an action verb and no gated tool was ever called |
+| `pending_todos` | checklist items still open |
+| `compactions`, `salvaged`, `cache_hit`, `cost_hint` | run mechanics |
+| `answer_chars`, `answer_citations` | answer size and link count |
+| `unsupported_citations` | links in the answer that appear in no tool result |
+| `asks_user_back` | the answer asks the user a question (EN and ZH phrasings) |
+| `asks_without_trying` | asked for authorization without ever attempting the call |
+| `delivered` | an answer exists and is not the "(no final answer" placeholder |
+
+`unsupported_citations` is the deterministic invented-citation detector, and it is more
+accurate than an LLM judge for that one question. `action_never_attempted` counts a
+*denied* call as an attempt — the model did its part.
+
+## 18. Tuned constants
+
+Every one of these was set by a measurement; the reasoning is in
+[design-notes.md](design-notes.md).
+
+| Constant | Value | Where |
+| --- | --- | --- |
+| `EXTERNALIZE_OVER` | 2000 chars | `loop.py` |
+| `EXCERPT` | 600 chars | `context.py` |
+| `compact(keep_recent=)` | 8 entries | `context.py` |
+| `head` kept by `compact` | 2 entries | `context.py` |
+| retry `attempts` | 3, sleeps 1s then 2s | `loop.py` |
+| `_MIN_INTERVAL` | 0.5s between searches | `tools.py` |
+| `_RETRIES` (search) | 3, sleeps 1s then 2s | `tools.py` |
+| `CALL_TIMEOUT` (MCP) | 60.0s | `mcp_tools.py` |
+| `Memory(limit=)` | 20 facts | `memory.py` |
+| `Memory(note_limit=)` | 10 notes | `memory.py` |
+| `read_file` truncation | 2000 chars | `tools.py` |
+| `budget_share` (subagent) | 0.4 of remaining | `subagent.py` |
+| `timeout` (delegate tool) | 300.0s | `subagent.py` |
+| checklist size | 1–5 items | `plan.py` |

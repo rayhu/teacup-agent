@@ -7,12 +7,14 @@ Agent = Model + State + Tools + Control Loop + Memory/Evals
 ```
 
 Nothing is stubbed out: every part does real work, and each is kept to a few dozen lines
-so you can replace them one at a time. The control loop is about 40 lines and fits on one
-screen, which is the point of the whole project — a harness you can read before you trust
+so you can replace them one at a time. The control loop — `_loop()` in `loop.py` — is
+about 80 lines of code, 115 with the comments that mark its traps, and reads in one
+sitting. That is the point of the whole project: a harness you can read before you trust
 it.
 
 MIT licensed. Fork it, take the parts you want, and see
-[CONTRIBUTING.md](CONTRIBUTING.md) for where the seams are.
+[CONTRIBUTING.md](CONTRIBUTING.md) for where the seams are —
+[docs/intent.md](docs/intent.md) says what a fork owes the original, and how to publish one.
 
 ## Quick start
 
@@ -78,6 +80,8 @@ agent.example.yaml      template for a YAML-described agent (--config)
 AGENTS.md               how to work in this repo (CLAUDE.md just imports it)
 REVIEW.md               the independent review pass a change goes through
 docs/workflow.md        how a change gets from an idea to main
+docs/intent.md          what the project is for, and what a fork owes it
+docs/spec.md            the technical contract: values, shapes, interfaces
 docs/design-notes.md    why each subsystem behaves the way it does
 docs/roadmap.md         what is missing, and in what order to add it
 NOTES.md                the original study notes this grew from
