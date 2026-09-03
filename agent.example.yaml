@@ -1,0 +1,70 @@
+# Copy this to agent.yaml, then: uv run teacup-agent --config agent.yaml "your goal"
+#
+# --config is a parallel track, not a merge with the other CLI flags: once it is set,
+# every flag other than the goal, --quiet and --resume is ignored. Secrets never go in
+# this file — name an environment variable (api_key_env) or embed ${VAR}, and put the
+# actual value in .env. agent.yaml itself should be gitignored, same as mcp.json.
+
+models:
+  default: gpt5-responses
+  profiles:
+    gpt5-responses:
+      provider: openai            # openai | openai-compatible
+      api: responses              # responses (default, preserves reasoning state) | chat
+      model: gpt-5
+      api_key_env: OPENAI_API_KEY
+      reasoning_effort: medium    # optional
+
+    # An OpenAI-compatible endpoint (vLLM, Ollama, OpenRouter, ...): same two classes,
+    # just pointed at a different base_url. A local server may need no key at all.
+    # local-llama:
+    #   provider: openai-compatible
+    #   api: chat
+    #   model: llama-3.1-70b
+    #   base_url: http://localhost:11434/v1
+    #   api_key_env: OLLAMA_API_KEY
+
+# Identical per-server shape to mcp.json's "servers" map (see mcp.example.json), just
+# nested one level deeper. Omit this section, or leave it empty, to run with no MCP.
+mcp: {}
+  # fetch:
+  #   command: uvx
+  #   args: ["mcp-server-fetch"]
+  #   approve: none
+
+tools:
+  exclude: []          # built-in tool names to hide from the model this run
+  subagents:
+    enabled: false      # offer the delegate-to-a-subagent tool
+    max_steps: 4
+
+skills:
+  dir: skills          # a path, or "off" to disable
+
+# Agent2Agent (A2A) protocol config: reserved for a follow-up (see docs/roadmap.md #17
+# and #18). Parsed if present, but nothing reads it yet — no delegate_a2a tool, no A2A
+# server. Left here, commented out, so this file's final shape does not need to change
+# again once that lands.
+# a2a:
+#   card:
+#     name: my-agent
+#     description: "What this agent does."
+#     version: "0.1.0"
+#   peers:
+#     finance-agent:
+#       url: https://agents.example.com/finance
+#       api_key_env: FINANCE_AGENT_TOKEN
+
+runtime:
+  max_steps: 8
+  max_tool_calls_per_step: 3
+  budget: 0.05
+  deadline: 600
+  tool_timeout: 30
+  context_limit: 30000
+  approve: auto        # auto (ask when there's a terminal) | deny | allow
+  plan: auto
+  reflect: auto        # write an experience/lesson note after a qualifying run
+  search: auto         # auto | web | offline
+  memory: memory.json
+  run_dir: runs        # a fresh runs/<timestamp> each run; "off" disables persistence

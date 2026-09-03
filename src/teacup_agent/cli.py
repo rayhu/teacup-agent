@@ -317,7 +317,18 @@ def main(argv: list[str] | None = None) -> int:
         "= on for --live, off for the offline demo",
     )
     p.add_argument("-q", "--quiet", action="store_true", help="print only the final answer")
+    p.add_argument(
+        "--config",
+        default=None,
+        help="load models/mcp/tools/skills/runtime from a YAML file (see "
+        "agent.example.yaml) instead of the flags above. A parallel track, not a "
+        "merge: every flag other than the goal, --quiet and --resume is ignored "
+        "once --config is set",
+    )
     args = p.parse_args(argv)
+
+    if args.config:
+        return _main_config(args)
 
     # Search mode is decoupled from model mode: the offline demo also searches
     # offline, so it stays network-free and instant.
@@ -380,6 +391,91 @@ def main(argv: list[str] | None = None) -> int:
 
     try:
         state = _run_agent(args, the_model, run_dir, resumed)
+    finally:
+        if hub is not None:
+            hub.close()
+
+    print(f"\nAnswer: {state.answer}")
+    if run_dir is not None and not args.quiet:
+        print(
+            f"Trajectory saved to {pathlib.Path(run_dir) / persist.FILENAME} "
+            "(resume it with --resume)"
+        )
+    if not args.quiet:
+        print(f"State: {json.dumps(state.snapshot(), ensure_ascii=False)}")
+    return 0 if state.status == "done" else 1
+
+
+def _main_config(args) -> int:
+    """The --config path: everything comes from the YAML file, nothing from the other
+    flags. See agent_config.py for why this is a parallel track rather than a merge."""
+    from teacup_agent import agent_config
+
+    cfg = agent_config.load(args.config)
+    os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
+
+    resumed = persist.load(args.resume) if args.resume else None
+    if resumed is not None:
+        # Same "give it this much more" semantics as the flag-driven path.
+        resumed.max_steps = resumed.step + cfg.runtime.max_steps
+        resumed.remaining_budget += cfg.runtime.budget
+        resumed.time_budget = (
+            (resumed.elapsed + cfg.runtime.deadline) if cfg.runtime.deadline > 0 else None
+        )
+        resumed.salvaged = False
+
+    the_model = agent_config.build_model(cfg.models[cfg.default_model])
+    if not args.quiet:
+        print(
+            f"mode config:{args.config} (model profile {cfg.default_model}) | "
+            f"goal: {args.goal}\n"
+        )
+
+    run_dir = agent_config.resolve_run_dir(cfg.runtime.run_dir)
+    if args.resume:  # keep one run in one directory, same as the flag-driven path
+        run_dir = pathlib.Path(args.resume).parent if args.resume.endswith(".json") else args.resume
+
+    hub = None
+    if cfg.mcp:
+        from teacup_agent.mcp_tools import McpHub
+
+        hub = McpHub()
+        for server_name, spec in cfg.mcp.items():
+            try:
+                added = hub.connect(server_name, spec)
+            except Exception as e:  # one bad server must not sink the run
+                print(f"  [mcp] {server_name} failed to connect: {type(e).__name__}: {e}")
+                continue
+            if not args.quiet:
+                gated = sum(tools_mod.REGISTRY[n].requires_approval for n in added)
+                plural = "tool" if len(added) == 1 else "tools"
+                print(
+                    f"  [mcp] {server_name}: {len(added)} {plural} "
+                    f"({gated} gated) — {', '.join(added)}"
+                )
+
+    try:
+        state = loop.run(
+            goal=args.goal,
+            model=the_model,
+            memory=Memory(cfg.runtime.memory),
+            max_steps=cfg.runtime.max_steps,
+            budget=cfg.runtime.budget,
+            time_budget=cfg.runtime.deadline if cfg.runtime.deadline > 0 else None,
+            tool_timeout=cfg.runtime.tool_timeout,
+            context_limit=cfg.runtime.context_limit,
+            run_dir=run_dir,
+            resume=resumed,
+            approve=_make_approver(cfg.runtime.approve, args.quiet),
+            max_tool_calls_per_step=cfg.runtime.max_tool_calls_per_step,
+            plan=_resolve_plan(cfg.runtime.plan, live=True),  # a config run is always "real"
+            reflect=_resolve_plan(cfg.runtime.reflect, live=True),
+            skills=cfg.skills_dir,
+            subagents=cfg.tools.subagents,
+            subagent_max_steps=cfg.tools.subagent_max_steps,
+            exclude_tools=cfg.tools.exclude or None,
+            on_event=_printer(args.quiet),
+        )
     finally:
         if hub is not None:
             hub.close()

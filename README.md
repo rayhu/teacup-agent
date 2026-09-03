@@ -69,10 +69,12 @@ src/teacup_agent/
 ├── subagent.py    delegation   a child run with its own context
 ├── trajectory.py  scoring      grade a real run: mechanical metrics + an LLM judge
 ├── reflect.py     reflection   write down what worked, or what broke and got fixed
+├── agent_config.py config      describe an agent in agent.yaml instead of flags
 └── cli.py         entry point
 tests/                  pytest: the eval cases plus unit tests
 examples/               runnable demos, starting with approval_demo.py
 mcp.example.json        template for MCP servers
+agent.example.yaml      template for a YAML-described agent (--config)
 AGENTS.md               how to work in this repo (CLAUDE.md just imports it)
 REVIEW.md               the independent review pass a change goes through
 docs/workflow.md        how a change gets from an idea to main
@@ -85,7 +87,7 @@ NOTES.md                the original study notes this grew from
 
 | Part | File | Today | When you outgrow it |
 | --- | --- | --- | --- |
-| Model | `model.py` | Responses API (default) and Chat Completions with cache-aware pricing, plus an offline scripted model | Claude, local models, multi-model routing |
+| Model | `model.py`, `agent_config.py` | Responses API (default) and Chat Completions with cache-aware pricing, an offline scripted model, and `--config agent.yaml` for naming several profiles (including any OpenAI-compatible endpoint via `base_url`) and picking one as the default | Claude's own Messages API, per-profile cost tables, Agent2Agent interop (roadmap #16-#18) |
 | State | `state.py` | steps, budget, time, status machine, tool trace; saved every step and resumable | distributed or concurrent runs |
 | Tools | `tools.py`, `mcp_tools.py` | six built-ins (search, calculate, read file, remember, checklist, send mail) plus anything an MCP server exposes | more servers |
 | Control Loop | `loop.py` | four brakes, parallel tools, retries, a completion check, delegation to subagents | parallel subagents, delegated planning |
