@@ -2,11 +2,12 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10 and #12 are done (except the fine-grained permissions part of #6).
-Five items that were never on the roadmap were added after reviewing real runs
+**Progress**: #1-#10, #12 and #15 are done (except the fine-grained permissions part of
+#6). Five items that were never on the roadmap were added after reviewing real runs
 (see "Field patches" at the end).
 Next up: #14 (threat model and allowlists) closes a hole that exists today; then
-#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend).
+#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend); #16-#18
+(multi-provider models, Agent2Agent client and server) are scoped but not started.
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/teacup_agent/loop.py) is "old technology".
@@ -643,12 +644,137 @@ different axes, not strong and weak versions of one thing.
 
 ---
 
+### 15. Declarative agent config (`agent.yaml`) — DONE (2026-09-03)
+
+**Now**: model, MCP servers, tools, skills and every runtime ceiling are one flat list of
+`cli.py` flags. Fine for one invocation; not for describing *an agent* — something you'd
+want to diff, copy between projects, or hand to someone else.
+
+**What shipped**: [`agent_config.py`](../src/teacup_agent/agent_config.py) — dataclasses
+(`ModelProfile`, `ToolsConfig`, `RuntimeConfig`, `AgentConfig`), a `load(path)` that reads
+YAML with `${VAR}` expansion (env-only; secrets never live in the file, same convention
+as `mcp.json`), and `build_model()`/`resolve_run_dir()` factories. `cli.py --config
+<path>` is a **parallel track, not a merge**: every other behavior flag is ignored once
+it is set. `agent.example.yaml` is the committed template; `agent.yaml` is gitignored.
+`trajectory.py --config --judge-profile` reuses the same registry for the LLM judge's
+model instead of a second, silently-diverging default (it was `--model gpt-5-mini`,
+hardcoded).
+
+**A bug the tests caught before anyone hit it**: PyYAML parses a bare `off`/`on` as a
+Python **bool**, not a string (YAML 1.1's "Norway problem"). Three fields here use
+`"off"`/`"on"` as string sentinels (`runtime.plan`, `runtime.run_dir`, `skills.dir`), so
+`plan: off` written unquoted parsed to `False`, and every `== "off"` check downstream
+silently took the wrong branch — `resolve_run_dir(False)` crashed outright, but
+`skills.dir: off` would have quietly loaded skills anyway. `_normalize_off_on()` maps the
+boolean back to the matching sentinel before anything compares against it. Full writeup
+and a regression test: `docs/design-notes.md` and `tests/test_agent_config.py`.
+
+**A capability that came free**: reaching an OpenAI-compatible endpoint (`base_url`) that
+was scoped as part of #16 turned out to need no change to `model.py` at all —
+`OpenAIModel`/`ResponsesModel` already accept a pre-built `client`, so `build_model()`
+just constructs one with a custom `base_url`. #16 below is now only the price-table
+override and a native second wire protocol.
+
+**Verification**:
+```
+uv run pytest                          # 171 passed
+uv run python -m teacup_agent.evals    # 20/20 passed
+uv run teacup-agent                    # offline demo unaffected, still instant
+```
+
+---
+
+### 16. Multi-provider models: price overrides and a native second protocol
+
+**Now**: `#15` already reaches any OpenAI-compatible endpoint (vLLM, Ollama, OpenRouter)
+via `base_url`, for free. What is left is smaller than originally scoped:
+
+- **Per-profile cost override.** `estimate_cost()` looks prices up in a name-keyed table
+  (`model.PRICES`) with a fallback for anything unrecognized — accurate for OpenAI models,
+  a guess for everything else. A profile-supplied `(price_input, price_cached,
+  price_output)` should take priority over the table when present, so cost tracking stays
+  meaningful for a local or third-party model.
+- **A native Anthropic Messages API path** (a genuinely different request/response shape,
+  not just a different URL) — added the same way `ResponsesModel` was added beside
+  `OpenAIModel`: a new class behind the unchanged `Model` Protocol, no loop change.
+
+**Definition of done**: a model profile with `price_input`/`price_cached`/`price_output`
+changes `state.snapshot()`'s cost accounting; an `AnthropicModel` class round-trips a
+tool call through the Messages API shape with a test pinning its `tool_result_item()`.
+
+---
+
+### 17. Agent2Agent (A2A) client: delegate to a remote agent
+
+**Now**: `subagent.py`'s `delegate` tool hands a subtask to a child **in-process** loop.
+There is no way to hand a subtask to a *different* agent process, possibly on a different
+machine, possibly not running teacup-agent at all.
+
+**Why A2A rather than inventing a wire format**: the Agent2Agent protocol reached v1.0 in
+January 2026, is Linux-Foundation-governed, and has an official Python SDK (`a2a-sdk`,
+built on Starlette/JSON-RPC/SSE). This repo already has the precedent for "depend on the
+official SDK rather than hand-roll the protocol" — `mcp_tools.py` wraps the official `mcp`
+package the same way.
+
+**How**: a new `a2a/client.py` — given a peer's Agent Card URL and a bearer token resolved
+from `api_key_env` (`agent.yaml`'s `a2a.peers`, reserved by #15's schema but inert until
+now), submit a task (`message/send`), wait for a terminal state, flatten the result into a
+plain string. Every failure path (network error, remote task failure, timeout) becomes an
+`"ERROR: ..."` string, never a raised exception — the same discipline `tools.execute()`
+and `mcp_tools.py` already hold. A new tool, `delegate_a2a(peer, task)`, registered only
+when `a2a.peers` is non-empty (the same "do not cost prefix tokens when unused" pattern as
+`--subagents`/skills), `requires_approval=True` by default — an outbound call to a
+third-party, possibly-billed agent is exactly the side effect the approval gate exists for.
+
+**Definition of done**: a local fake A2A server (`a2a-sdk`'s Starlette app, in-process, no
+real network — the same role `tests/fixtures/demo_mcp_server.py` plays for MCP) receives
+and answers a task sent by `delegate_a2a`.
+
+---
+
+### 18. Agent2Agent (A2A) server: expose this agent to other agents
+
+**Now**: this agent can only be driven by a human running `cli.py`. #17 lets it call
+*out* to another agent; nothing lets another agent call *in*.
+
+**The tension worth stating plainly**: this is, structurally, a service layer — a
+long-lived HTTP process accepting inbound tasks — and "Deliberately not doing" below has
+said "no multi-tenancy, service layer or web UI" since this file began. The resolution:
+make the server strictly a second, explicitly-invoked surface that never loads by
+default.
+
+**How**: a new optional dependency group (`a2a-server = ["a2a-sdk[http-server]"]`,
+installed only via `uv sync --extra a2a-server` — the Starlette/uvicorn footprint never
+ships by default); `a2a/card.py` builds an Agent Card from `agent.yaml`'s `a2a.card` plus
+the live tool/skill registry; `a2a/server.py`'s `TeacupAgentExecutor` wraps the existing
+`loop.run(goal=<incoming task text>, ...)` — no change to the loop itself. A separate
+console script, `teacup-agent-serve`, is the one explicit gesture that turns this into a
+long-lived process; `uv run teacup-agent` is unaffected whether or not the extra is
+installed. `cancel()` is left honestly unimplemented at first pass (`loop.run` has no
+cooperative-cancel hook) rather than faked.
+
+**A security property this must not break**: inbound tasks run through the same
+`deny_all`-by-default approval gate as any local run. A remote caller cannot trigger
+`send_email` (or anything `requires_approval`) without this instance's own approval
+policy allowing it.
+
+**Definition of done**: a second local teacup-agent instance, using #17's `delegate_a2a`,
+submits a task to a `teacup-agent-serve` instance over loopback HTTP and gets back a
+correct answer — verified end to end, no external network. `docs/roadmap.md`'s
+"Deliberately not doing" entry below is amended to name this the one narrow,
+explicitly-opt-in exception, rather than silently contradicted.
+
+---
+
 ## Deliberately not doing
 
 - **No agent framework** (LangGraph and friends). The value of this repo is that the
   40-line loop is **yours** and fits on one screen. Wrap it in a framework and the
   learning value drops to zero.
-- **No multi-tenancy, service layer or web UI.** That is a different project.
+- **No multi-tenancy or web UI.** That is a different project. The one narrow exception
+  is #18's optional A2A server: a second console script behind a separate install extra,
+  never loaded by `uv run teacup-agent`, added because Agent2Agent interop needs an agent
+  that can be called into, not because this became a service project.
 - **No race for tool count.** Five tools demonstrate every mechanism; if you want more
   tools, go through MCP (#9).
 
