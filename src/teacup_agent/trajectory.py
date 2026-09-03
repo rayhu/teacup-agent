@@ -228,6 +228,19 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument("runs", nargs="+", help="runs/<timestamp> directory, or a state.json path")
     p.add_argument("--judge", action="store_true", help="add the LLM judge (costs money)")
     p.add_argument("--model", default="gpt-5-mini", help="model to use as the judge")
+    p.add_argument(
+        "--config",
+        default=None,
+        help="agent.yaml to source the judge model from, instead of --model (see "
+        "models.profiles). Keeps this eval from silently diverging from whatever the "
+        "agent itself is configured to use",
+    )
+    p.add_argument(
+        "--judge-profile",
+        default=None,
+        help="models.profiles entry to use as the judge; only with --config "
+        "(default: models.default)",
+    )
     p.add_argument("--out", default=None, help="write the full report as JSON")
     args = p.parse_args(argv)
 
@@ -235,10 +248,22 @@ def main(argv: list[str] | None = None) -> int:
     if args.judge:
         from dotenv import load_dotenv
 
-        from teacup_agent.model import ResponsesModel
-
         load_dotenv()
-        model = ResponsesModel(args.model)
+        if args.config:
+            from teacup_agent import agent_config
+
+            cfg = agent_config.load(args.config)
+            profile_name = args.judge_profile or cfg.default_model
+            if profile_name not in cfg.models:
+                raise SystemExit(
+                    f"--judge-profile {profile_name!r} is not in {args.config}'s "
+                    "models.profiles"
+                )
+            model = agent_config.build_model(cfg.models[profile_name])
+        else:
+            from teacup_agent.model import ResponsesModel
+
+            model = ResponsesModel(args.model)
 
     reports = []
     for path in args.runs:
