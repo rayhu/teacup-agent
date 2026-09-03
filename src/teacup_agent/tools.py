@@ -342,6 +342,25 @@ def _is_denied(relative: pathlib.PurePath) -> bool:
     return any(fnmatch.fnmatch(parts[-1], pattern) for pattern in DENIED_FILES)
 
 
+# The project root read_file's boundary is drawn against. Defaulting to None (falling
+# back to Path.cwd() when unset) keeps every existing test's behaviour unchanged, since
+# none of them call set_project_root(). What changes is that "project root" is now a
+# fact `cli.py` can state once and pass in, rather than something read_file recomputes
+# from the shell's cwd on every call — the same distinction #14 draws: without a way for
+# the two to diverge, "outside the project root but inside the launch directory" was
+# never a real, testable case.
+_project_root: pathlib.Path | None = None
+
+
+def set_project_root(root: pathlib.Path | None) -> None:
+    global _project_root
+    _project_root = root
+
+
+def _get_project_root() -> pathlib.Path:
+    return _project_root or pathlib.Path.cwd().resolve()
+
+
 @tool(
     description=(
         "Read a text file inside the current project directory (first 2000 characters). "
@@ -356,7 +375,7 @@ def _is_denied(relative: pathlib.PurePath) -> bool:
     },
 )
 def read_file(path: str) -> str:
-    root = pathlib.Path.cwd().resolve()
+    root = _get_project_root()
     target = (root / path).resolve()
     if not str(target).startswith(str(root)):  # simple traversal guard
         return "ERROR: only files inside the current project directory can be read"

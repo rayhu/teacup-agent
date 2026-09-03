@@ -176,3 +176,38 @@ def test_ordinary_project_files_still_read(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "notes.md").write_text("readable", encoding="utf-8")
     assert tools.execute("read_file", '{"path": "notes.md"}') == "readable"
+
+
+# --- an explicit project root, independent of the launch directory (#14) -------------
+
+
+def test_project_root_defaults_to_cwd_when_never_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "notes.md").write_text("readable", encoding="utf-8")
+    assert tools.execute("read_file", '{"path": "notes.md"}') == "readable"
+
+
+def test_project_root_can_be_set_independent_of_the_launch_directory(tmp_path, monkeypatch):
+    """The bug #14 fixes: before this, 'project root' and 'the directory the process
+    launched from' were definitionally the same value, so a file outside the intended
+    project but inside the launch directory was unreachable to test at all. Launch from
+    one directory, set the root to a different one, and confirm the launch directory's
+    own files are refused even though the traversal guard alone would have allowed
+    them."""
+    launch_dir = tmp_path / "launch"
+    project_dir = tmp_path / "project"
+    launch_dir.mkdir()
+    project_dir.mkdir()
+    (launch_dir / "secret.txt").write_text("should not be reachable", encoding="utf-8")
+    (project_dir / "notes.md").write_text("readable", encoding="utf-8")
+
+    monkeypatch.chdir(launch_dir)
+    tools.set_project_root(project_dir.resolve())
+    try:
+        outside = tools.execute("read_file", '{"path": "secret.txt"}')
+        inside = tools.execute("read_file", '{"path": "notes.md"}')
+    finally:
+        tools.set_project_root(None)  # must not leak into other tests
+
+    assert outside.startswith("ERROR:") and "should not be reachable" not in outside
+    assert inside == "readable"
