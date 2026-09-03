@@ -11,12 +11,14 @@ wrong twice; delete one when it stops being true.
 
 A minimal, readable AI agent — `Agent = Model + State + Tools + Control Loop +
 Memory/Evals` — built to be **shared, forked, improved and shared again**. Its value is
-that the ~40-line control loop in `loop.py` fits in one head. Every feature is weighed
+that the ~80-line control loop in `loop.py` fits in one head. Every feature is weighed
 against that: a capability that makes the loop unreadable costs more than it adds.
 
-Working docs: `README.md` (what it is and how to run it), `docs/design-notes.md` (why each
-subsystem behaves the way it does), `docs/roadmap.md` (what is missing and in what order),
-`NOTES.md` (the original study notes this grew from).
+Working docs: `README.md` (what it is and how to run it), `docs/intent.md` (what the
+project is for, and what a fork owes it), `docs/spec.md` (the technical contract:
+values, shapes, interfaces), `docs/design-notes.md` (why each subsystem behaves the
+way it does), `docs/roadmap.md` (what is missing and in what order), `NOTES.md` (the
+original study notes this grew from).
 
 How a change gets from an idea to `main` — the phase loop, who reviews what, what a human
 signs off — is `docs/workflow.md`, and the review pass itself is `REVIEW.md`. Read them
