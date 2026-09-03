@@ -7,7 +7,7 @@ requires-python = ">=3.11"
 license = "MIT"
 license-files = ["LICENSE"]
 authors = [{ name = "Ray Hu" }]
-keywords = ["ai-agent", "llm", "agentic-ai", "mcp", "model-context-protocol", "openai"]
+keywords = ["ai-agent", "llm", "agentic-ai", "mcp", "model-context-protocol", "openai", "a2a", "agent2agent"]
 classifiers = [
     "Development Status :: 4 - Beta",
     "Intended Audience :: Developers",
@@ -17,10 +17,16 @@ classifiers = [
 dependencies = [
     "openai>=1.60",
     "python-dotenv>=1.0",
-    "ddgs>=9.0",          # key-less web search backend (DuckDuckGo)
-    "mcp>=2.1",           # MCP client (SDK v2, speaks the 2026-07-28 stateless spec)
-    "pyyaml>=6.0",        # parses agent.yaml (a real nested document, unlike skills' frontmatter)
+    "ddgs>=9.0", # key-less web search backend (DuckDuckGo)
+    "mcp>=2.1", # MCP client (SDK v2, speaks the 2026-07-28 stateless spec)
+    "pyyaml>=6.0", # parses agent.yaml (a real nested document, unlike skills' frontmatter)
+    "a2a-sdk>=1.1.2", # Agent2Agent client (httpx is a hard dep of it; no [http-server] extra needed here)
 ]
+
+[project.optional-dependencies]
+# Only teacup-agent-serve needs this (Starlette + uvicorn); installed via
+# `uv sync --extra a2a-server`, never by default — see docs/roadmap.md #18.
+a2a-server = ["a2a-sdk[http-server]>=1.1.2"]
 
 [project.urls]
 Homepage = "https://github.com/rayhu/teacup-agent"
@@ -29,6 +35,7 @@ Roadmap = "https://github.com/rayhu/teacup-agent/blob/main/docs/roadmap.md"
 
 [project.scripts]
 teacup-agent = "teacup_agent.cli:main"
+teacup-agent-serve = "teacup_agent.a2a.server:main"
 
 [dependency-groups]
 dev = ["pytest>=8.0"]

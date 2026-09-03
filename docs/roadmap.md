@@ -2,12 +2,14 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #15 and #19 are done (except the fine-grained permissions part
-of #6). Five items that were never on the roadmap were added after reviewing real runs
-(see "Field patches" at the end).
+**Progress**: #1-#10, #12, #15, #18 and #19 are done (except the fine-grained permissions
+part of #6). #17 (the client side of #18) is a separate, independent branch/PR — see it
+for its own status. Five items that were never on the roadmap were added after reviewing
+real runs (see "Field patches" at the end).
 Next up: #14 (threat model and allowlists) closes a hole that exists today; then
-#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend); #16-#18
-(multi-provider models, Agent2Agent client and server) are scoped but not started.
+#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend) and
+#16 (multi-provider price overrides, a native Anthropic path), both scoped but not
+started.
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/teacup_agent/loop.py) is "old technology".
@@ -732,37 +734,63 @@ and answers a task sent by `delegate_a2a`.
 
 ---
 
-### 18. Agent2Agent (A2A) server: expose this agent to other agents
+### 18. Agent2Agent (A2A) server: expose this agent to other agents — DONE (2026-09-03)
 
 **Now**: this agent can only be driven by a human running `cli.py`. #17 lets it call
 *out* to another agent; nothing lets another agent call *in*.
 
 **The tension worth stating plainly**: this is, structurally, a service layer — a
 long-lived HTTP process accepting inbound tasks — and "Deliberately not doing" below has
-said "no multi-tenancy, service layer or web UI" since this file began. The resolution:
-make the server strictly a second, explicitly-invoked surface that never loads by
-default.
+said "no multi-tenancy, service layer or web UI" since this file began. The resolution,
+at two levels: the `a2a-server` optional dependency group (Starlette + uvicorn) is never
+installed by plain `uv sync`, only `uv sync --extra a2a-server`; and `teacup-agent-serve`
+is a second, entirely separate console script — `uv run teacup-agent` is unaffected
+whether or not the extra is even installed.
 
-**How**: a new optional dependency group (`a2a-server = ["a2a-sdk[http-server]"]`,
-installed only via `uv sync --extra a2a-server` — the Starlette/uvicorn footprint never
-ships by default); `a2a/card.py` builds an Agent Card from `agent.yaml`'s `a2a.card` plus
-the live tool/skill registry; `a2a/server.py`'s `TeacupAgentExecutor` wraps the existing
-`loop.run(goal=<incoming task text>, ...)` — no change to the loop itself. A separate
-console script, `teacup-agent-serve`, is the one explicit gesture that turns this into a
-long-lived process; `uv run teacup-agent` is unaffected whether or not the extra is
-installed. `cancel()` is left honestly unimplemented at first pass (`loop.run` has no
-cooperative-cancel hook) rather than faked.
+**What shipped**: [`a2a/card.py`](../src/teacup_agent/a2a/card.py) builds an Agent Card
+from `agent.yaml`'s `a2a.card` plus `skills.py`'s catalog (one line per skill is exactly
+the grain an `AgentSkill` wants — not the raw tool registry, which would be noisy and the
+wrong level of detail); [`a2a/server.py`](../src/teacup_agent/a2a/server.py)'s
+`TeacupAgentExecutor` wraps the existing `loop.run(goal=<incoming task text>, ...)`
+unchanged, via `asyncio.to_thread()` since the handler is async and `loop.run()` is not.
+Reuses `cli._make_approver` **unmodified** for the approval gate: its `"auto"` branch
+already denies when there is no TTY, always true under `uvicorn`, so a served agent is
+gated by AGENTS.md rule 4 with no new approval code. `cancel()` raises
+`NotImplementedError`, matching `a2a-sdk`'s own reference examples for "not supported" —
+`loop.run()` has no cooperative-cancel hook, so faking cancellation would be worse than
+refusing it.
 
-**A security property this must not break**: inbound tasks run through the same
-`deny_all`-by-default approval gate as any local run. A remote caller cannot trigger
-`send_email` (or anything `requires_approval`) without this instance's own approval
-policy allowing it.
+**A concurrency limit stated rather than silently shipped**: `tools_mod.REGISTRY` is
+process-global, and `skills.enable()`/`subagent.enable()` mutate it with no locking,
+assuming one `loop.run()` at a time. Two inbound tasks arriving concurrently on a server
+whose `agent.yaml` turns on skills or subagents would race on that state.
+`TeacupAgentExecutor` holds an `asyncio.Lock` around each run for exactly this reason —
+correct, at the cost of one served task at a time; real per-run tool isolation is a larger
+change, out of scope here.
 
-**Definition of done**: a second local teacup-agent instance, using #17's `delegate_a2a`,
-submits a task to a `teacup-agent-serve` instance over loopback HTTP and gets back a
-correct answer — verified end to end, no external network. `docs/roadmap.md`'s
-"Deliberately not doing" entry below is amended to name this the one narrow,
-explicitly-opt-in exception, rather than silently contradicted.
+**Definition of done**: a real end-to-end check with two actual OS processes over a real
+loopback TCP port (a `ScriptedModel` injected so it cost nothing):
+```
+$ python a2a_server_manual_check.py &
+Serving 'manual-check-agent' at http://127.0.0.1:9877 (Ctrl-C to stop)
+INFO:     Uvicorn running on http://127.0.0.1:9877 (Press CTRL+C to quit)
+
+$ python a2a_client_manual_check.py
+resolved real card over real TCP: manual-check-agent - real two-process verification
+answer over real TCP: manual check: 42
+```
+Plus `tests/test_a2a_server.py`, the hermetic automated version of the same check (real
+`a2a-sdk` client and server, `httpx.ASGITransport`, zero real sockets) — skips cleanly
+rather than failing when `a2a-server` is not installed, since plain `uv sync` (what a
+plain-CLI user runs) does not install it; CI's own `uv sync --locked` was updated to add
+`--extra a2a-server` so this suite is not silently skipped there too.
+
+**Verification**:
+```
+uv run pytest                          # 196 passed
+uv run python -m teacup_agent.evals    # 20/20 passed
+uv run teacup-agent                    # offline demo unaffected, still instant
+```
 
 ---
 

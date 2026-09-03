@@ -134,12 +134,14 @@ skills:
     assert cfg.skills_dir is None
 
 
-def test_a2a_is_parsed_but_stays_inert(tmp_path, monkeypatch):
-    """Reserved for #17/#18: parsed if present, but nothing acts on it yet."""
+def test_a2a_card_is_parsed_as_a_plain_dict(tmp_path, monkeypatch):
+    """The card is this item's own concern (building an AgentCard); this module just
+    carries it. Peers (#17's concern) are a separate, independent branch/PR."""
     monkeypatch.setenv("FAKE_KEY", "sk-test")
     text = MINIMAL + "\na2a:\n  card:\n    name: my-agent\n"
     cfg = agent_config.load(_write(tmp_path, text))
-    assert cfg.a2a == {"card": {"name": "my-agent"}}
+    assert cfg.a2a.card == {"name": "my-agent"}
+    assert cfg.a2a.peers == {}
 
 
 def test_the_shipped_example_config_parses(monkeypatch):
@@ -147,7 +149,12 @@ def test_the_shipped_example_config_parses(monkeypatch):
     cfg = agent_config.load("agent.example.yaml")
     assert cfg.default_model == "gpt5-responses"
     assert cfg.models["gpt5-responses"].api == "responses"
-    assert cfg.a2a is None  # the a2a section is commented out in the template
+    assert cfg.a2a.card == {
+        "name": "my-agent",
+        "description": "What this agent does.",
+        "version": "0.1.0",
+    }
+    assert cfg.a2a.peers == {}  # peers stay commented out in the template (#17)
 
 
 # --- build_model ------------------------------------------------------------------
