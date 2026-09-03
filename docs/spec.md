@@ -62,9 +62,10 @@ Environment variables:
 | `-q`, `--quiet` | flag | off | print only the final answer |
 | `--json` | flag | off | one machine-readable JSON object on stdout, nothing else; implies `--quiet`. [`docs/integration.md`](integration.md) |
 | `--config` | path | none | take everything from a YAML file instead of the flags above |
+| `--project-root` | path | current directory | boundary `read_file` may not read outside of; resolved once at startup and applies whether or not `--config` is set |
 
 `--config` is a **parallel track, not a merge**: once it is set, every flag except the
-goal, `--quiet` and `--resume` is ignored (section 14).
+goal, `--quiet`, `--resume` and `--project-root` is ignored (section 14).
 
 On `--resume`, the ceilings mean **additional** allowance: steps and elapsed time already
 spent live in the saved state, so the flags are added to it rather than replacing it
@@ -236,7 +237,8 @@ runs one call and **never raises** — every failure comes back as an `ERROR: ..
 | `send_email` | `to`, `subject`, `body` | **yes** | the gated example; the demo appends to `outbox.jsonl` |
 
 Conditionally registered: `load_skill` (with `--skills`), `delegate` (with
-`--subagents`), and one entry per MCP tool.
+`--subagents`), `delegate_a2a` (with `a2a.peers` non-empty in `--config agent.yaml`,
+**yes** approval), and one entry per MCP tool.
 
 `update_todo` declares `status` as the enum `done` | `blocked`, but the value is **not
 validated**: the implementation sets `item.done = True` unconditionally and only uses
@@ -438,7 +440,7 @@ Secrets never go in it — name an env var with `api_key_env`, or embed `${VAR}`
 | `tools` | `exclude: [names]`, `subagents.enabled`, `subagents.max_steps` |
 | `skills` | `dir:` a path, or `off` |
 | `runtime` | `max_steps`, `max_tool_calls_per_step`, `budget`, `deadline`, `tool_timeout`, `context_limit`, `approve`, `plan`, `reflect`, `search`, `memory`, `run_dir` |
-| `a2a` | parsed if present, read by nothing yet (roadmap #17-#18) |
+| `a2a` | `peers.<name>` (`url`, optional `api_key_env`) offers `delegate_a2a`; `card` (`name`, `description`, `version`) is this agent's identity when served with `teacup-agent-serve` |
 
 `load(path) -> AgentConfig` expands `${VAR}` from the environment;
 `build_model(profile)` returns a `Model`; `resolve_run_dir(value)` turns `runs` into a

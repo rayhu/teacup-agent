@@ -87,6 +87,7 @@ docs/intent.md          what the project is for, and what a fork owes it
 docs/spec.md            the technical contract: values, shapes, interfaces
 docs/design-notes.md    why each subsystem behaves the way it does
 docs/roadmap.md         what is missing, and in what order to add it
+docs/threat-model.md    what is trusted, what is not, what a fork inherits
 NOTES.md                the original study notes this grew from
 ```
 
@@ -122,7 +123,10 @@ Each of these earned its place by fixing a run that had gone wrong. The stories 
   continues from there.
 - **MCP**: point at a server and its tools join the registry, namespaced and gated.
 - **A deny-list on `read_file`**: "inside the project" was never the same as "safe to
-  read", since the project is where the secrets are.
+  read", since the project is where the secrets are. Its project-root boundary is also
+  now an explicit, settable fact of the run (`--project-root`), not an accident of
+  whatever directory the shell happened to launch it from — see
+  [docs/threat-model.md](docs/threat-model.md).
 - **Subagents**: delegate a reading-heavy subtask to a child agent with its own context;
   only its conclusion comes back, so the bulk never enters this context.
 - **Skills**: a procedure's one-line description is always loaded, its body only when the

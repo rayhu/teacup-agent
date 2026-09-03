@@ -18,9 +18,9 @@ Working docs: `README.md` (what it is and how to run it), `docs/intent.md` (what
 project is for, and what a fork owes it), `docs/spec.md` (the technical contract:
 values, shapes, interfaces), `docs/design-notes.md` (why each subsystem behaves the
 way it does), `docs/roadmap.md` (what is missing and in what order),
-`docs/threat-model.md` (what is trusted, what is not, and what is not defended
-against), `docs/integration.md` (the `--json` contract an external caller relies
-on), `NOTES.md` (the original study notes this grew from).
+`docs/threat-model.md` (what is trusted, what is not, and what a fork inherits),
+`docs/integration.md` (the `--json` contract an external caller relies on),
+`NOTES.md` (the original study notes this grew from).
 
 How a change gets from an idea to `main` — the phase loop, who reviews what, what a human
 signs off — is `docs/workflow.md`, and the review pass itself is `REVIEW.md`. Read them
