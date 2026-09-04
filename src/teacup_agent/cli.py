@@ -345,6 +345,15 @@ def main(argv: list[str] | None = None) -> int:
         help="step ceiling for one subagent run, default 4",
     )
     p.add_argument(
+        "--coding-tools",
+        action="store_true",
+        help="offer list_files/edit_file/write_file/run_command. Off by default: "
+        "these can write files and run arbitrary shell commands, and a code-"
+        "execution tool must not be enabled without a way to bound what it does "
+        "(a sandbox around the process, and/or --hooks/--approve hooks for an "
+        "argument-aware allowlist). See docs/threat-model.md",
+    )
+    p.add_argument(
         "--plan",
         choices=["auto", "on", "off"],
         default="auto",
@@ -616,6 +625,7 @@ def _run_agent(args, the_model, run_dir, resumed, project_root):
         hooks=_resolve_hooks(args.hooks, root=project_root),
         subagents=args.subagents,
         subagent_max_steps=args.subagent_steps,
+        coding_tools=args.coding_tools,
         on_event=_printer(args.quiet),
     )
 

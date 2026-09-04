@@ -339,6 +339,11 @@ def _is_denied(relative: pathlib.PurePath) -> bool:
     parts = [p.lower() for p in relative.parts]
     if any(part in DENIED_DIRS for part in parts):
         return True
+    if not parts:
+        # relative_to() returns a zero-part path ('.') when the target *is* the
+        # project root itself (e.g. list_files(".") in coding_tools.py) — that is
+        # never denied, but parts[-1] below would otherwise raise IndexError.
+        return False
     return any(fnmatch.fnmatch(parts[-1], pattern) for pattern in DENIED_FILES)
 
 
@@ -363,7 +368,7 @@ def _get_project_root() -> pathlib.Path:
 
 @tool(
     description=(
-        "Read a text file inside the current project directory (first 2000 characters). "
+        "Read a text file inside the current project directory. "
         "Credentials, configuration and saved run states are not readable."
     ),
     parameters={
@@ -375,6 +380,12 @@ def _get_project_root() -> pathlib.Path:
     },
 )
 def read_file(path: str) -> str:
+    """Returns the full file, unlike the fixed 2000-char slice this used to take:
+    a coding-agent tool that reads its own truncated view before editing is a data-
+    loss hazard (see coding_tools.py's edit_file/write_file split), and a second,
+    earlier cap here pre-empted the loop's own EXTERNALIZE_OVER/excerpt mechanism
+    (loop.py) that already exists to move a long result to disk with a path back —
+    read_file's own result could never even reach that threshold before this."""
     root = _get_project_root()
     target = (root / path).resolve()
     if not str(target).startswith(str(root)):  # simple traversal guard
@@ -390,7 +401,7 @@ def read_file(path: str) -> str:
 
     if not target.is_file():
         return f"ERROR: no such file: {path}"
-    return target.read_text(encoding="utf-8", errors="replace")[:2000]
+    return target.read_text(encoding="utf-8", errors="replace")
 
 
 # Write side of long-term memory. Kept simple: a module-level binding injected by

@@ -57,6 +57,7 @@ Environment variables:
 | `--hooks` | path | `./hooks.py` if present | project-local hooks module; `off` disables. §19 |
 | `--subagents` | flag | off | offer the `delegate` tool |
 | `--subagent-steps` | int | `4` | step ceiling for one child run |
+| `--coding-tools` | flag | off | offer `list_files`/`edit_file`/`write_file`/`run_command`. §20 |
 | `--plan` | `auto` \| `on` \| `off` | `auto` | upfront checklist; `auto` = on for `--live`, off offline |
 | `--reflect` | `auto` \| `on` \| `off` | `auto` | write an experience/lesson note after a qualifying run; `auto` = on for `--live` |
 | `-q`, `--quiet` | flag | off | print only the final answer |
@@ -231,14 +232,15 @@ runs one call and **never raises** — every failure comes back as an `ERROR: ..
 | --- | --- | --- | --- |
 | `search_web` | `query`, `max_results=5` | no | three modes, below |
 | `calculate` | `expression` | no | AST-walked arithmetic, not `eval` |
-| `read_file` | `path` | no | project-relative, first 2000 chars, deny-list |
+| `read_file` | `path` | no | project-relative, full content (§18's `EXTERNALIZE_OVER` truncates, not this tool), deny-list |
 | `remember` | `fact` | no | writes long-term memory |
 | `update_todo` | `index` (1-based), `status`, `note=""` | no | see below |
 | `send_email` | `to`, `subject`, `body` | **yes** | the gated example; the demo appends to `outbox.jsonl` |
 
 Conditionally registered: `load_skill` (with `--skills`), `delegate` (with
 `--subagents`), `delegate_a2a` (with `a2a.peers` non-empty in `--config agent.yaml`,
-**yes** approval), and one entry per MCP tool.
+**yes** approval), one entry per MCP tool, and `list_files`/`edit_file`/`write_file`/
+`run_command` (with `--coding-tools`, §20).
 
 `update_todo` declares `status` as the enum `done` | `blocked`, but the value is **not
 validated**: the implementation sets `item.done = True` unconditionally and only uses
@@ -552,10 +554,11 @@ Every one of these was set by a measurement; the reasoning is in
 | `CALL_TIMEOUT` (MCP) | 60.0s | `mcp_tools.py` |
 | `Memory(limit=)` | 20 facts | `memory.py` |
 | `Memory(note_limit=)` | 10 notes | `memory.py` |
-| `read_file` truncation | 2000 chars | `tools.py` |
 | `budget_share` (subagent) | 0.4 of remaining | `subagent.py` |
 | `timeout` (delegate tool) | 300.0s | `subagent.py` |
 | checklist size | 1–5 items | `plan.py` |
+| `run_command` default timeout | 60.0s | `coding_tools.py` |
+| `run_command` max timeout | 300.0s | `coding_tools.py` |
 
 ## 19. Hooks (`hooks.py`)
 
@@ -576,3 +579,29 @@ opinion" (also closed), `after_tool_result` fails to a no-op.
 `hooks.example.py` is the committed template, demonstrating an argument-aware
 allowlist ("`send_email` only to these domains" — roadmap #14's own example) using
 only the built-in `send_email` tool.
+
+## 20. Coding tools (`coding_tools.py`)
+
+Registered dynamically by `--coding-tools` (`loop.run(coding_tools=True)`), the same
+`enable()`/`disable()`-on-`tools_mod.REGISTRY` shape `subagent.py`'s `delegate` uses —
+these four tools do not exist in the registry at all, and cost no prefix tokens, unless
+the flag is passed.
+
+| Tool | Parameters | Approval | Notes |
+| --- | --- | --- | --- |
+| `list_files` | `path="."`, `recursive=False` | no | top-level unless `recursive`; deny-list applies, pruned before descending |
+| `edit_file` | `path`, `old_string`, `new_string` | **yes** | exact-substring replace; errors on zero or >1 matches; always re-reads the file fresh |
+| `write_file` | `path`, `content` | **yes** | new files only — errors if `path` already exists |
+| `run_command` | `command`, `timeout=None` | **yes** | `shell=True`, cwd = project root; `timeout` passed to `subprocess.run` itself (actually kills the child, unlike the loop's generic per-call timeout) |
+
+`list_files`/`edit_file`/`write_file` all resolve `path` against
+`tools._get_project_root()` and reuse `tools._is_denied()` — the same traversal guard
+and deny-list `read_file` uses, not a second copy of either.
+
+`run_command`'s `timeout` is clamped to `_MAX_COMMAND_TIMEOUT` (300.0s) regardless of
+what is requested; its registered `Tool.timeout` (310.0s) is a backstop above that, since
+`subprocess.run`'s own timeout is what actually bounds the call.
+
+`docs/threat-model.md`'s "What #20 (coding tools) added" section states what changed in
+this repo's trust boundary and what did not; `hooks.example.py`'s `run_command`
+allowlist (§19) is the concrete mechanism for using it unattended.

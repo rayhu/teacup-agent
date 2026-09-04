@@ -178,6 +178,17 @@ def test_ordinary_project_files_still_read(tmp_path, monkeypatch):
     assert tools.execute("read_file", '{"path": "notes.md"}') == "readable"
 
 
+def test_read_file_no_longer_truncates_at_2000_chars(tmp_path, monkeypatch):
+    """Regression test: read_file used to slice its result to [:2000], which meant a
+    model editing from that view could clobber the part it never saw. The loop's own
+    EXTERNALIZE_OVER mechanism is what should handle long results now, not a second,
+    earlier cap here."""
+    monkeypatch.chdir(tmp_path)
+    long_content = "line\n" * 1000  # 5000 chars, well past the old cap
+    (tmp_path / "big.txt").write_text(long_content, encoding="utf-8")
+    assert tools.execute("read_file", '{"path": "big.txt"}') == long_content
+
+
 # --- an explicit project root, independent of the launch directory (#14) -------------
 
 
