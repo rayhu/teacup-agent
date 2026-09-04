@@ -366,6 +366,24 @@ def _get_project_root() -> pathlib.Path:
     return _project_root or pathlib.Path.cwd().resolve()
 
 
+def _resolve_project_path(path: str) -> pathlib.Path | str:
+    """Resolve `path` against the project root and confirm it stays inside it.
+    Returns the resolved absolute Path, or an ERROR string if it escapes the root.
+
+    The one traversal guard read_file and coding_tools.py's list_files/edit_file/
+    write_file all call, rather than each re-deriving its own copy: a naive
+    `str(target).startswith(str(root))` check (what this used to be) is fooled by a
+    sibling directory that shares the root as a string prefix — root=/a/repo,
+    target=/a/repo-secrets/f.txt passes that check, because relative_to() is what
+    actually rejects it, one line later, by raising. is_relative_to() does the real,
+    component-wise check up front instead of relying on that accident of ordering."""
+    root = _get_project_root()
+    target = (root / path).resolve()
+    if not target.is_relative_to(root):
+        return "ERROR: only paths inside the current project directory are allowed"
+    return target
+
+
 @tool(
     description=(
         "Read a text file inside the current project directory. "
@@ -386,10 +404,10 @@ def read_file(path: str) -> str:
     earlier cap here pre-empted the loop's own EXTERNALIZE_OVER/excerpt mechanism
     (loop.py) that already exists to move a long result to disk with a path back —
     read_file's own result could never even reach that threshold before this."""
+    target = _resolve_project_path(path)
+    if isinstance(target, str):
+        return target
     root = _get_project_root()
-    target = (root / path).resolve()
-    if not str(target).startswith(str(root)):  # simple traversal guard
-        return "ERROR: only files inside the current project directory can be read"
 
     if _is_denied(target.relative_to(root)):
         return (

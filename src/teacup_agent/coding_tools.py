@@ -153,12 +153,14 @@ def disable() -> None:
 
 def _resolve_in_project(path: str) -> tuple[pathlib.Path, pathlib.Path] | str:
     """Shared guard for edit_file/write_file: returns (root, target) or an ERROR
-    string. Reuses read_file's own traversal guard and deny-list (tools.py) rather
-    than re-deriving a second copy of either."""
+    string. Calls read_file's own traversal guard and deny-list (tools.py) rather
+    than re-deriving a second copy of either — a second copy is exactly what this
+    used to be, until review found it repeated the naive-string-prefix bug a shared
+    helper (tools._resolve_project_path) now fixes in one place."""
+    target = tools_mod._resolve_project_path(path)
+    if isinstance(target, str):
+        return target
     root = tools_mod._get_project_root()
-    target = (root / path).resolve()
-    if not str(target).startswith(str(root)):
-        return "ERROR: only paths inside the current project directory are allowed"
     if tools_mod._is_denied(target.relative_to(root)):
         return (
             f"ERROR: {path} holds credentials or saved agent state and cannot be "

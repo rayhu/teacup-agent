@@ -135,7 +135,17 @@ read-only and filtered through the same deny-list as `read_file`.
   it is mitigated by the same layers as everything else in this file: the approval gate,
   and a project's own `hooks.py` allowlist recognizing specific safe invocations
   (`hooks.example.py`'s `git status`/`diff`/`add`/`commit`/`log` and `uv run
-  pytest`/`ruff` patterns, with `git push` explicitly denied). A project that enables
+  pytest`/`ruff` patterns, with `git push` explicitly denied). **A prefix allowlist alone
+  is not enough**, and an independent review of this PR caught the reason why:
+  `shell=True` still honors chaining (`&&`, `;`, `|`) and substitution (`` ` `` / `$()`)
+  after an allowed prefix — `git status && git push origin main --force` starts with
+  "git status" and never reaches the `^git push\b` deny pattern at position 0.
+  `hooks.example.py`'s `UNSAFE_SHELL_METACHARACTERS` closes this by refusing outright
+  any `run_command` containing one of those characters, checked in `before_tool_call`
+  (which runs before the approval gate, so this applies regardless of `--approve`
+  policy) and again, defensively, in `approve_tool_call`. A `hooks.py` copied from this
+  file inherits the guard; one written from scratch does not get it for free — prefix
+  matching alone is not a safe allowlist shape without it. A project that enables
   `--coding-tools` without also writing a `hooks.py` allowlist for it gets exactly the
   old default back: every call denied without a human at a TTY.
 - **`write_file`/`edit_file` reach the filesystem the project root exposes**, subject to

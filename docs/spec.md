@@ -594,9 +594,13 @@ the flag is passed.
 | `write_file` | `path`, `content` | **yes** | new files only — errors if `path` already exists |
 | `run_command` | `command`, `timeout=None` | **yes** | `shell=True`, cwd = project root; `timeout` passed to `subprocess.run` itself (actually kills the child, unlike the loop's generic per-call timeout) |
 
-`list_files`/`edit_file`/`write_file` all resolve `path` against
-`tools._get_project_root()` and reuse `tools._is_denied()` — the same traversal guard
-and deny-list `read_file` uses, not a second copy of either.
+`list_files`/`edit_file`/`write_file` all resolve `path` via `tools._resolve_project_path()`
+(the shared traversal guard, using `Path.is_relative_to()`) and `tools._is_denied()`
+(the deny-list) — the same two checks `read_file` uses, not a second copy of either.
+`read_file` and these three tools all had, until an independent review caught it, their
+own copies of a naive `str(target).startswith(str(root))` traversal check that a sibling
+directory sharing the root as a string prefix could defeat; `_resolve_project_path()` is
+the one place that check now lives.
 
 `run_command`'s `timeout` is clamped to `_MAX_COMMAND_TIMEOUT` (300.0s) regardless of
 what is requested; its registered `Tool.timeout` (310.0s) is a backstop above that, since

@@ -104,6 +104,19 @@ def test_list_files_rejects_traversal_outside_project(_project):
     assert out.startswith("ERROR:")
 
 
+def test_list_files_rejects_a_sibling_directory_sharing_the_root_as_a_string_prefix(_project):
+    """Regression test (same bug tests/test_tools.py pins for read_file): a sibling
+    directory that merely shares the project root's characters as a string prefix —
+    _project is .../pytest-.../test_x0, a sibling .../test_x0-secrets starts with that
+    string — used to slip past the old `str(target).startswith(str(root))` guard.
+    is_relative_to() (tools._resolve_project_path) does the real check now."""
+    sibling = _project.parent / (_project.name + "-secrets")
+    sibling.mkdir()
+    (sibling / "creds.txt").write_text("hunter2", encoding="utf-8")
+    out = _call("list_files", path=f"../{sibling.name}")
+    assert out.startswith("ERROR:")
+
+
 def test_list_files_errors_on_nonexistent_directory(_project):
     out = _call("list_files", path="does-not-exist")
     assert out.startswith("ERROR:")
