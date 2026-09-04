@@ -32,6 +32,8 @@ from typing import TYPE_CHECKING, Any
 
 import yaml
 
+from teacup_agent import routing
+
 if TYPE_CHECKING:
     from teacup_agent import model as model_mod
 
@@ -120,6 +122,9 @@ class AgentConfig:
     skills_dir: str | None
     runtime: RuntimeConfig
     a2a: A2AConfig = field(default_factory=A2AConfig)
+    # role -> profile name. Roles left out fall back to default_model, so a config that
+    # names none behaves exactly as it did before routing existed (routing.py).
+    roles: dict[str, str] = field(default_factory=dict)
 
 
 def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
@@ -144,6 +149,30 @@ def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
         base_url=spec.get("base_url"),
         reasoning_effort=spec.get("reasoning_effort"),
     )
+
+
+def _model_roles(raw: dict[str, Any] | None, profiles: dict[str, ModelProfile]) -> dict[str, str]:
+    """Validate models.roles at load time.
+
+    Both failures here are typos that would otherwise show up as a surprise at runtime —
+    a misspelled role silently doing nothing, or a profile name that does not exist
+    blowing up on the turn that first needs it, which for `reflect` is after the run is
+    already over.
+    """
+    roles = {}
+    for role, profile in (raw or {}).items():
+        if role not in routing.ROLES:
+            raise ValueError(
+                f"models.roles.{role} is not a known role; known roles: "
+                f"{list(routing.ROLES)}"
+            )
+        if profile not in profiles:
+            raise ValueError(
+                f"models.roles.{role} is {profile!r}, which is not one of "
+                f"models.profiles: {sorted(profiles)}"
+            )
+        roles[role] = profile
+    return roles
 
 
 def _a2a_config(raw: dict[str, Any] | None) -> A2AConfig:
@@ -214,6 +243,7 @@ def load(path: str | pathlib.Path) -> AgentConfig:
     return AgentConfig(
         models=profiles,
         default_model=default_model,
+        roles=_model_roles(models_raw.get("roles"), profiles),
         mcp=mcp,
         tools=tools_cfg,
         skills_dir=skills_dir,
@@ -264,6 +294,14 @@ def build_model(profile: ModelProfile) -> "model_mod.Model":
             profile.model, client=client, reasoning_effort=profile.reasoning_effort
         )
     return model_mod.OpenAIModel(profile.model, client=client)
+
+
+def build_router(cfg: AgentConfig) -> routing.Router:
+    """One router for the whole run, built lazily: a profile that no role uses is never
+    constructed, so naming a local endpoint you did not reach this run costs nothing."""
+    return routing.Router(
+        lambda name: build_model(cfg.models[name]), cfg.roles, cfg.default_model
+    )
 
 
 def resolve_run_dir(run_dir: str | None) -> pathlib.Path | None:

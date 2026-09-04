@@ -14,9 +14,15 @@ comes first**:
    to the model for summarization and replaced by a single summary message. This is
    lossy, which is why it is the second resort.
 
-Compaction has one **constraint you must not break**: never separate a tool call
-from its result. A function_call without its output makes the next request fail
-with a 400, so we only cut at points where nothing is left dangling.
+Compaction has **two constraints you must not break**, and both end in the same 400:
+
+1. never separate a tool call from its result — a function_call without its output
+   fails the next request;
+2. in the Responses shape, never separate a `function_call` from the `reasoning` item
+   it came with. That one was found the hard way, by the first live bench run: the
+   cut landed immediately after a reasoning item, the call it belonged to survived
+   into the kept tail, and the API refused the next request with "Item 'fc_...' of
+   type 'function_call' was provided without its required 'reasoning' item".
 """
 
 from __future__ import annotations
@@ -83,6 +89,12 @@ def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
     Same scan as the ordering invariant in evals: an announced id goes into the set,
     a filled id comes out, and any moment the set is empty is a safe point. Both API
     shapes are recognised.
+
+    Plus one look-ahead for the Responses shape: a kept tail must not *begin* with a
+    `function_call`, because the `reasoning` item it requires is by construction on the
+    other side of the cut. One look-ahead is enough even though a turn can emit several
+    function_calls after one reasoning item — from the second call onwards the first is
+    still unfilled, so `open_ids` is non-empty and the point was never a candidate.
     """
     open_ids: set[str] = set()
     points = []
@@ -96,7 +108,10 @@ def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
             open_ids.add(msg["call_id"])
         elif msg.get("type") == "function_call_output":
             open_ids.discard(msg.get("call_id"))
-        if not open_ids:
+        starts_a_call = (
+            i + 1 < len(messages) and messages[i + 1].get("type") == "function_call"
+        )
+        if not open_ids and not starts_a_call:
             points.append(i + 1)  # cutting after this entry is safe
     return points
 
@@ -132,6 +147,7 @@ def compact(
     model: Model,
     limit: int,
     keep_recent: int = 8,
+    profile: str = "",  # which model profile ran the summary, for the spend breakdown
 ) -> int:
     """Compact the early context into one summary once the limit is exceeded.
 
@@ -157,7 +173,7 @@ def compact(
         ],
         [],
     )
-    state.charge(summary.cost)
+    state.charge(summary.cost, profile)
     if not summary.text:
         return 0
 

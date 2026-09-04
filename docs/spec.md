@@ -148,6 +148,7 @@ any status >= 500, and any error carrying no status code at all; a 4xx is not re
 | `subagent_runs` | int | `0` | `subagent._delegate()` |
 | `loaded_skills` | list[str] | `[]` | `skills._load_skill()` |
 | `trace` | list[ToolTrace] | `[]` | `execute_calls()` |
+| `spend_by_profile` | dict[str, float] | `{}` | `charge(cost, profile)` |
 
 `Status` = `idle` \| `running` \| `done` \| `max_steps` \| `out_of_budget` \|
 `out_of_time` \| `error`.
@@ -156,8 +157,14 @@ any status >= 500, and any error carrying no status code at all; a 4xx is not re
 `skip_reason` is `""` \| `"throttled"` \| `"denied"`.
 `TodoItem(text, done=False, note="")`.
 
-`snapshot()` returns the 16 human-readable keys printed at the end of a run; it omits
-`messages` content and reports `todo_done` as `"n/a"` when there is no checklist.
+`charge(cost, profile="")` subtracts from `remaining_budget` always, and adds to
+`spend_by_profile` only when a profile is named. The breakdown is a **diagnostic** for
+routing decisions, not a second ledger: a subagent charges its parent one rounded delta
+and merges the child's own breakdown in, so the two can disagree in the last decimal.
+
+`snapshot()` returns the 17 human-readable keys printed at the end of a run; it omits
+`messages` content, reports `todo_done` as `"n/a"` when there is no checklist, and
+`spend` as `{}` when nothing named a profile.
 
 ## 5. Model interface
 
@@ -181,6 +188,30 @@ Three implementations ship: `ResponsesModel` (default), `OpenAIModel` (Chat Comp
 `ScriptedModel` (offline, deterministic, used by the demo and every eval).
 `agent_config.build_model(profile)` constructs one of the first two from an `agent.yaml`
 profile, including any OpenAI-compatible endpoint via `base_url`.
+
+### Roles and routing (`routing.py`)
+
+An agent makes six kinds of model call, and `agent.yaml`'s `models.roles` maps each to a
+profile:
+
+| Role | Call site | What it does |
+| --- | --- | --- |
+| `main` | `loop.py` | the agent's own turns, and the forced wrap-up |
+| `plan` | `plan.py` | decompose the goal into the checklist |
+| `compact` | `context.py` | summarize the early context |
+| `reflect` | `reflect.py` | write the experience/lesson note |
+| `judge` | `trajectory.py` | the LLM judge over a finished run (resolved from the config by `trajectory.main()`, not through a `Router` — scoring a saved run builds one model and nothing else) |
+| `subagent` | `subagent.py` | a delegated child run's own `main` |
+
+`Router(build, roles, default)` resolves a role to a profile name (`profile_for`) and to
+a model (`for_role`), building each profile **at most once per run** — a fresh instance
+would mean a fresh client and an empty cache key every turn. `child(role)` derives a
+router whose `main` is that role's profile, which is how a subagent runs elsewhere.
+`as_router(model)` accepts a bare `Model` and answers every role with it, so
+`loop.run(model=...)` is unchanged. A role name outside `ROLES`, or a profile name not in
+`models.profiles`, is an error at config load.
+
+There is no classifier and no per-turn switching: routing is fixed for the run.
 
 ### Cost
 
@@ -206,10 +237,13 @@ not bill.
 
 ### Prompt cache
 
-`loop.run()` calls `set_cache_key("teacup-agent-" + sha256(system_message)[:16])`, derived
-from the context prefix so separate runs of the same configuration share cache entries. A
-prefix under ~1024 tokens never enters the cache at all. On `--resume` the system message
-is **not** rebuilt, or every entry earned so far is voided.
+`loop.run()` calls `set_cache_key("teacup-agent-" + sha256(model_id + "\n" +
+system_message)[:16])` on the `main` role's model, derived from the context prefix so
+separate runs of the same configuration share cache entries, and from the model id
+because caches are per model. A prefix under ~1024 tokens never enters the cache at all,
+which is why the other roles — each with its own short, constant system prompt — get no
+key. On `--resume` the system message is **not** rebuilt, or every entry earned so far is
+voided.
 
 ## 6. Tools
 
@@ -295,9 +329,11 @@ permission, so it does not retry a different spelling.
 
 - `estimate_tokens(text)` ≈ `cjk/1.5 + (len - cjk)/4 + 1`. Used **only** to decide
   whether to compact; billing uses the real usage numbers.
-- `safe_cut_points(messages)` returns every index where no announced tool-call id is
-  still unfilled — the only places a cut cannot break the message protocol. Recognises
-  both API shapes (`tool_calls`/`role=tool` and `function_call`/`function_call_output`).
+- `safe_cut_points(messages)` returns every index where a cut cannot break the message
+  protocol: no announced tool-call id still unfilled (both API shapes —
+  `tool_calls`/`role=tool` and `function_call`/`function_call_output`), **and** the kept
+  tail does not begin with a `function_call`, whose `reasoning` item would be on the
+  other side of the cut (Field patch G).
 - `compact(state, model, limit, keep_recent=8)` keeps `head = 2` entries (system + the
   original goal) and the last 8, summarizes everything between the newest safe cut point
   and replaces it with one `[context summary]` system message. Returns estimated tokens
@@ -431,7 +467,8 @@ Secrets never go in it — name an env var with `api_key_env`, or embed `${VAR}`
 
 | Block | Keys |
 | --- | --- |
-| `models.default` | the profile name used for the run |
+| `models.default` | the profile every unmapped role falls back to |
+| `models.roles` | `main` \| `plan` \| `compact` \| `reflect` \| `judge` \| `subagent` -> a profile name. Omit the block for single-model behaviour |
 | `models.profiles.<name>` | `provider` (`openai` \| `openai-compatible`), `api` (`responses` \| `chat`), `model`, `api_key_env`, optional `base_url`, optional `reasoning_effort` |
 | `mcp` | the same per-server shape as `mcp.json`'s `servers`, nested one level deeper |
 | `tools` | `exclude: [names]`, `subagents.enabled`, `subagents.max_steps` |
@@ -440,12 +477,16 @@ Secrets never go in it — name an env var with `api_key_env`, or embed `${VAR}`
 | `a2a` | parsed if present, read by nothing yet (roadmap #17-#18) |
 
 `load(path) -> AgentConfig` expands `${VAR}` from the environment;
-`build_model(profile)` returns a `Model`; `resolve_run_dir(value)` turns `runs` into a
-fresh `runs/<timestamp>` and `off` into `None`.
+`build_model(profile)` returns a `Model`; `build_router(cfg)` returns a `routing.Router`
+that builds profiles lazily, so a profile no role uses is never constructed (and its
+`api_key_env` never needed); `resolve_run_dir(value)` turns `runs` into a fresh
+`runs/<timestamp>` and `off` into `None`.
 
 `trajectory.py` takes the same file: `--config agent.yaml [--judge-profile <name>]`
 sources the judge model from `models.profiles` instead of `--model`, so the eval cannot
-silently diverge from what the agent itself runs.
+silently diverge from what the agent itself runs. The default is `models.roles.judge`
+when the config sets one, else `models.default`; `--judge-profile` overrides it for one
+invocation, the same split `goal`/`--quiet`/`--resume` have.
 
 ## 15. On-disk formats
 
@@ -495,7 +536,7 @@ This is the observability contract; `cli.py` is one consumer of it.
 
 Two kinds, and conflating them is the mistake this repo names explicitly.
 
-**Protocol evals** — `uv run python -m teacup_agent.evals`. 21 cases against
+**Protocol evals** — `uv run python -m teacup_agent.evals`. 22 cases against
 `ScriptedModel`: no API key, no network, `run_dir=None`, nothing written into the repo.
 They pin the message protocol, the brakes, the wrap-up, compaction, the approval gate,
 the checklist, delegation and skills. They must stay green and must stay free.
@@ -524,11 +565,29 @@ permissions.
 | `unsupported_citations` | links in the answer that appear in no tool result |
 | `asks_user_back` | the answer asks the user a question (EN and ZH phrasings) |
 | `asks_without_trying` | asked for authorization without ever attempting the call |
-| `delivered` | an answer exists and is not the "(no final answer" placeholder |
+| `delivered` | an answer exists, the run did not end in `error`, and it is not the "(no final answer" placeholder |
 
 `unsupported_citations` is the deterministic invented-citation detector, and it is more
 accurate than an LLM judge for that one question. `action_never_attempted` counts a
 *denied* call as an attempt — the model did its part.
+
+**Routing bench** — `uv run python -m teacup_agent.bench --config agent.yaml`
+(`bench.py`). Runs the same goals under several *policies* (named role -> profile maps)
+and prints one table: cost, steps, compactions, the `mechanical()` columns, and
+optionally one judge's scores.
+
+| Concept | Meaning |
+| --- | --- |
+| `Policy(name, roles)` | a role -> profile map. Setting `judge` here is an error: the judge is pinned for the whole matrix with `--judge-profile`, or the quality column varies with the thing being measured |
+| `Goal(name, text, policies, ...)` | one task, and the policies worth running it under — the matrix is **sparse**, because a policy that differs only in `compact` measures nothing on a run that never compacts |
+| `routed_roles` / `fired_roles` | which roles the policy moves, and which ones actually ran. When those sets do not intersect, the cell is a copy of the baseline and `format_table()` says so |
+
+`--dry-run` prints the matrix and the ceiling without running anything; without `--yes`
+it asks before spending, quoting `cells x --budget` as a **hard** ceiling (each run
+stops at `--budget`). Offline it is exercised by `tests/test_bench.py`, which also pins
+the claim Stage A rests on: a `chat` subagent under a `responses` parent leaves both
+message lists internally consistent, because the only things that cross between models
+are a compaction summary (a `role="system"` entry) and a subagent's answer (a string).
 
 ## 18. Tuned constants
 

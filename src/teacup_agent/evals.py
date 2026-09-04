@@ -16,6 +16,7 @@ from dataclasses import dataclass
 from typing import Callable
 
 from teacup_agent import loop
+from teacup_agent import routing
 from teacup_agent.memory import NullMemory
 from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
 from teacup_agent.state import AgentState
@@ -40,6 +41,10 @@ class Case:
     skills: str | None = None
     plan: bool = False
     plan_items: list[str] | None = None
+    # role -> profile, when the case splits the run across two scripted models. Every
+    # profile other than "main" gets its own empty-script model, so a role that resolves
+    # elsewhere provably ran somewhere else.
+    roles: dict[str, str] | None = None
     clock_values: list[float] | None = None  # fake clock, makes the time brake repeatable
 
 
@@ -322,6 +327,27 @@ CASES: list[Case] = [
         ),
     ),
     Case(
+        name="routing: a role sent to another profile runs there, and the protocol holds",
+        # The whole risk of routing is that a turn produced by one model and a turn
+        # produced by another end up in the same message list. Here the checklist comes
+        # from the `planner` profile and the conversation from `main`; the spend
+        # breakdown proves both actually ran, and the ordering invariant still holds.
+        script=[
+            assistant_calls([("calculate", {"expression": "6*7"})]),
+            assistant_calls([("update_todo", {"index": 1, "status": "done"})]),
+            assistant_says("42"),
+        ],
+        plan=True,
+        plan_items=["compute the product"],
+        roles={"plan": "planner"},
+        check=lambda s: (
+            [t.text for t in s.todo] == ["compute the product"]
+            and set(s.spend_by_profile) == {"main", "planner"}
+            and s.status == "done"
+            and tool_results_follow_their_call(s)
+        ),
+    ),
+    Case(
         name="skills: the body arrives as a tool result, never in the system prompt",
         script=[
             assistant_calls([("load_skill", {"name": "web-research"})]),
@@ -343,9 +369,20 @@ CASES: list[Case] = [
 def run_case(case: Case) -> tuple[bool, AgentState]:
     # Evals must be deterministic: force offline search, no network calls.
     os.environ.setdefault("TEACUP_AGENT_SEARCH", "offline")
+    main_model = ScriptedWithSummarizer(list(case.script), plan_items=case.plan_items)
+    model = main_model
+    if case.roles:
+        # A separate scripted model per other profile: proof by construction that a
+        # routed role did not quietly run on the main one.
+        others = {
+            name: ScriptedWithSummarizer([], plan_items=case.plan_items)
+            for name in set(case.roles.values())
+            if name != "main"
+        }
+        model = routing.from_models({"main": main_model, **others}, case.roles, "main")
     state = loop.run(
         goal=case.name,
-        model=ScriptedWithSummarizer(list(case.script), plan_items=case.plan_items),
+        model=model,
         memory=NullMemory(),
         max_steps=case.max_steps,
         budget=case.budget,

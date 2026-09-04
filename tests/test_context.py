@@ -1,9 +1,12 @@
 """Context management: externalizing big results, and compacting over the limit.
 
-The dangerous part of compaction is not summary quality, it is **splitting a tool
-call from its result** — that makes the next request fail with a 400. So every case
-here also re-checks the message-protocol invariant.
+The dangerous part of compaction is not summary quality, it is **cutting something
+away from what it needs** — a tool call from its result, or (in the Responses shape) a
+function_call from its reasoning item. Either one makes the next request fail with a
+400. So every case here also re-checks the message-protocol invariant.
 """
+
+from types import SimpleNamespace
 
 import pytest
 
@@ -40,7 +43,56 @@ def test_safe_cut_points_handles_responses_shape():
         {"type": "function_call", "call_id": "fc_1"},
         {"type": "function_call_output", "call_id": "fc_1"},
     ]
-    assert ctx.safe_cut_points(messages) == [1, 2, 3, 5]
+    # 3 is *not* safe: the kept tail would start with the function_call while the
+    # reasoning item it requires stayed on the other side of the cut. This assertion
+    # said 3 was safe until the first live bench run got a 400 for exactly that.
+    assert ctx.safe_cut_points(messages) == [1, 2, 5]
+
+
+def test_compaction_never_orphans_a_function_call_from_its_reasoning():
+    """The regression, end to end: a Responses-shaped history whose only otherwise-safe
+    late cut point sits between a reasoning item and its call."""
+    messages = [{"role": "system", "content": "sys"}, {"role": "user", "content": "goal"}]
+    for i in range(6):
+        messages += [
+            {"type": "reasoning", "id": f"rs_{i}", "content": "thinking " * 50},
+            {"type": "function_call", "call_id": f"fc_{i}", "name": "calculate", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": f"fc_{i}", "output": "2"},
+        ]
+    state = SimpleNamespace(messages=list(messages), compactions=0, charge=lambda *a, **k: None)
+
+    saved = ctx.compact(state, _Summarizer(), limit=1, keep_recent=4)
+
+    assert saved > 0 and state.compactions == 1
+    tail_start = state.messages[3]  # system, goal, summary, then the kept tail
+    assert tail_start.get("type") != "function_call"
+    # and every surviving call still has both its reasoning item and its output
+    kept = state.messages[3:]
+    for m in kept:
+        if m.get("type") == "function_call":
+            i = m["call_id"].split("_")[1]
+            assert any(k.get("id") == f"rs_{i}" for k in kept)
+            assert any(k.get("call_id") == m["call_id"] and k.get("type") == "function_call_output" for k in kept)
+
+
+def test_a_history_with_no_safe_cut_point_is_left_alone():
+    """Better not to compact than to split a call from what it needs."""
+    messages = [
+        {"role": "system", "content": "sys"},
+        {"role": "user", "content": "goal"},
+        {"type": "function_call", "call_id": "fc_1", "name": "x", "arguments": "{}"},
+        {"type": "function_call_output", "call_id": "fc_1", "output": "1"},
+    ]
+    state = SimpleNamespace(messages=list(messages), compactions=0, charge=lambda *a, **k: None)
+    assert ctx.compact(state, _Summarizer(), limit=1, keep_recent=2) == 0
+    assert state.messages == messages  # untouched
+
+
+class _Summarizer:
+    """Answers the compaction call and nothing else."""
+
+    def complete(self, messages, tools_):
+        return assistant_says("[summary] earlier work condensed.")
 
 
 # --- externalization ---------------------------------------------------------

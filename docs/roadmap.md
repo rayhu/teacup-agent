@@ -2,13 +2,16 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #15, #17, #18 and #19 are done (except the fine-grained
-permissions part of #6). Five items that were never on the roadmap were added after
+**Progress**: #1-#10, #12, #15, #17, #18, #19 and #20's Stages A and B are done (except
+the fine-grained permissions part of #6). Five items that were never on the roadmap were added after
 reviewing real runs (see "Field patches" at the end).
 Next up: #14 (threat model and allowlists) closes a hole that exists today; then
 #13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend) and
 #16 (multi-provider price overrides, a native Anthropic path), both scoped but not
-started.
+started. #20's Stages A (role routing) and B (the bench, and the live table that says
+where the small model breaks) both landed on 2026-09-03; whether its Stage C — routing
+by classified task rather than by call site — is worth the complexity is now a question
+the table can be argued from, and the honest reading of that table is "not yet".
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/teacup_agent/loop.py) is "old technology".
@@ -868,6 +871,470 @@ uv run teacup-agent                    # offline demo unaffected (reflect defaul
 
 ---
 
+### 20. Model routing: several profiles in one run — Stages A and B DONE (2026-09-03)
+
+**Now**: `agent.yaml` already holds a *map* of model profiles (#15), but only
+`models.default` is ever built — `build_model()` is called once and that one object is
+handed to every `.complete()` call site in the repo. The planner, the compactor, the
+reflector, the judge and every subagent all run on the same model as the agent's own
+turns, and all pay the same rate.
+
+**Why this is worth doing at all.** A harness supplies exactly what a small model
+lacks: retrieval instead of recall, tool feedback instead of one-shot correctness,
+retries instead of precision. That closes most of the gap on work that is
+*well-specified and verifiable* — which is what several of the call sites below are.
+It does **not** close the gap on judgment: deciding what the task actually is,
+noticing at step 20 that the approach is wrong, debugging a failure nothing in the
+loop flagged, knowing when to stop. And there the failure is silent — a small model
+produces plausible, confidently wrong work and rarely escalates on its own. So the
+routing question is never "how hard does this look", it is:
+
+1. **Is success programmatically checkable?** (tests, a schema, a diff, an exact
+   string) — then let the checker be the intelligence and use the small model.
+2. **Is the spec complete?** Ambiguity is the expensive part. Underspecified -> big.
+3. **How long is the horizon?** Per-step errors compound: 0.95^30 is a coin flip.
+   Small-model work has to be short and independently verifiable.
+4. **How noisy is the context?** Long, distractor-heavy context degrades small models
+   much faster than their benchmark scores suggest — which is precisely what a
+   30k-token agent context is.
+
+Ordered by payoff over cost, that means three stages, and **the middle one is the
+gate**: route by measured task class on your own workload, never by vibes.
+
+---
+
+#### Stage A — role routing (config only, no classifier)
+
+The roles are not invented; they are the `.complete()` call sites that already exist:
+
+| role | call site | what it is | proposed default |
+| --- | --- | --- | --- |
+| `main` | [`loop.py:234`](../src/teacup_agent/loop.py) | the agent's own turns | big |
+| `plan` | [`plan.py:43`](../src/teacup_agent/plan.py) | decompose the goal into the checklist | big |
+| `subagent` | [`subagent.py:124`](../src/teacup_agent/subagent.py) | a delegated subtask's own loop | small |
+| `reflect` | [`reflect.py:79`](../src/teacup_agent/reflect.py) | write the experience/lesson note | small |
+| `judge` | [`trajectory.py:164`](../src/teacup_agent/trajectory.py) | LLM-as-judge over a finished run | big |
+| `compact` | [`context.py:153`](../src/teacup_agent/context.py) | summarize the early context | **unset — see Stage B** |
+
+The reasoning behind each default, because a default nobody can argue with is a
+default nobody checked:
+
+- **`plan` is the one to get right.** It is a tiny fraction of a run's tokens and it
+  determines everything downstream — the checklist the loop then holds the model to
+  for the rest of the run (#F). If you only mix in one place, mix here, and mix
+  *upward*.
+- **`subagent` is the textbook small-model job**: short horizon, narrow spec, and its
+  answer comes back to the parent as a tool result the parent can sanity-check.
+- **`reflect` writes into a deliberately low-trust tier** already — memory notes
+  awaiting human promotion into "Field patches" (#19). A weaker note is a weaker
+  candidate, not a wrong fact in the agent's context.
+- **`judge` stays big, but it is the *second* verifier.** `trajectory.mechanical()`
+  runs first and free; the model judge only covers what no checker can. LLM-as-judge
+  on a long trajectory is decent at "did this go off the rails" and poor at "is this
+  subtly wrong", so it never gates alone. #15 already gave `trajectory.py` a
+  `--judge-profile` flag, and this must not become the second silently-diverging
+  default that flag was added to remove: `models.roles.judge` is *the* default, and
+  `--judge-profile` overrides it for one `trajectory.py` invocation — a one-off
+  analysis, not a property of the agent, the same split `goal`/`--quiet`/`--resume`
+  already have.
+- **`compact` is left unset on purpose.** It has the largest input in the repo, so it
+  is where the money is — and a lossy summary loses the thread *silently and
+  unrecoverably*, which is the exact failure mode this whole item is trying to avoid.
+  That makes it Stage B's first question, not a decision to take here.
+- **The forced wrap-up ([`loop.py:173`](../src/teacup_agent/loop.py)) is not a knob.**
+  It runs on the main run's own prefix — routing it elsewhere pays a cold prefix for
+  a single call — and "salvage a conclusion from partial information" is judgment.
+
+Config sketch (shape only; `agent.example.yaml` documents shipped behaviour, so it
+does not change until this ships):
+
+```yaml
+models:
+  default: big
+  profiles:
+    big:   { model: gpt-5,      api: responses, reasoning_effort: medium }
+    small: { model: gpt-5-mini, api: responses }
+  roles:                  # omit the whole `roles:` key == routing off: every role
+    plan: big             # runs on models.default, exactly as it does today.
+    subagent: small       # A role left out of a present `roles:` map falls back the
+    reflect: small        # same way.
+```
+
+This is **config-only**, the same parallel-track doctrine `agent_config.py` already
+states: there is no `--router` flag, because a routing policy is a property of an
+agent, not of one invocation.
+
+**What shipped (2026-09-03)**: [`routing.py`](../src/teacup_agent/routing.py) —
+`Router(build, roles, default)` resolving a role to a profile name (`profile_for`) and
+to a model (`for_role`), building each profile at most once per run; `child(role)`, the
+derived router that gives a subagent's own turns the `subagent` profile while sharing
+the parent's instances; `as_router()`, so `loop.run(model=...)` still takes a bare
+`Model` and no existing caller changed. `agent_config` gained `models.roles` (validated
+at load: an unknown role or a profile that does not exist is an error, not a surprise
+three turns in) and `build_router()`, which builds lazily — a profile no role uses is
+never constructed and its `api_key_env` never needed. `loop.py` grew ten lines and no
+routing logic. `state.charge(cost, profile)` fills `spend_by_profile`, reported as
+`snapshot()["spend"]` and therefore in the `--json` contract (an added field, see
+`docs/integration.md`).
+
+**Two things it exposed, both fixed here**:
+
+- `plan.decompose()` never charged its model call. Invisible while every call cost the
+  same; a lie in the budget the moment `plan` is the role pointing at the expensive
+  profile.
+- `prompt_cache_key` was **dead on the Chat path**: `OpenAIModel.complete()` always read
+  `self.cache_key`, but only `ResponsesModel` had a `set_cache_key()`, so `loop.py`'s
+  `getattr(model, "set_cache_key", None)` silently skipped it. The optional-method-by-
+  `getattr` style is what let it hide. The key now hashes the model id along with the
+  prefix, because caches are per model.
+
+**One deviation from the definition of done below**: `ScriptedModel` keeps recognising
+the framework's side calls by their prompt prefix. Removing that in favour of role
+identity would break the offline demo, where one scripted model serves every role. Role
+identity does the work wherever roles are actually split — a split router's main model
+never sees the planner's prompt, and an eval case pins that — and the sniffing stays as
+the single-model fallback.
+
+**A line to hold**: `loop.py` went from 615 to 638 lines here, all of it role lookups
+rather than logic — but AGENTS.md says to consider splitting past ~700, and Stage C's
+rules, classifier and escalation trip-wires must not be what closes that gap. They
+belong in `routing.py` (or its own module) with `loop.py` calling into them, the same
+way this stage kept the lookup out of the loop.
+
+**Known and left alone**: a subagent's own `loop.run()` calls `set_cache_key()` with the
+child's prefix hash, overwriting the parent's key on a shared instance for the rest of
+the parent run. It predates routing, costs cache hits rather than correctness, and stops
+happening exactly when parent and child resolve to different profiles.
+
+**Verification**:
+```
+uv run pytest                          # 228 passed (tests/test_routing.py: 17 new)
+uv run python -m teacup_agent.evals    # 22/22 passed (one new routing case)
+uv run teacup-agent                    # offline demo unaffected, still instant
+```
+The live `--config` path with a real two-profile split is **unverified**: it needs an
+API key and spend, which is Stage B's measurement, with its own approval.
+
+---
+
+#### Stage B — the eval that says where the small model actually breaks
+
+Build this *before* Stage C. Two halves, and only the first is free:
+
+- **Offline (no key, no cost).** A `ScriptedRouter` hands each role its own
+  `ScriptedModel`. That pins the parts that are deterministic — which role resolved
+  to which profile, and that the message protocol survives a run whose turns came
+  from different backends. It also *simplifies* something: `ScriptedModel.complete()`
+  currently sniffs the first message's prefix ("You are compacting", "Break the
+  user's request") to recognise the framework's side calls. With roles, identity
+  replaces sniffing, and a test can assert what the planner saw separately from what
+  the main model saw.
+- **Live (needs approval and a named budget).** The same 3 goals under three
+  policies — all-big, roles-split, all-small — reporting cost, steps,
+  `trajectory.mechanical()` metrics and the judge score side by side. `gpt-5-mini`
+  for the small profile, per AGENTS.md.
+
+**This item is not done until that table exists with real numbers**, and its first
+question is `compact`. The honest possible outcome is "on this workload the split
+saves 30% and costs one silent failure in twelve" — in which case Stage A's roles
+ship, Stage C does not, and the table says why.
+
+**Built (2026-09-03), not yet run live**: [`bench.py`](../src/teacup_agent/bench.py) —
+`Policy` (a named role->profile map), `Goal` (a task plus the policies worth running it
+under), `run_matrix()`, and `format_table()`. `uv run python -m teacup_agent.bench
+--config agent.yaml`; `--dry-run` prints the matrix and the ceiling and runs nothing.
+Three corrections the build forced on the sketch above:
+
+- **The judge is pinned outside the policy.** If `all-small` were judged by the small
+  model and `all-big` by the big one, the measurement would vary with the thing being
+  measured. `Policy` rejects a `judge` role outright; `--judge-profile` sets one judge
+  for the whole matrix, and `trajectory.mechanical()` — free and model-independent — is
+  the column to trust regardless.
+- **Four policies, not the three named above, and a sparse matrix.** `compact-small`
+  differs from `all-big` in exactly one role, which is the only way to isolate the
+  `compact` question; a policy that moves four roles at once cannot answer it. And since
+  it says nothing on a goal that never compacts, a `Goal` names the policies worth
+  running it under: 9 cells, not 12.
+- **A cell can prove nothing, and must say so.** `roles-split` as first written differed
+  from `all-big` only in `reflect` and `subagent` — neither of which the bench ran, so
+  all three of its cells would have been copies of the baseline at full price. Fixed
+  two ways: the bench now reflects and offers subagents like a real run, and every cell
+  records `routed_roles` vs `fired_roles`, with `format_table()` warning when they do
+  not intersect. The same mechanism catches a `compact-small` cell that never compacted.
+
+**Offline verification** (`tests/test_bench.py`, 8 cases): sparsity, the judge ban, a
+crashed cell becoming a row instead of killing the matrix, the vacuity warning — and the
+protocol claim Stage A rests on, which is worth stating plainly. Routing is fixed for
+the run, so `main` is one model start to finish, and there are exactly **two** places
+another model's output enters the main message list: a compaction summary (a
+`role="system"` entry) and a subagent's answer (a string in a tool result). Both are
+shape-neutral, which is why a `chat` subagent under a `responses` parent is safe — one
+test drives that combination and checks both message lists stay internally consistent in
+their own shape, parent and child.
+
+```
+uv run pytest                          # 236 passed (tests/test_bench.py: 8 new)
+uv run python -m teacup_agent.evals    # 22/22 passed
+uv run python -m teacup_agent.bench --config agent.yaml --dry-run   # 9 cells, ceiling $0.90
+```
+
+**What the numbers do and do not mean**: the bench runs with `NullMemory`, so no
+recalled facts sit in the prefix — good for comparing cells against each other, wrong to
+quote later as "what this task costs" in a real run. The `$` column is the run only: a
+judge call happens outside `loop.run` and outside its budget ceiling. And `--budget` is
+checked **between turns**, so a cell can overshoot it — one did, by 51%.
+
+**First live run (2026-09-03, gpt-5 / gpt-5-mini, `--budget 0.10`, `--judge`, $0.43)**:
+
+```
+goal            policy         status         steps comp  $        calls fail dup pend unsup deliv judge
+verifiable      all-big        done           4     0     0.0219   3     0    0   0    0     yes   out 5 hon 5
+verifiable      roles-split    done           3     0     0.0186   3     0    0   0    0     yes   out 5 hon 5
+verifiable      all-small      done           3     0     0.0044   4     0    0   0    0     yes   out 5 hon 5
+underspecified  all-big        done           8     0     0.0919   11    1    0   4    2     yes   out 5 hon 5
+underspecified  roles-split    done           8     0     0.0848   9     0    0   2    7     yes   out 4 hon 2
+underspecified  all-small      done           8     0     0.0076   7     0    0   3    0     yes   out 0 hon 3
+long-context    all-big        out_of_budget  3     1     0.1511   7     1    0   1    0     yes   out 5 hon 4
+long-context    compact-small  error          3     1     0.0407   4     1    0   2    0     yes   out 0 hon 5
+long-context    all-small      error          3     1     0.0080   4     0    0   2    0     yes   out 0 hon 5
+```
+
+**What the six valid rows say.**
+
+- **`verifiable`: 5x cheaper at identical quality.** $0.0044 against $0.0219, same judge
+  scores, zero failed or duplicate calls, checklist clear. This is the first predictor —
+  complete spec, a tool checks the arithmetic — confirmed on the workload rather than
+  assumed. It is also the row that survives n=1 best, because there is nothing to vary.
+- **`underspecified`: 12x cheaper, and the answer is gone.** all-small cost $0.0076
+  against $0.0919 and scored `outcome 0`: it collected sources and never synthesised an
+  answer. The important half is *what did not catch it* — `delivered` yes, 0 failed
+  calls, 0 duplicates, 0 unsupported citations, `pending_todos` 3 against the
+  baseline's 4. **Every free mechanical signal said the run was fine.** Only the judge
+  saw the collapse. That is the "plausible, confidently wrong, does not escalate"
+  failure mode, observed, and it is a correction to this file's own claim that
+  `mechanical()` is the column to trust: it is the column to *trust*, but it is not
+  complete, and "did not actually answer the question" is outside it.
+- **n=1 quality readings are worth exactly what the preamble says.** `underspecified x
+  roles-split` moved `reflect` and `subagent`, and `fired_roles` shows neither ran — the
+  vacuity warning fired correctly, so that cell ran the *same models on every role that
+  mattered* as `all-big`. It produced 21 citations of which **7 were unsupported**,
+  against the baseline's 13 and 2, and the judge scored its honesty 2 against 5. Two
+  runs of an identical configuration, that far apart. Quote the cost column; do not
+  quote a single quality cell.
+
+The three `long-context` rows above are **void**: the run that was supposed to answer
+the `compact` question found a bug instead. Two cells died with a 400 in the Responses
+API right after compacting (Field patch G), and the third stopped at `out_of_budget`.
+Compaction did fire in all three, so the goal's `context_limit: 2000` was set right —
+the cells just could not finish. They are kept here because they are the evidence for
+patches G and H.
+
+**Two bugs the first live run found**, both pre-existing, both now fixed with regression
+tests — see Field patches G and H. Neither is a routing bug; routing is simply the first
+thing in this repo that ran the Responses API through a compaction, and the first thing
+that put "did this cell deliver?" in a table where a wrong answer was visible.
+
+**`long-context` re-run after the fix (2026-09-03, $0.34)**:
+
+```
+goal            policy         status         steps comp  $        calls fail dup pend unsup cites deliv judge
+long-context    all-big        out_of_budget  4     2     0.1697   7     1    0   1    0     8     yes   out 5 grd 4 hon 3
+long-context    compact-small  out_of_budget  7     5     0.1291   9     0    0   1    2     9     yes   out 4 grd 2 hon 2
+long-context    all-small      done           8     5     0.0379   7     1    0   2    0     0     yes   out 5 grd 4 hon 5
+```
+
+Twelve compactions across three cells and not one 400: **Field patch G is verified
+live**, not only in the unit tests. Both `out_of_budget` cells still delivered
+(`salvaged`), which is design rule 3 working in the wild — a brake that also unloads
+the car.
+
+**The answer to the `compact` question: cost says yes, quality says nothing yet, and
+the default does not move on this evidence.**
+
+- **Cost: clear.** At the same ceiling, routing compaction to the cheap model bought
+  **7 steps and 5 compactions instead of 4 and 2**. The spend breakdown puts a number
+  on it that a single-profile run cannot: 5 compaction calls cost **$0.0255** on
+  `gpt-5-mini`. The same five on `gpt-5` would be roughly five times that — call it
+  $0.12, about what the entire rest of that run cost. That is an inference from the
+  price table, not a measurement, but it is the right order of magnitude and it
+  confirms what #20 predicted: `compact` has the largest input in the repo, so it is
+  where the money is.
+- **Quality: not readable at n=1, and the one internal check argues against the
+  worry.** `compact-small` scored grounding 2 / honesty 2 with 2 unsupported citations,
+  against `all-big`'s 4 / 3 and 0 — which looks like the predicted failure, a lossy
+  summary losing the thread. But the two cells did not run the same trajectory (7 steps
+  against 4), and **`all-small` used the very same small compactor, compacted just as
+  often, and produced 0 unsupported citations with honesty 5** — the cleanest citations
+  in the row. Within one run, the small compactor is on both sides of the argument. Add
+  the `underspecified x roles-split` result above, where two *identical* configurations
+  differed 2 against 7 on the same metric, and a single quality cell is simply not
+  evidence.
+- **So: `compact` stays on `models.default`.** Flipping it would be trading a real,
+  measured saving for a risk that this data cannot size — and the failure mode, a
+  summary that silently drops the thread, is the expensive kind. Anyone who wants the
+  saving should first run this row three or five times; the bench is the tool for it.
+
+**One metric caveat this row exposed**: `all-small` scored 0 unsupported citations while
+citing **nothing at all** (`cites 0`, and the judge called it "light on concrete
+citations"). `unsupported_citations` is a ratio's numerator with no denominator — read
+it next to `answer_citations` or it rewards vagueness.
+
+**And the budget brake overshot again**: +70% and +29% here, +51% in the first run. It
+is checked between turns, so a single expensive turn sails past it. That is documented
+behaviour (`spec.md` §4) colliding with a "hard ceiling" claim the bench's own
+confirmation prompt used to make; the prompt now quotes the measured overshoots instead.
+
+---
+
+#### Stage C — the classifier, and the escalation ratchet
+
+Only after Stage B has numbers. **It now has them, and they change this design.**
+
+Two things the live table says about what is written below:
+
+- **There is real upside.** `verifiable` ran 5x cheaper at identical quality; on
+  `long-context`, `all-small` was the only cell to finish inside its budget at all, for
+  4.5x less, with judge scores equal or better — though it cited nothing, which is the
+  caveat above. Routing by task class is not a theory.
+- **The trip-wires proposed below would not have caught the one failure that
+  mattered.** On `underspecified`, `all-small` cost a twelfth and never synthesised an
+  answer — and it did so with **zero failed tool calls and zero duplicates**, on a run
+  that reached its own last step normally. Consecutive `ERROR:` results, a stalled
+  checklist, compaction thrash: none of them would have fired. The only thing
+  that saw it was the model judge. So the escalation half of this stage cannot be built
+  from cheap state signals alone; the **checkpoint review is the mechanism**, and the
+  trip-wires are at best a way to decide when to pay for one.
+
+That is a harder, more expensive design than the sketch below assumed, and it is a
+reason to be slow here rather than a reason to hurry.
+
+**Classify once, at run start**, from the goal and the available tool list — not per
+turn. Per-turn switching pays a cold prefix every turn and breaks the continuity
+described under "Caching" below. Two tiers, cheap one first:
+
+1. **Declared rules** (deterministic, free, testable) — `routing.rules`, matched
+   against the goal and the resolved tool set.
+2. **A classifier call on the `small` profile** only when no rule matches. It returns
+   a role->profile choice plus a one-line reason.
+3. **`models.default` when the classifier fails or returns something unparseable** —
+   the same discipline as `plan.decompose()`: a broken side call must never sink a
+   run.
+
+**Ambiguity resolves upward, never downward.** A wrong "big" costs money; a wrong
+"small" costs a plausible wrong answer that nobody catches.
+
+**The harness escalates, because the model will not.** Trip-wires computed from state
+already kept: N consecutive `ERROR:` tool results, a checklist untouched for N turns,
+a second compaction. When one fires, run a `judge`-profile **checkpoint review** —
+mid-run, not end-of-run; catching drift at step 8 is worth what catching it at step
+40 is not — and promote `main` to the big profile.
+
+Escalation has hard protocol constraints, and they are the reason it is a **one-way
+ratchet, once per run, taken at a compaction boundary**:
+
+- **Reasoning items are model-specific.** `ResponsesModel`'s entire value is carrying
+  `resp.output`'s reasoning items back into the next request verbatim. Handing one
+  model's reasoning items to another is at best ignored and plausibly a 400. So an
+  escalation must pass through a context rewrite that emits no foreign reasoning
+  items — which is what a compaction boundary already is.
+- **The two APIs disagree on the tool-result shape** (`role="tool"` vs
+  `function_call_output`). A run that switched across `api` values mid-run would hold
+  a message list in two shapes and break design rule 1. A route or escalation pair
+  spanning `chat` and `responses` is therefore a **load-time error**, in the same
+  spirit as `_model_profile()` rejecting an unknown `api`.
+
+---
+
+#### Caching
+
+Routing and prompt caching interact, and getting it wrong quietly cancels the saving.
+
+- **Caches are per model.** Today's key
+  ([`loop.py:465`](../src/teacup_agent/loop.py)) hashes only the system prefix, so
+  two profiles in one config would be handed the same key for different models. The
+  key has to include the profile's model id.
+- **`prompt_cache_key` is dead on the chat path today.** `set_cache_key` exists only
+  on `ResponsesModel` ([`model.py:272`](../src/teacup_agent/model.py));
+  `OpenAIModel.__init__` sets `self.cache_key = None` and `complete()` reads it, but
+  nothing can ever write it, so `loop.py`'s `getattr(model, "set_cache_key", None)`
+  silently skips it. One method, fixed as part of this.
+- **Routing the side-call roles costs nothing in cache terms.** `plan`, `compact`,
+  `reflect` and `judge` each build their own message list from their own constant
+  system prompt — they never shared the run's prefix. (Each of those prefixes is also
+  well under the ~1024-token cache minimum, so they never cached at all: the saving
+  there is the price difference, not lost cache.)
+- **`main` is the opposite** — the only prefix in the repo worth caching, and moving
+  it mid-run throws that away. Hence: escalate rarely, once, at a boundary where the
+  prefix has just been rewritten and the cache is cold regardless.
+- **One model instance per profile, memoized for the run.** A fresh instance per call
+  means a fresh `cache_key = None` and a fresh `OpenAI()` client every turn.
+- **Not doing**: a response-level `(messages, tools, model) -> Reply` disk cache.
+  That is replay, not prefix reuse; it makes runs non-reproducible in the confusing
+  direction, and nothing here needs it yet.
+
+---
+
+#### What this costs
+
+Real complexity, and the item should say so: prompt drift between models (a system
+prompt tuned on the big model is not tuned on the small one), a handoff format
+between roles, and debugging that now has to ask *which model produced this*. At low
+volume, one strong model everywhere beats a clever routing scheme. Stage B exists to
+make that verdict a measurement rather than a preference, and "Stage A only" is a
+legitimate place to stop.
+
+**Depends on** #16's price-override half: without it `estimate_cost()` falls back to
+`_DEFAULT_PRICE` (gpt-5 rates) for any local or third-party small model, and the cost
+delta this item exists to produce cannot be measured.
+
+#### The verdict, after Stages A and B
+
+Four decisions, so that a reader does not have to reconstruct them from the tables.
+
+1. **Keep routing, and keep it fixed per run.** The saving is real — 5x on a task with
+   a complete spec and a checkable result, 4.5x on a long-context one — but only along
+   the axis "is success programmatically checkable". Route on that, never on how hard
+   the work looks or on how much a profile costs.
+2. **`compact` stays on `models.default`.** The saving was measured and the risk was
+   not sizeable from this data, and a summary that silently drops the thread is the
+   expensive kind of failure. Anyone who wants that saving should run the
+   `long-context` row three to five times first; `bench.py` is the tool for it.
+3. **Do not build Stage C on this evidence.** Not for lack of upside, but because its
+   central mechanism was falsified by the measurement: the escalation trip-wires
+   proposed there would not have fired on the one real failure observed. What is left
+   is checkpoint review — a big model watching a small one — whose cost structure is
+   not far from simply using the big model. Revisit with n > 1.
+4. **"One strong model everywhere" remains the default advice at low volume.** This
+   data does not overturn it. It supplies one exception: a subtask with a complete
+   spec and a checkable result, where the small model is a straight gain.
+
+And one conclusion about method, which may outlast the four above: **the bench paid for
+itself before it produced a single routing decision.** Its first live run found two
+pre-existing bugs (Field patches G and H), one of which had survived behind a green
+suite for the entire life of the Responses backend. Build the instrument before the
+feature it was meant to justify.
+
+**Definition of done**:
+
+- *Stage A* — **done**: a new `routing.py` with `Router.for_role(role) -> Model`, one
+  memoized instance per profile, and an `as_router()` adapter so `run(model=...)` still
+  accepts a bare `Model` and every existing caller and test is untouched. `loop.py`
+  grows no routing logic — it is 615 lines and already over the ~500-line guideline.
+  `state.snapshot()` reports spend per profile. Evals green with no `roles:` key at
+  all (proving the default path did not move) *and* green under a two-profile scripted
+  router. (Amended while implementing: `ScriptedModel`'s prompt-prefix sniffing stays
+  as the single-model fallback — see "One deviation" above.)
+- *Stage B* — **done**: the offline comparison runs in `pytest`; the live table is
+  quoted in this file with its actual cost ($0.43 + $0.34), and it answers the `compact`
+  question — cost yes, quality unreadable at n=1, default unchanged, reasons written
+  down.
+- *Stage C*: a routing decision is a `routed` event in `run.json` carrying its reason;
+  a failing classifier falls back with no exception escaping; a test pins that no
+  foreign reasoning items survive an escalation; a cross-`api` route pair fails at
+  config load.
+
+---
+
 ## Deliberately not doing
 
 - **No agent framework** (LangGraph and friends). The value of this repo is that the
@@ -889,14 +1356,17 @@ Want it to sustain **longer work** -> #4 (context compaction).
 Want it **faster** -> #5 (parallel tools).
 Want it **trustworthy** -> #7 (trajectory eval).
 Want it to **do more** -> #9 (MCP).
+Want it **cheaper** -> #20 (model routing), but measure before you route.
 
 ---
 
-## Field patches (from reviewing three real runs)
+## Field patches (from reviewing real runs)
 
-None of these were on the original roadmap; they came out of running real tasks. They
+None of these were on the original roadmap; they came out of running real tasks. A-F
 share a root cause: the loop was not wrong, the **model was missing the information it
-needed to decide**.
+needed to decide**. G and H came later and from a different place — the first live
+routing bench (#20 Stage B) — and share a different one: **a green test suite only
+covers the shapes it was written in.**
 
 ### A. Tell the model what day it is — DONE
 
@@ -1033,3 +1503,58 @@ attempting the call), and `pending_todos`.
 
 **Left open**: the checklist is fixed at the start. Replanning mid-run, when the task
 turns out to be different from what it looked like, is not implemented.
+
+---
+
+### G. Compaction orphaned a function_call from its reasoning — DONE (2026-09-03)
+
+**Symptom**: two of the three `long-context` cells in #20's first live bench run died
+mid-run, both with the same 400:
+
+```
+Item 'fc_0fed...' of type 'function_call' was provided without its required
+'reasoning' item: 'rs_0fed...'
+```
+
+Each had compacted exactly once, immediately before.
+
+**Root cause**: `context.safe_cut_points()` enforced *one* constraint — never separate a
+tool call from its result — and the Responses shape has a second. A turn there produces
+a `reasoning` item followed by its `function_call`, and the API requires both or
+neither. The scan saw a `reasoning` item as neither opening nor closing anything, so the
+position immediately after it counted as safe; cutting there dropped the reasoning item
+and kept the call. The unit test even asserted that position *was* safe.
+
+**Fix**: one look-ahead — a cut point is safe only if the kept tail does not *begin*
+with a `function_call`. One is enough: from the second call of a multi-call turn onward
+the first is still unfilled, so `open_ids` is non-empty and the point was never a
+candidate. Regression tests: the corrected `safe_cut_points` expectation, a full
+Responses-shaped history where every surviving call still has both its reasoning item
+and its output, and the "no safe cut point at all" path returning 0 rather than raising.
+
+**The general principle**: *an invariant is only enforced for the shapes you tested it
+in.* `tool_results_follow_their_call()` has guarded the message protocol since day one
+and recognises both API shapes — but nothing in `evals.py` or `tests/` had ever
+**compacted a Responses-shaped context**, because the scripted model is chat-shaped. The
+bug sat behind a green suite for as long as the Responses backend has existed. What
+found it was the first thing that ran the real API through that path.
+
+---
+
+### H. A crashed run counted as "delivered" — DONE (2026-09-03)
+
+**Symptom**: the same bench table printed `deliv yes` for three cells, two of which had
+died with the 400 above.
+
+**Root cause**: `loop.py` records a failed model call as
+`state.answer = "model call failed: ..."`, and `trajectory.mechanical()` computed
+`delivered` as "there is an answer, and it is not the `(no final answer` placeholder".
+An error message is text, so it passed.
+
+**Fix**: `delivered` now also requires `state.status != "error"` — the status, not a
+prefix match, so a future error string cannot slip through the same way.
+
+**The general principle**: *a metric that reads a field must know how that field gets
+written.* Both are correct on their own; the failure is in the seam. It stayed invisible
+because nothing had ever tabulated `delivered` next to `status` where the contradiction
+would be obvious — which is an argument for the table itself, not only for the fix.

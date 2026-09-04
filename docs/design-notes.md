@@ -62,6 +62,115 @@ prompt.
 
 ---
 
+## Model routing: one agent, several models
+
+An agent does not make one kind of model call. `loop.py`'s own turns are judgment —
+decide what the task actually is, notice at step 20 that the approach is wrong, know
+when to stop. Summarizing old context, writing a note in a fixed schema, or running a
+short self-contained subtask are not: they are well-specified work with a checkable
+result, and a harness (retrieval instead of recall, tool feedback instead of one-shot
+correctness, retries instead of precision) closes most of the capability gap on exactly
+that. Sending all six call sites to one model means either paying judgment prices for
+clerical work, or accepting a clerk's judgment.
+
+So `models.roles` in `agent.yaml` maps a **role** — a call site — to a model profile,
+and [`routing.py`](../src/teacup_agent/routing.py) is the lookup. Omit the block and
+every role runs on `models.default`, which is exactly what happened before this existed.
+
+### Why roles, and not a classifier
+
+The obvious design is "look at the task, pick a model". That is roadmap #20's Stage C,
+and it is deliberately not here yet, because the honest version of it needs a
+measurement first: route by measured task class on your own workload, not by vibes. A
+role map needs no measurement to be safe — it is fixed for the run, it is declared in a
+file you can diff, and a wrong choice shows up as a bill or a bad answer attached to a
+named role, not as a mystery.
+
+The reason to be careful is the shape of the failure. A small model that is out of its
+depth does not stall or ask for help; it produces plausible, confidently wrong work and
+carries on. That is why the routing question is never "how hard does this look" but:
+
+1. is success programmatically checkable (tests, a schema, an exact string)?
+2. is the spec complete — ambiguity is the expensive part;
+3. how long is the horizon — per-step errors compound, and 0.95^30 is a coin flip;
+4. how noisy is the context — long distractor-heavy context degrades small models much
+   faster than their benchmark scores suggest.
+
+`plan` is the role worth spending on: a tiny fraction of a run's tokens, and it produces
+the checklist the loop then holds the model to for the rest of the run. `subagent` is
+the textbook cheap one: short horizon, narrow spec, and its answer returns as a tool
+result the parent can sanity-check. `compact` is deliberately **left to the default**
+until it is measured — it has the largest input in the repo, so it is where the money
+is, but a lossy summary loses the thread silently and unrecoverably, which is the exact
+failure mode above. The forced wrap-up is not a knob at all: it runs on the main
+context's own prefix, so routing it elsewhere would pay a cold prefix for one call, and
+"salvage a conclusion from partial information" is judgment.
+
+### What routing does to the prompt cache
+
+Caches are per model, so the grouping key now hashes the model id along with the
+context prefix — two profiles sharing this system prompt must not be handed the same
+key. Only the `main` role gets a key: the other five each build their own short,
+constant system prompt, well under the ~1024-token minimum a prefix needs to enter the
+cache at all. That is also why routing them away costs nothing in cache terms — they
+never shared the run's prefix — and the saving there is purely the price difference.
+
+The router builds each profile **once per run** and shares the instances with the
+routers it derives for subagents. A fresh instance per call would mean a fresh HTTP
+client and a fresh (empty) cache key every turn, quietly cancelling the thing the stable
+prefix was protecting.
+
+Routing is fixed for the run, which is what makes all of this safe. A mid-run switch
+would have two hard problems: reasoning items are model-specific (carrying them back
+verbatim is the whole value of the Responses path, and handing one model's reasoning to
+another is at best ignored), and the two APIs disagree on the tool-result shape, so a
+run that crossed `chat` and `responses` would hold a message list in two shapes. Both
+are Stage C's problem, and both are why an escalation there has to pass through a
+context rewrite rather than just swapping the object.
+
+### What the measurement said
+
+`bench.py` ran these choices under real models (roadmap #20 Stage B, $0.77 across two
+runs). The short version, because the defaults above are only as good as the evidence
+for them:
+
+- On a task with a complete spec and a checkable result, the small model was **5x
+  cheaper at identical quality**. That is the axis routing works along.
+- On an underspecified research task it was **12x cheaper and produced no answer at
+  all** — while showing zero failed calls, zero duplicates and a `delivered` flag of
+  yes. Every free mechanical signal said the run was fine; only the model judge saw the
+  collapse. `mechanical()` is the column to trust, but it is not complete, and "did not
+  actually answer the question" is outside it.
+- **`compact` was left on the default and stays there.** Routing it to the small model
+  is where the money is — five compaction calls cost $0.0255 on `gpt-5-mini`, roughly a
+  fifth of what the same five would cost on `gpt-5`, which is most of a run — but the
+  quality read was not interpretable at n=1, and the same small compactor produced both
+  the worst and the best citation record in the same row.
+- Single quality numbers from single runs are worth nothing here, and that is measured
+  rather than assumed: two cells with **identical** models on every role that ran
+  differed 2 against 7 on unsupported citations.
+
+### Two things this exposed
+
+`plan.decompose()` never charged its model call to the run. It went unnoticed while
+every call was the same price; it becomes a lie in the budget the moment `plan` is the
+role pointing at the expensive profile, so `decompose()` now takes the state and charges
+like everything else.
+
+`prompt_cache_key` was dead on the Chat Completions path. `OpenAIModel.complete()` has
+always read `self.cache_key`, but only `ResponsesModel` had a `set_cache_key()`, so
+`loop.py`'s `getattr(model, "set_cache_key", None)` silently skipped it. The
+`getattr`-based optional-method style is what let it hide — nothing fails when the
+method is missing, which is the point and also the hazard.
+
+One wrinkle that predates routing and is still there: a subagent's own `loop.run()`
+calls `set_cache_key()` with the child's system-prompt hash, overwriting the parent's
+key on a shared instance for the rest of the parent run. It costs cache hits, never
+correctness, and it only stops happening when parent and child resolve to different
+profiles.
+
+---
+
 ## MCP
 
 Every tool in `tools.py` had to be written by hand. MCP is how you stop doing that:
@@ -616,7 +725,11 @@ content". **Nothing is lost**, and the cost of fetching it is paid only when nee
 **2. Compact** (`--context-limit`, default 30000 tokens). If the context is still
 over the limit, an earlier slice is summarized and replaced by one
 `[context summary]` message. The system prefix (or prompt caching dies), the original
-goal and the last 8 entries are kept. The summarizer prompt explicitly demands
+goal and the last 8 entries are kept. The cut must not orphan anything: not a tool call
+from its result, and not — in the Responses shape — a `function_call` from the
+`reasoning` item the API requires with it. The second half of that rule was missing
+until a live run 400ed on it (roadmap Field patch G); the suite was green because
+nothing had ever compacted a Responses-shaped context. The summarizer prompt explicitly demands
 "verified facts + source links + what was tried and failed". The last one matters
 most, or the agent walks into the same dead end again after compaction.
 

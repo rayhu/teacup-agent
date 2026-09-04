@@ -452,12 +452,18 @@ def _main_config(args) -> int:
         )
         resumed.salvaged = False
 
-    the_model = agent_config.build_model(cfg.models[cfg.default_model])
+    # A router, not a model: `models.roles` may send the planner, the compactor or a
+    # subagent to a different profile. With no roles set it resolves to exactly the one
+    # profile this used to build.
+    router = agent_config.build_router(cfg)
     if not args.quiet:
         print(
             f"mode config:{args.config} (model profile {cfg.default_model}) | "
             f"goal: {args.goal}\n"
         )
+        if router.is_split():
+            roles = ", ".join(f"{r}={p}" for r, p in router.profiles().items())
+            print(f"  [models] {roles}\n")
 
     run_dir = agent_config.resolve_run_dir(cfg.runtime.run_dir)
     if args.resume:  # keep one run in one directory, same as the flag-driven path
@@ -494,7 +500,7 @@ def _main_config(args) -> int:
     try:
         state = loop.run(
             goal=args.goal,
-            model=the_model,
+            model=router,
             memory=Memory(cfg.runtime.memory),
             max_steps=cfg.runtime.max_steps,
             budget=cfg.runtime.budget,

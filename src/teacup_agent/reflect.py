@@ -62,7 +62,9 @@ def should_reflect(state: AgentState, metrics: dict[str, Any]) -> tuple[bool, bo
     return experience, lesson
 
 
-def maybe_record(state: AgentState, model: Any, memory: Memory) -> list[str]:
+def maybe_record(
+    state: AgentState, model: Any, memory: Memory, profile: str = ""
+) -> list[str]:
     """Write an experience and/or lesson note if this run's trajectory earns one.
 
     Returns the kinds actually written, so the caller can emit an event; empty if
@@ -85,7 +87,7 @@ def maybe_record(state: AgentState, model: Any, memory: Memory) -> list[str]:
         )
     except Exception:
         return []
-    state.charge(reply.cost)  # honest accounting, even though status is already final
+    state.charge(reply.cost, profile)  # honest accounting, though status is already final
 
     match = re.search(r"\{.*\}", reply.text or "", re.S)
     if not match:

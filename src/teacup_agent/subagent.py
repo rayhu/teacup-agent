@@ -24,6 +24,7 @@ from __future__ import annotations
 import pathlib
 from typing import Any
 
+from teacup_agent import routing
 from teacup_agent import tools as tools_mod
 
 NAME = "delegate"
@@ -72,11 +73,16 @@ def enable(
     budget_share is the fraction of the parent's *remaining* budget a single subagent
     may spend. It is read at call time, not now, so a parent that has already spent
     most of its budget cannot fund an expensive child.
+
+    `model` may be a bare Model or a Router. With a router the child's own turns run on
+    the `subagent` profile — a delegated subtask is the textbook small-model job: short
+    horizon, narrow spec, and its answer comes back as a tool result the parent can
+    sanity-check — while every other role keeps the parent's mapping.
     """
     global _config
     _config = {
         "state": parent_state,
-        "model": model,
+        "model": routing.as_router(model).child("subagent"),
         "max_steps": max_steps,
         "budget_share": budget_share,
         "approve": approve,
@@ -132,8 +138,12 @@ def _delegate(task: str, wanted: str = "") -> str:
         on_event=_child_events(index, _config["on_event"]),
     )
 
-    # Money and tokens are the parent's, wherever they were spent.
+    # Money and tokens are the parent's, wherever they were spent. The charge is one
+    # rounded delta and carries no profile, so it does not enter the breakdown twice:
+    # the child's own per-profile figures are merged in below instead.
     parent.charge(budget - child.remaining_budget)
+    for name, spent in child.spend_by_profile.items():
+        parent.spend_by_profile[name] = round(parent.spend_by_profile.get(name, 0.0) + spent, 6)
     parent.input_tokens_total += child.input_tokens_total
     parent.cached_tokens_total += child.cached_tokens_total
     parent.subagent_runs += 1
