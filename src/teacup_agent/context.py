@@ -14,9 +14,20 @@ comes first**:
    to the model for summarization and replaced by a single summary message. This is
    lossy, which is why it is the second resort.
 
-Compaction has one **constraint you must not break**: never separate a tool call
-from its result. A function_call without its output makes the next request fail
-with a 400, so we only cut at points where nothing is left dangling.
+Compaction has **two constraints you must not break**, and both end in the same 400:
+
+1. never separate a tool call from its result — a function_call without its output
+   fails the next request;
+2. in the Responses shape, never separate a `function_call` from the `reasoning` item
+   it came with. That one was found the hard way, by the first live bench run: the
+   cut landed immediately after a reasoning item, the call it belonged to survived
+   into the kept tail, and the API refused the next request with "Item 'fc_...' of
+   type 'function_call' was provided without its required 'reasoning' item".
+
+The second constraint is really "do not cut inside a turn". A Responses turn arrives as
+a *group* — reasoning item(s), an optional message, then that turn's function_call(s) —
+and `state.messages.extend(reply.items)` lays the whole group down at once. Anywhere
+inside the group is a cut that orphans part of it.
 """
 
 from __future__ import annotations
@@ -83,6 +94,17 @@ def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
     Same scan as the ordering invariant in evals: an announced id goes into the set,
     a filled id comes out, and any moment the set is empty is a safe point. Both API
     shapes are recognised.
+
+    Plus one rule for the Responses shape: **only cut on a turn boundary.** A turn
+    arrives as a group (reasoning, then an optional message, then that turn's
+    function_calls), so a cut directly after a `reasoning` or `message` item can leave a
+    later call in the same group without the reasoning item the API demands with it.
+
+    An earlier version of this only checked whether the kept tail *began* with a
+    `function_call`, which assumed the reasoning item and its call were adjacent. They
+    are not when the model narrates first — `reasoning -> message -> function_call` is
+    an ordinary turn, and it walked straight through that check (roadmap Field patch G,
+    second attempt). Chat-shaped entries carry no `type`, so nothing changes for them.
     """
     open_ids: set[str] = set()
     points = []
@@ -96,7 +118,10 @@ def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
             open_ids.add(msg["call_id"])
         elif msg.get("type") == "function_call_output":
             open_ids.discard(msg.get("call_id"))
-        if not open_ids:
+        # Inside a Responses turn: a function_call later in the same group may need
+        # this entry's reasoning item, so this is not a boundary.
+        mid_turn = msg.get("type") in ("reasoning", "message")
+        if not open_ids and not mid_turn:
             points.append(i + 1)  # cutting after this entry is safe
     return points
 
@@ -132,6 +157,7 @@ def compact(
     model: Model,
     limit: int,
     keep_recent: int = 8,
+    profile: str = "",  # which model profile ran the summary, for the spend breakdown
 ) -> int:
     """Compact the early context into one summary once the limit is exceeded.
 
@@ -157,7 +183,7 @@ def compact(
         ],
         [],
     )
-    state.charge(summary.cost)
+    state.charge(summary.cost, profile)
     if not summary.text:
         return 0
 

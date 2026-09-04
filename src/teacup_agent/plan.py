@@ -33,11 +33,19 @@ Output a JSON array of strings and nothing else, e.g.
 ["research X's investment record", "email the findings to a@b.com"]"""
 
 
-def decompose(goal: str, model: Any) -> list[TodoItem]:
+def decompose(
+    goal: str, model: Any, state: Any = None, profile: str = ""
+) -> list[TodoItem]:
     """One model call, no tools, to split the goal into action items.
 
     Returns an empty list if anything goes wrong — a broken planner must never stop
     the run, it just means the loop works the way it did before this feature.
+
+    `state` is optional only so existing callers and tests can pass a model alone; when
+    it is given the call is charged like any other. It went uncharged until routing
+    (#21) made the omission material — this is the one role a config is most likely to
+    point at the *expensive* model, and an unbilled expensive call is a lie in the
+    budget.
     """
     try:
         reply = model.complete(
@@ -49,6 +57,8 @@ def decompose(goal: str, model: Any) -> list[TodoItem]:
         )
     except Exception:
         return []
+    if state is not None:
+        state.charge(reply.cost, profile)
 
     match = re.search(r"\[.*\]", reply.text or "", re.S)
     if not match:

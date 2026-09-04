@@ -159,6 +159,13 @@ class OpenAIModel:
     def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
         return chat_tool_result(call, result)
 
+    def set_cache_key(self, key: str) -> None:
+        # This was missing until routing (#21) went looking for it: `complete()` has
+        # always read `self.cache_key`, but nothing could ever write it, so loop.py's
+        # `getattr(model, "set_cache_key", None)` skipped this class and
+        # `prompt_cache_key` was dead on the Chat path.
+        self.cache_key = key
+
 
 class ResponsesModel:
     """The Responses API — the recommended path for reasoning models (gpt-5 family).

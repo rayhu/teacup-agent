@@ -62,6 +62,11 @@ class AgentState:
     subagent_runs: int = 0  # how many subagents this run delegated to
     loaded_skills: list[str] = field(default_factory=list)  # skills pulled into context
     trace: list[ToolTrace] = field(default_factory=list)
+    # profile name -> dollars, when a run routes roles to different models (routing.py).
+    # A **diagnostic** for routing decisions, not a second ledger: `remaining_budget` is
+    # the ledger, and a subagent charges its parent one rounded delta rather than a
+    # per-turn breakdown, so the two can disagree in the last decimal.
+    spend_by_profile: dict[str, float] = field(default_factory=dict)
 
     # ---- the loop's guards ----------------------------------------------
     def can_continue(self) -> bool:
@@ -82,8 +87,12 @@ class AgentState:
             return None
         return round(self.time_budget - self.elapsed, 3)
 
-    def charge(self, cost: float) -> None:
+    def charge(self, cost: float, profile: str = "") -> None:
         self.remaining_budget = round(self.remaining_budget - cost, 6)
+        if profile:  # unnamed charges (a bare model, a subagent's rounded delta) stay
+            self.spend_by_profile[profile] = round(  # out of the breakdown entirely
+                self.spend_by_profile.get(profile, 0.0) + cost, 6
+            )
 
     def cache_hit_rate(self) -> str:
         if not self.input_tokens_total:
@@ -111,4 +120,5 @@ class AgentState:
             "messages": len(self.messages),
             "tool_calls": sum(t.executed for t in self.trace),
             "throttled": sum(not t.executed for t in self.trace),
+            "spend": dict(self.spend_by_profile),
         }

@@ -70,8 +70,10 @@ src/teacup_agent/
 ├── skills.py      skills       procedures loaded only when the task matches
 ├── subagent.py    delegation   a child run with its own context
 ├── trajectory.py  scoring      grade a real run: mechanical metrics + an LLM judge
+├── bench.py       comparison   same goals, different routing policies, one table
 ├── reflect.py     reflection   write down what worked, or what broke and got fixed
 ├── agent_config.py config      describe an agent in agent.yaml instead of flags
+├── routing.py     routing      which model profile serves which kind of call
 ├── a2a/client.py  A2A client   delegate_a2a: hand a task to a different agent process
 ├── a2a/card.py    A2A card     build this agent's Agent Card from agent.yaml + skills
 ├── a2a/server.py  A2A server   teacup-agent-serve: be callable by another agent
@@ -95,12 +97,12 @@ NOTES.md                the original study notes this grew from
 
 | Part | File | Today | When you outgrow it |
 | --- | --- | --- | --- |
-| Model | `model.py`, `agent_config.py` | Responses API (default) and Chat Completions with cache-aware pricing, an offline scripted model, and `--config agent.yaml` for naming several profiles (including any OpenAI-compatible endpoint via `base_url`) and picking one as the default | Claude's own Messages API, per-profile cost tables (roadmap #16) |
+| Model | `model.py`, `agent_config.py`, `routing.py` | Responses API (default) and Chat Completions with cache-aware pricing, an offline scripted model, and `--config agent.yaml` for naming several profiles (including any OpenAI-compatible endpoint via `base_url`) and routing each kind of call — the agent's turns, planning, compaction, reflection, judging, subagents — to one of them | Claude's own Messages API, per-profile cost tables (roadmap #16), routing by task rather than by call site (#21) |
 | State | `state.py` | steps, budget, time, status machine, tool trace; saved every step and resumable | distributed or concurrent runs |
 | Tools | `tools.py`, `mcp_tools.py`, `a2a/client.py` | six built-ins (search, calculate, read file, remember, checklist, send mail) plus anything an MCP server exposes, plus `delegate_a2a` for peers named in `agent.yaml` | more servers |
 | Control Loop | `loop.py` | four brakes, parallel tools, retries, a completion check, delegation to subagents | parallel subagents, delegated planning |
 | Memory | `memory.py`, `reflect.py` | JSON file with dedupe, keeping the last N facts, plus a lower-trust `notes` tier auto-written after a qualifying run (an experience or a lesson) | vector store, summarization, relevance recall |
-| Evals | `evals.py`, `trajectory.py` | offline protocol cases plus real-trajectory scoring | fixed task suites, cross-version regression |
+| Evals | `evals.py`, `trajectory.py`, `bench.py` | offline protocol cases, real-trajectory scoring, and a policy bench that compares routing choices on the same goals | fixed task suites, cross-version regression |
 
 ## What keeps it honest
 
@@ -134,6 +136,10 @@ Each of these earned its place by fixing a run that had gone wrong. The stories 
 - **Self-recorded experience**: a run that finished cleanly, or recovered from an error,
   can write a short note about it — stored as a lower-trust tier, separate from facts the
   model chose to remember, and meant to be reviewed rather than trusted outright.
+- **Model routing**: one run, several models. `models.roles` in `agent.yaml` sends each
+  kind of call to a profile — the expensive model for the agent's own turns and for
+  planning, a cheap one for a subagent's short, checkable subtask — because a harness
+  closes the gap on well-specified verifiable work and not on judgment.
 - **Agent2Agent (A2A)**: name a peer agent in `agent.yaml` and `delegate_a2a` can hand it
   a task over the standard A2A protocol, gated by the same approval discipline as
   `send_email`; `teacup-agent-serve` (a separate console script, behind a separate install

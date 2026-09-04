@@ -29,6 +29,7 @@ from teacup_agent import hooks as hooks_mod
 from teacup_agent import persist
 from teacup_agent import plan as plan_mod
 from teacup_agent import reflect as reflect_mod
+from teacup_agent import routing
 from teacup_agent import skills as skills_mod
 from teacup_agent import subagent as subagent_mod
 from teacup_agent import tools as tools_mod
@@ -145,7 +146,9 @@ with status='blocked' and a reason, then give your final answer. Do not simply a
 around the missing item."""
 
 
-def finalize(state: AgentState, model: Model, emit: Callable[..., None]) -> None:
+def finalize(
+    state: AgentState, model: Model, emit: Callable[..., None], profile: str = ""
+) -> None:
     """Forced wrap-up turn: when resources run out, ask once more with no tools and
     squeeze a conclusion out of what is already there.
 
@@ -176,7 +179,7 @@ def finalize(state: AgentState, model: Model, emit: Callable[..., None]) -> None
     except Exception as e:
         emit("error", message=f"forced wrap-up failed: {type(e).__name__}: {e}")
         return
-    state.charge(reply.cost)
+    state.charge(reply.cost, profile)
     state.messages.extend(reply.items)
 
     # The wrap-up turn is given no tools, but a model can still emit tool calls.
@@ -383,7 +386,7 @@ def execute_calls(
 
 def run(
     goal: str,
-    model: Model,
+    model: Model | routing.Router,  # a bare model answers every role (routing.py)
     memory: Memory | None = None,
     max_steps: int = 8,
     budget: float = 0.05,
@@ -418,6 +421,9 @@ def run(
     """
     memory = memory or NullMemory()
     tools_mod.bind_memory(memory)  # let the remember tool write into this memory
+    # One lookup point for "which model serves which call site". A bare Model becomes a
+    # router that answers every role with it, so nothing below has to branch.
+    router = routing.as_router(model)
 
     system = SYSTEM_PROMPT.format(
         max_tool_calls=max_tool_calls_per_step,
@@ -462,7 +468,9 @@ def run(
         if plan:
             # One extra model call, before any tool exists, to write down what the
             # request actually asks for. Cheap insurance against finishing half a task.
-            state.todo = plan_mod.decompose(goal, model)
+            state.todo = plan_mod.decompose(
+                goal, router.for_role("plan"), state, router.profile_for("plan")
+            )
             if state.todo:
                 emit("planned", items=[t.text for t in state.todo])
     tools_mod.bind_todo(state.todo)  # let update_todo tick items off
@@ -473,9 +481,15 @@ def run(
     # OpenAI's job; ours is only to keep the prefix stable (status lines are always
     # appended at the end) and to say which requests belong together. Note that a
     # prefix under ~1024 tokens never enters the cache at all.
-    set_key = getattr(model, "set_cache_key", None)
+    # The model id is hashed in as well as the prefix: caches are per model, so two
+    # profiles sharing this system prompt must not be handed the same grouping key.
+    # (Roles other than `main` build their own short prefixes from their own constant
+    # system prompts, well under the ~1024-token cache minimum, so they get no key.)
+    main_model = router.for_role("main")
+    set_key = getattr(main_model, "set_cache_key", None)
     if set_key:
-        set_key("teacup-agent-" + hashlib.sha256(state.messages[0]["content"].encode()).hexdigest()[:16])
+        seed = f"{getattr(main_model, 'model', '')}\n{state.messages[0]['content']}"
+        set_key("teacup-agent-" + hashlib.sha256(seed.encode()).hexdigest()[:16])
 
     if available_skills:
         skills_mod.enable(available_skills, state)
@@ -492,7 +506,7 @@ def run(
         # context prefix of every request for a capability the run cannot use.
         subagent_mod.enable(
             state,
-            model,
+            router,
             max_steps=subagent_max_steps,
             approve=approve,
             run_dir=run_dir,
@@ -508,7 +522,7 @@ def run(
 
     try:
         return _loop(
-            state, model, specs, emit, clock, started_at, context_limit,
+            state, router, specs, emit, clock, started_at, context_limit,
             tool_timeout, run_dir, approve, memory, reflect,
         )
     finally:
@@ -524,7 +538,7 @@ def run(
 
 def _loop(
     state: AgentState,
-    model: Model,
+    router: routing.Router,
     specs: list[dict[str, Any]],
     emit: Callable[..., None],
     clock: Callable[[], float],
@@ -537,6 +551,8 @@ def _loop(
     reflect: bool,
 ) -> AgentState:
     """The loop itself. Split out only so run() can guarantee the teardown above."""
+    model = router.for_role("main")  # memoized, so this is the same object every time
+    profile = router.profile_for("main")
     while True:
         # ---- guards: steps / budget / time ---------------------------------
         state.elapsed = clock() - started_at
@@ -544,7 +560,7 @@ def _loop(
             state.status = state.stop_reason()
             emit("stopped", reason=state.status)
             if state.step > 0:  # at least one turn ran, so do not leave empty-handed
-                finalize(state, model, emit)
+                finalize(state, model, emit, profile)
             break
 
         state.step += 1
@@ -552,7 +568,12 @@ def _loop(
         # ---- 0a. compact first if the context is over the limit -------------
         if state.context_tokens > context_limit:
             try:
-                saved = ctx.compact(state, model, context_limit)
+                saved = ctx.compact(
+                    state,
+                    router.for_role("compact"),
+                    context_limit,
+                    profile=router.profile_for("compact"),
+                )
             except Exception as e:  # a failed compaction must not sink the task
                 emit("error", message=f"compaction failed: {type(e).__name__}: {e}")
                 saved = 0
@@ -577,7 +598,7 @@ def _loop(
             emit("error", message=state.answer)
             break
 
-        state.charge(reply.cost)
+        state.charge(reply.cost, profile)
         state.input_tokens_total += reply.input_tokens
         state.cached_tokens_total += reply.cached_tokens
         # Prefer the real token count; estimate when there is none (scripted model).
@@ -630,7 +651,9 @@ def _loop(
     if reflect:
         # Before the final persist, so the reflection call's own cost is captured in
         # the state that gets written to disk.
-        written = reflect_mod.maybe_record(state, model, memory)
+        written = reflect_mod.maybe_record(
+            state, router.for_role("reflect"), memory, profile=router.profile_for("reflect")
+        )
         if written:
             emit("reflected", kinds=written)
     if run_dir is not None:  # the final state matters most for review and evals

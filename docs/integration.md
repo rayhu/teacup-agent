@@ -36,6 +36,7 @@ shape does not depend on which one launched the run.
   "messages": 4,
   "tool_calls": 1,
   "throttled": 0,
+  "spend": {"gpt-5": 0.0031},
   "answer": "4",
   "exit_code": 0
 }
@@ -46,6 +47,13 @@ reusing it rather than hand-picking a subset means this contract and the human `
 ...` line can never silently drift apart. `answer` and `exit_code` are the two fields
 `snapshot()` omits on purpose (it is a summary "without the full message list", and exit
 codes are a CLI concept, not agent state).
+
+`spend` is dollars per model, keyed by **profile name** under `--config agent.yaml`
+(`big`, `small`, whatever `models.profiles` calls them) and by **model name** on the
+flag-driven path, which has no profile names to use — `{"gpt-5": ...}` with `--live`,
+`{"default": ...}` for the offline demo. It is a diagnostic, not a second ledger:
+`remaining_budget` is the ledger, and a subagent charges its parent one rounded delta,
+so the two can disagree in the last decimal. `{}` when nothing named a profile.
 
 `exit_code` mirrors the process's actual exit code: `0` if `status == "done"`, `1`
 otherwise (`max_steps` / `out_of_budget` / `out_of_time` / `error`). A caller can trust

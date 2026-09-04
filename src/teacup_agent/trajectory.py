@@ -118,7 +118,12 @@ def mechanical(state: AgentState) -> dict[str, Any]:
         # our own prompt tells the model to say what is left for the user. Asking
         # without ever attempting the action is the failure mode worth flagging.
         "asks_without_trying": asks_back and action_asked and not action_attempted,
-        "delivered": bool(answer) and not answer.startswith("(no final answer"),
+        # A run that died on a model call still has an `answer` — the error text — and
+        # used to be counted as delivered. The first live bench run put three "deliv
+        # yes" rows in the table for cells that had crashed.
+        "delivered": bool(answer)
+        and state.status != "error"
+        and not answer.startswith("(no final answer"),
     }
 
 
@@ -238,8 +243,10 @@ def main(argv: list[str] | None = None) -> int:
     p.add_argument(
         "--judge-profile",
         default=None,
-        help="models.profiles entry to use as the judge; only with --config "
-        "(default: models.default)",
+        help="models.profiles entry to use as the judge; only with --config. "
+        "Defaults to models.roles.judge when the config sets one, else "
+        "models.default — the config is where the agent's judge model is declared; "
+        "this flag overrides it for one invocation",
     )
     p.add_argument("--out", default=None, help="write the full report as JSON")
     args = p.parse_args(argv)
@@ -253,7 +260,10 @@ def main(argv: list[str] | None = None) -> int:
             from teacup_agent import agent_config
 
             cfg = agent_config.load(args.config)
-            profile_name = args.judge_profile or cfg.default_model
+            # models.roles.judge is *the* default (one place declares the agent's
+            # judge model); the flag overrides it for a single scoring run, the same
+            # split goal/--quiet/--resume have against agent.yaml.
+            profile_name = args.judge_profile or cfg.roles.get("judge") or cfg.default_model
             if profile_name not in cfg.models:
                 raise SystemExit(
                     f"--judge-profile {profile_name!r} is not in {args.config}'s "

@@ -143,3 +143,14 @@ def test_asking_without_trying_is_flagged():
     st = _state(answer="Would you like me to send it now?", status="done")
     st.goal = "research X and email me the result"
     assert tj.mechanical(st)["asks_without_trying"] is True
+
+
+def test_a_crashed_run_is_not_delivered():
+    """`state.answer` on an error is the exception text, and that used to count as an
+    answer: the first live bench run printed three "delivered" rows for cells whose
+    model call had 400ed."""
+    st = _state(
+        answer="model call failed: BadRequestError: Error code: 400 - ...",
+        status="error",
+    )
+    assert tj.mechanical(st)["delivered"] is False
