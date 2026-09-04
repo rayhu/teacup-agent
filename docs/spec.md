@@ -337,9 +337,10 @@ permission, so it does not retry a different spelling.
 - `safe_cut_points(messages)` returns every index where a cut cannot break the message
   protocol: no announced tool-call id still unfilled (both API shapes —
   `tool_calls`/`role=tool` and `function_call`/`function_call_output`), **and** the kept
-  tail does not begin with a `function_call`, whose `reasoning` item would be on the
-  other side of the cut (Field patch G).
-- `compact(state, model, limit, keep_recent=8)` keeps `head = 2` entries (system + the
+  previous entry is not a Responses `reasoning` or `message` item — a turn arrives as a
+  group and a `function_call` later in the same group needs that reasoning item, so a
+  cut must land on a turn boundary (Field patch G).
+- `compact(state, model, limit, keep_recent=8, profile="")` keeps `head = 2` entries (system + the
   original goal) and the last 8, summarizes everything between the newest safe cut point
   and replaces it with one `[context summary]` system message. Returns estimated tokens
   saved. Returns `0` — changing nothing — when there is no safe cut point, or when the
@@ -588,6 +589,7 @@ optionally one judge's scores.
 | `Policy(name, roles)` | a role -> profile map. Setting `judge` here is an error: the judge is pinned for the whole matrix with `--judge-profile`, or the quality column varies with the thing being measured |
 | `Goal(name, text, policies, ...)` | one task, and the policies worth running it under — the matrix is **sparse**, because a policy that differs only in `compact` measures nothing on a run that never compacts |
 | `routed_roles` / `fired_roles` | which roles the policy moves, and which ones actually ran. When those sets do not intersect, the cell is a copy of the baseline and `format_table()` says so |
+| `cites` next to `unsup` | `unsupported_citations` is a numerator with no denominator — a cell that cited nothing scores a perfect 0 — so the table prints `answer_citations` beside it |
 
 `--dry-run` prints the matrix and the ceiling without running anything; without `--yes`
 it asks before spending, quoting `cells x --budget` as a **hard** ceiling (each run

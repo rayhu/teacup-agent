@@ -24,6 +24,15 @@ models:
     #   base_url: http://localhost:11434/v1
     #   api_key_env: OLLAMA_API_KEY
 
+    # The cheap half of a split, referenced by the roles block below. Both have to be
+    # uncommented together: models.roles is validated at load, and naming a profile that
+    # does not exist is an error there rather than a surprise mid-run.
+    # small:
+    #   provider: openai
+    #   api: responses
+    #   model: gpt-5-mini
+    #   api_key_env: OPENAI_API_KEY
+
   # Which profile serves which kind of model call. Omit the whole `roles:` key and
   # every role runs on `default`, exactly as it did before this existed; a role left
   # out of a present map falls back the same way. Roles: main (the agent's own turns),

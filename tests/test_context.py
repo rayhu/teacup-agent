@@ -49,6 +49,44 @@ def test_safe_cut_points_handles_responses_shape():
     assert ctx.safe_cut_points(messages) == [1, 2, 5]
 
 
+def test_a_narrating_turn_is_not_cut_in_half():
+    """`reasoning -> message -> function_call` is an ordinary Responses turn: the model
+    says what it is about to do, then does it. The first version of this fix only looked
+    one entry ahead, so it judged the position after the reasoning item safe and orphaned
+    the call — the same 400 the fix was written to prevent."""
+    messages = [{"role": "system"}, {"role": "user"}]
+    for i in range(3):
+        messages += [
+            {"type": "reasoning", "id": f"rs_{i}"},
+            {"type": "message", "role": "assistant", "content": "let me look that up"},
+            {"type": "function_call", "call_id": f"fc_{i}", "name": "search_web", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": f"fc_{i}", "output": "result"},
+        ]
+
+    for cut in ctx.safe_cut_points(messages):
+        tail = messages[cut:]
+        for m in tail:
+            if m.get("type") == "function_call":
+                i = m["call_id"].split("_")[1]
+                dropped = any(k.get("id") == f"rs_{i}" for k in messages[:cut])
+                assert not dropped or any(k.get("id") == f"rs_{i}" for k in tail), (
+                    f"cut at {cut} orphans {m['call_id']}"
+                )
+
+
+def test_a_responses_history_with_no_reasoning_items_can_still_be_compacted():
+    """The turn-boundary rule must not degrade into "never cut": a Responses run whose
+    model emits no reasoning items has calls with nothing to orphan, and refusing every
+    cut point there would silently disable compaction for it."""
+    messages = [{"role": "system"}, {"role": "user"}]
+    for i in range(4):
+        messages += [
+            {"type": "function_call", "call_id": f"fc_{i}", "name": "x", "arguments": "{}"},
+            {"type": "function_call_output", "call_id": f"fc_{i}", "output": "1"},
+        ]
+    assert ctx.safe_cut_points(messages) == [1, 2, 4, 6, 8, 10]
+
+
 def test_compaction_never_orphans_a_function_call_from_its_reasoning():
     """The regression, end to end: a Responses-shaped history whose only otherwise-safe
     late cut point sits between a reasoning item and its call."""

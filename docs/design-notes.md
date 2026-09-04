@@ -727,9 +727,13 @@ over the limit, an earlier slice is summarized and replaced by one
 `[context summary]` message. The system prefix (or prompt caching dies), the original
 goal and the last 8 entries are kept. The cut must not orphan anything: not a tool call
 from its result, and not — in the Responses shape — a `function_call` from the
-`reasoning` item the API requires with it. The second half of that rule was missing
-until a live run 400ed on it (roadmap Field patch G); the suite was green because
-nothing had ever compacted a Responses-shaped context. The summarizer prompt explicitly demands
+`reasoning` item the API requires with it. That second half means **only cutting on a
+turn boundary**, because a Responses turn arrives as a group (reasoning, an optional
+message, then its calls) and anywhere inside the group orphans part of it. It was
+missing until a live run 400ed on it, and the first fix for it was still wrong — it
+assumed the reasoning item and its call were adjacent, which they are not when the model
+narrates first (roadmap Field patch G). Both times the suite was green, because nothing
+in it had ever compacted that shape. The summarizer prompt explicitly demands
 "verified facts + source links + what was tried and failed". The last one matters
 most, or the agent walks into the same dead end again after compaction.
 

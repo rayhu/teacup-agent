@@ -23,6 +23,11 @@ Compaction has **two constraints you must not break**, and both end in the same 
    cut landed immediately after a reasoning item, the call it belonged to survived
    into the kept tail, and the API refused the next request with "Item 'fc_...' of
    type 'function_call' was provided without its required 'reasoning' item".
+
+The second constraint is really "do not cut inside a turn". A Responses turn arrives as
+a *group* — reasoning item(s), an optional message, then that turn's function_call(s) —
+and `state.messages.extend(reply.items)` lays the whole group down at once. Anywhere
+inside the group is a cut that orphans part of it.
 """
 
 from __future__ import annotations
@@ -90,11 +95,16 @@ def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
     a filled id comes out, and any moment the set is empty is a safe point. Both API
     shapes are recognised.
 
-    Plus one look-ahead for the Responses shape: a kept tail must not *begin* with a
-    `function_call`, because the `reasoning` item it requires is by construction on the
-    other side of the cut. One look-ahead is enough even though a turn can emit several
-    function_calls after one reasoning item — from the second call onwards the first is
-    still unfilled, so `open_ids` is non-empty and the point was never a candidate.
+    Plus one rule for the Responses shape: **only cut on a turn boundary.** A turn
+    arrives as a group (reasoning, then an optional message, then that turn's
+    function_calls), so a cut directly after a `reasoning` or `message` item can leave a
+    later call in the same group without the reasoning item the API demands with it.
+
+    An earlier version of this only checked whether the kept tail *began* with a
+    `function_call`, which assumed the reasoning item and its call were adjacent. They
+    are not when the model narrates first — `reasoning -> message -> function_call` is
+    an ordinary turn, and it walked straight through that check (roadmap Field patch G,
+    second attempt). Chat-shaped entries carry no `type`, so nothing changes for them.
     """
     open_ids: set[str] = set()
     points = []
@@ -108,10 +118,10 @@ def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
             open_ids.add(msg["call_id"])
         elif msg.get("type") == "function_call_output":
             open_ids.discard(msg.get("call_id"))
-        starts_a_call = (
-            i + 1 < len(messages) and messages[i + 1].get("type") == "function_call"
-        )
-        if not open_ids and not starts_a_call:
+        # Inside a Responses turn: a function_call later in the same group may need
+        # this entry's reasoning item, so this is not a boundary.
+        mid_turn = msg.get("type") in ("reasoning", "message")
+        if not open_ids and not mid_turn:
             points.append(i + 1)  # cutting after this entry is safe
     return points
 

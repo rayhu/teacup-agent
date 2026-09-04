@@ -257,10 +257,14 @@ These are costs *of this comparison*, not of the same task in a real run: the be
 `NullMemory`, so no recalled facts sit in the prefix, and `$` is the run only — a judge
 call happens outside `loop.run` and outside its budget ceiling."""
 
+# `cites` sits next to `unsup` on purpose: `unsupported_citations` is a numerator with
+# no denominator, and a cell that cited nothing scores a perfect 0 on it. Read together
+# or the pair rewards vagueness — a lesson from the first live run that was written down
+# before it was implemented.
 _HEADERS = (
     ("goal", 14),
     ("policy", 13),
-    ("status", 9),
+    ("status", 13),  # "out_of_budget" is 13 characters and used to shift the whole row
     ("steps", 5),
     ("comp", 4),
     ("$", 8),
@@ -268,22 +272,23 @@ _HEADERS = (
     ("fail", 4),
     ("dup", 3),
     ("pend", 4),
+    ("cites", 5),
     ("unsup", 5),
     ("deliv", 5),
-    ("judge", 20),
+    ("judge", 22),
 )
 
 
 def _row(report: dict[str, Any]) -> str:
     if "error" in report:
-        cells_ = [report["goal"], report["policy"], "ERROR", "", "", "", "", "", "", "", "", "", report["error"][:20]]
+        cells_ = [report["goal"], report["policy"], "ERROR"] + [""] * 10 + [report["error"][:22]]
     else:
         m = report["mechanical"]
         j = report.get("judged") or {}
         judged = (
-            f"out {j['outcome']} hon {j['honesty']}"
+            f"out {j['outcome']} grd {j['grounding']} hon {j['honesty']}"
             if "outcome" in j
-            else (f"error: {j['error'][:13]}" if "error" in j else "-")
+            else (f"error: {j['error'][:15]}" if "error" in j else "-")
         )
         cells_ = [
             report["goal"],
@@ -296,6 +301,7 @@ def _row(report: dict[str, Any]) -> str:
             m["failed_tool_calls"],
             m["duplicate_tool_calls"],
             m["pending_todos"],
+            m["answer_citations"],
             m["unsupported_citations"],
             "yes" if m["delivered"] else "NO",
             judged,

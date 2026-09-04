@@ -1187,7 +1187,7 @@ identity does the work wherever roles are actually split — a split router's ma
 never sees the planner's prompt, and an eval case pins that — and the sniffing stays as
 the single-model fallback.
 
-**A line to hold**: `loop.py` went from 615 to 638 lines here, all of it role lookups
+**A line to hold**: `loop.py` went from 639 to 662 lines here, all of it role lookups
 rather than logic — but AGENTS.md says to consider splitting past ~700, and Stage C's
 rules, classifier and escalation trip-wires must not be what closes that gap. They
 belong in `routing.py` (or its own module) with `loop.py` calling into them, the same
@@ -1200,7 +1200,7 @@ happening exactly when parent and child resolve to different profiles.
 
 **Verification**:
 ```
-uv run pytest                          # 228 passed (tests/test_routing.py: 17 new)
+uv run pytest                          # tests/test_routing.py: 17 new cases
 uv run python -m teacup_agent.evals    # 22/22 passed (one new routing case)
 uv run teacup-agent                    # offline demo unaffected, still instant
 ```
@@ -1254,7 +1254,7 @@ Three corrections the build forced on the sketch above:
   records `routed_roles` vs `fired_roles`, with `format_table()` warning when they do
   not intersect. The same mechanism catches a `compact-small` cell that never compacted.
 
-**Offline verification** (`tests/test_bench.py`, 8 cases): sparsity, the judge ban, a
+**Offline verification** (`tests/test_bench.py`, 9 cases): sparsity, the judge ban, a
 crashed cell becoming a row instead of killing the matrix, the vacuity warning — and the
 protocol claim Stage A rests on, which is worth stating plainly. Routing is fixed for
 the run, so `main` is one model start to finish, and there are exactly **two** places
@@ -1265,7 +1265,7 @@ test drives that combination and checks both message lists stay internally consi
 their own shape, parent and child.
 
 ```
-uv run pytest                          # 236 passed (tests/test_bench.py: 8 new)
+uv run pytest                          # tests/test_bench.py: 9 new cases
 uv run python -m teacup_agent.evals    # 22/22 passed
 uv run python -m teacup_agent.bench --config agent.yaml --dry-run   # 9 cells, ceiling $0.90
 ```
@@ -1279,16 +1279,17 @@ checked **between turns**, so a cell can overshoot it — one did, by 51%.
 **First live run (2026-09-03, gpt-5 / gpt-5-mini, `--budget 0.10`, `--judge`, $0.43)**:
 
 ```
-goal            policy         status         steps comp  $        calls fail dup pend unsup deliv judge
-verifiable      all-big        done           4     0     0.0219   3     0    0   0    0     yes   out 5 hon 5
-verifiable      roles-split    done           3     0     0.0186   3     0    0   0    0     yes   out 5 hon 5
-verifiable      all-small      done           3     0     0.0044   4     0    0   0    0     yes   out 5 hon 5
-underspecified  all-big        done           8     0     0.0919   11    1    0   4    2     yes   out 5 hon 5
-underspecified  roles-split    done           8     0     0.0848   9     0    0   2    7     yes   out 4 hon 2
-underspecified  all-small      done           8     0     0.0076   7     0    0   3    0     yes   out 0 hon 3
-long-context    all-big        out_of_budget  3     1     0.1511   7     1    0   1    0     yes   out 5 hon 4
-long-context    compact-small  error          3     1     0.0407   4     1    0   2    0     yes   out 0 hon 5
-long-context    all-small      error          3     1     0.0080   4     0    0   2    0     yes   out 0 hon 5
+goal            policy         status         steps  comp  $         calls  fail  dup  pend  cites  unsup  deliv  judge
+-----------------------------------------------------------------------------------------------------------------------
+verifiable      all-big        done           4      0     0.0219    3      0     0    0     0      0      yes    out 5 grd 5 hon 5
+verifiable      roles-split    done           3      0     0.0186    3      0     0    0     0      0      yes    out 5 grd 5 hon 5
+verifiable      all-small      done           3      0     0.0044    4      0     0    0     0      0      yes    out 5 grd 5 hon 5
+underspecified  all-big        done           8      0     0.0919    11     1     0    4     13     2      yes    out 5 grd 4 hon 5
+underspecified  roles-split    done           8      0     0.0848    9      0     0    2     21     7      yes    out 4 grd 2 hon 2
+underspecified  all-small      done           8      0     0.0076    7      0     0    3     0      0      yes    out 0 grd 0 hon 3
+long-context    all-big        out_of_budget  3      1     0.1511    7      1     0    1     0      0      yes    out 5 grd 4 hon 4
+long-context    compact-small  error          3      1     0.0407    4      1     0    2     0      0      yes    out 0 grd 0 hon 5
+long-context    all-small      error          3      1     0.0080    4      0     0    2     0      0      yes    out 0 grd 0 hon 5
 ```
 
 **What the six valid rows say.**
@@ -1314,6 +1315,11 @@ long-context    all-small      error          3     1     0.0080   4     0    0 
   runs of an identical configuration, that far apart. Quote the cost column; do not
   quote a single quality cell.
 
+(Both tables are `format_table()`'s own output, re-rendered from the saved reports.
+Note the `deliv` column on the two `error` rows: those reports were captured *before*
+Field patch H, so they still carry the wrong value — which is the bug H fixed, visible
+in the artifact that found it.)
+
 The three `long-context` rows above are **void**: the run that was supposed to answer
 the `compact` question found a bug instead. Two cells died with a 400 in the Responses
 API right after compacting (Field patch G), and the third stopped at `out_of_budget`.
@@ -1329,16 +1335,25 @@ that put "did this cell deliver?" in a table where a wrong answer was visible.
 **`long-context` re-run after the fix (2026-09-03, $0.34)**:
 
 ```
-goal            policy         status         steps comp  $        calls fail dup pend unsup cites deliv judge
-long-context    all-big        out_of_budget  4     2     0.1697   7     1    0   1    0     8     yes   out 5 grd 4 hon 3
-long-context    compact-small  out_of_budget  7     5     0.1291   9     0    0   1    2     9     yes   out 4 grd 2 hon 2
-long-context    all-small      done           8     5     0.0379   7     1    0   2    0     0     yes   out 5 grd 4 hon 5
+goal            policy         status         steps  comp  $         calls  fail  dup  pend  cites  unsup  deliv  judge
+-----------------------------------------------------------------------------------------------------------------------
+long-context    all-big        out_of_budget  4      2     0.1697    7      1     0    1     8      0      yes    out 5 grd 4 hon 3
+long-context    compact-small  out_of_budget  7      5     0.1291    9      0     0    1     9      2      yes    out 4 grd 2 hon 2
+long-context    all-small      done           8      5     0.0379    7      1     0    2     0      0      yes    out 5 grd 4 hon 5
 ```
 
-Twelve compactions across three cells and not one 400: **Field patch G is verified
-live**, not only in the unit tests. Both `out_of_budget` cells still delivered
-(`salvaged`), which is design rule 3 working in the wild — a brake that also unloads
-the car.
+Twelve compactions across three cells and not one 400 — but that is weaker evidence
+than it looks, and the independent review said so: twelve histories completing only
+shows that *those* histories did not contain an unhandled shape. It cannot distinguish
+"the invariant is enforced" from "the invariant was not exercised", and the review then
+demonstrated it was the second: the first version of patch G still orphaned a call in a
+`reasoning -> message -> function_call` turn. What this row establishes is narrower —
+the adjacent `reasoning -> function_call` shape now survives compaction against the real
+API. The general rule is what the second attempt at G implements and what the unit tests
+now cover.
+
+Both `out_of_budget` cells still delivered (`salvaged`), which is design rule 3 working
+in the wild — a brake that also unloads the car.
 
 **The answer to the `compact` question: cost says yes, quality says nothing yet, and
 the default does not move on this evidence.**
@@ -1388,17 +1403,21 @@ Two things the live table says about what is written below:
   `long-context`, `all-small` was the only cell to finish inside its budget at all, for
   4.5x less, with judge scores equal or better — though it cited nothing, which is the
   caveat above. Routing by task class is not a theory.
-- **The trip-wires proposed below would not have caught the one failure that
-  mattered.** On `underspecified`, `all-small` cost a twelfth and never synthesised an
-  answer — and it did so with **zero failed tool calls and zero duplicates**, on a run
-  that reached its own last step normally. Consecutive `ERROR:` results, a stalled
-  checklist, compaction thrash: none of them would have fired. The only thing
-  that saw it was the model judge. So the escalation half of this stage cannot be built
-  from cheap state signals alone; the **checkpoint review is the mechanism**, and the
-  trip-wires are at best a way to decide when to pay for one.
+- **Two of the three trip-wires proposed below provably would not have fired on the
+  one failure that mattered.** On `underspecified`, `all-small` cost a twelfth and never
+  synthesised an answer, with **zero failed tool calls (`fail 0`) and no compaction at
+  all (`comp 0`)** — so neither the `ERROR:`-streak wire nor the compaction-thrash wire
+  could have gone off. The third, a stalled checklist, is *not* decidable from this row:
+  `pend 3` after eight steps is as consistent with a stall as without one, and nothing
+  records when items were ticked. What is certain is that the only thing that actually
+  saw the failure was the model judge.
 
-That is a harder, more expensive design than the sketch below assumed, and it is a
-reason to be slow here rather than a reason to hurry.
+So the honest claim is "the cheap state signals are **not sufficient** on their own",
+not "the mechanism is dead" — one cell at n=1 cannot carry the stronger version. It
+still moves the design: the **checkpoint review has to be the detector**, and the
+trip-wires are at best a way to decide when to pay for one. That is harder and more
+expensive than the sketch below assumed, and it is a reason to be slow here rather than
+a reason to hurry.
 
 **Classify once, at run start**, from the goal and the available tool list — not per
 turn. Per-turn switching pays a cold prefix every turn and breaks the continuity
@@ -1491,11 +1510,12 @@ Four decisions, so that a reader does not have to reconstruct them from the tabl
    not sizeable from this data, and a summary that silently drops the thread is the
    expensive kind of failure. Anyone who wants that saving should run the
    `long-context` row three to five times first; `bench.py` is the tool for it.
-3. **Do not build Stage C on this evidence.** Not for lack of upside, but because its
-   central mechanism was falsified by the measurement: the escalation trip-wires
-   proposed there would not have fired on the one real failure observed. What is left
-   is checkpoint review — a big model watching a small one — whose cost structure is
-   not far from simply using the big model. Revisit with n > 1.
+3. **Do not build Stage C on this evidence.** Not for lack of upside, but because the
+   measurement undercut its escalation half: two of the three proposed trip-wires
+   provably could not have fired on the one real failure observed, and the third is not
+   decidable from the data. That leaves checkpoint review — a big model watching a small
+   one — whose cost structure is not far from simply using the big model. This is one
+   cell at n=1: enough to stop, not enough to conclude. Revisit with n > 1.
 4. **"One strong model everywhere" remains the default advice at low volume.** This
    data does not overturn it. It supplies one exception: a subtask with a complete
    spec and a checkable result, where the small model is a straight gain.
@@ -1716,17 +1736,31 @@ Each had compacted exactly once, immediately before.
 
 **Root cause**: `context.safe_cut_points()` enforced *one* constraint — never separate a
 tool call from its result — and the Responses shape has a second. A turn there produces
-a `reasoning` item followed by its `function_call`, and the API requires both or
-neither. The scan saw a `reasoning` item as neither opening nor closing anything, so the
-position immediately after it counted as safe; cutting there dropped the reasoning item
-and kept the call. The unit test even asserted that position *was* safe.
+a `reasoning` item and then its `function_call`, and the API requires both or neither.
+The scan saw a `reasoning` item as neither opening nor closing anything, so the position
+immediately after it counted as safe; cutting there dropped the reasoning item and kept
+the call. The unit test even asserted that position *was* safe.
 
-**Fix**: one look-ahead — a cut point is safe only if the kept tail does not *begin*
-with a `function_call`. One is enough: from the second call of a multi-call turn onward
-the first is still unfilled, so `open_ids` is non-empty and the point was never a
-candidate. Regression tests: the corrected `safe_cut_points` expectation, a full
-Responses-shaped history where every surviving call still has both its reasoning item
-and its output, and the "no safe cut point at all" path returning 0 rather than raising.
+**First fix, and why it was still wrong.** The first attempt added one look-ahead: a cut
+point is safe only if the kept tail does not *begin* with a `function_call`. That
+assumes the reasoning item and its call are **adjacent**. They are not.
+`ResponsesModel.complete()` appends every item in `resp.output` verbatim, so a turn
+where the model says what it is about to do arrives as
+`reasoning -> message -> function_call` — and the position after the reasoning item then
+has empty `open_ids` *and* a non-`function_call` successor, so it sailed through the new
+check and orphaned the call exactly as before. The independent review caught it, in the
+same pull request, before it merged.
+
+**The fix that holds**: a cut may only land on a **turn boundary**. A Responses turn
+arrives as a group — reasoning item(s), an optional message, then that turn's calls — so
+a point is unsafe when the entry before it is a `reasoning` or `message` item, whatever
+follows. Chat-shaped entries carry no `type` and are unaffected. The rule deliberately
+does not try to pair each call with its own reasoning item: there is no reliable link in
+the message list, and an over-strict version (reject any tail with a call before the
+first reasoning item) would silently disable compaction for a Responses run whose model
+emits no reasoning items at all. Regression tests cover all four shapes: the narrating
+turn, a multi-call turn, a Responses history with no reasoning items (compaction must
+still be possible), and the chat shape.
 
 **The general principle**: *an invariant is only enforced for the shapes you tested it
 in.* `tool_results_follow_their_call()` has guarded the message protocol since day one
@@ -1734,6 +1768,12 @@ and recognises both API shapes — but nothing in `evals.py` or `tests/` had eve
 **compacted a Responses-shaped context**, because the scripted model is chat-shaped. The
 bug sat behind a green suite for as long as the Responses backend has existed. What
 found it was the first thing that ran the real API through that path.
+
+**And the principle applied to itself.** The first fix reproduced the same failure one
+level up: it was written against the one shape the new test happened to build, and it
+passed. That is the argument for `REVIEW.md`'s separation in a single example — the
+author's context is what hides the author's mistakes, and the reviewer who had never
+seen the fix being designed was the one who asked what other shapes a turn can take.
 
 ---
 

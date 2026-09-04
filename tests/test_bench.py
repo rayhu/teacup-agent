@@ -132,7 +132,8 @@ def test_the_table_says_when_one_cell_delegated_and_another_did_not():
 def _empty_metrics():
     return {
         "tool_calls": 0, "failed_tool_calls": 0, "duplicate_tool_calls": 0,
-        "pending_todos": 0, "unsupported_citations": 0, "delivered": True,
+        "pending_todos": 0, "answer_citations": 0, "unsupported_citations": 0,
+        "delivered": True,
     }
 
 
