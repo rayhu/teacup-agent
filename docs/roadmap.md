@@ -1106,3 +1106,31 @@ attempting the call), and `pending_todos`.
 
 **Left open**: the checklist is fixed at the start. Replanning mid-run, when the task
 turns out to be different from what it looked like, is not implemented.
+
+### G. Two sessions picked the same roadmap item at once — recorded (2026-09-03)
+
+**Symptom**: two separate Claude Code sessions started roadmap #13 (Hooks) around the
+same time, on separate branches, each unaware of the other. Both wrote a
+`src/teacup_agent/hooks.py`, `hooks.example.py`, `tests/test_hooks.py`, and the same
+`docs/roadmap.md` section — real duplicated work, not a small overlap. The other
+session's PR merged to `main` first, with a strictly more complete design (a third
+`approve_tool_call` hook alongside `before_tool_call`/`after_tool_result`, a new
+`--approve hooks` policy, and a considered decision to keep `hooks.py` out of
+`.gitignore`, reasoned through in `docs/threat-model.md`). This session's PR then
+conflicted on every file it had touched and had to be closed unmerged rather than
+reconciled — main's version was a superset, so there was nothing left to merge on top of
+without duplicating.
+
+**Root cause**: this file's own top banner, and `docs/workflow.md`'s "one item per
+round", both assume the roadmap is being worked by one session at a time. Neither states
+that an item is *claimed* the moment a session starts it — the banner only distinguishes
+`DONE` from not-started, with no `IN PROGRESS` marker, so a second session had no signal
+to check before picking the same item.
+
+**Fix**: none shipped — this is a process gap, not a code one, and a repo this size does
+not obviously want a locking mechanism for something that, so far, has happened once.
+Recorded here as the principle the next session (or the human directing it) should
+apply: **before starting a roadmap item, check for open branches or PRs already touching
+it** (`git branch -a`, or the equivalent "list pull requests" call) — "done" vs.
+"not done" in this file's banner is not enough signal once more than one agent can work
+on the repo at the same time.
