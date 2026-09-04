@@ -11,7 +11,7 @@ clerical work or accepting a clerk's judgment.
 
 So: a **role** names a call site, `agent.yaml` maps roles to model profiles, and this
 module is the lookup. There is no classifier here and no per-turn switching — that is
-roadmap #20's Stage C, and it does not ship until Stage B has measured where the small
+roadmap #21's Stage C, and it does not ship until Stage B has measured where the small
 model actually breaks.
 
 Two things this module exists to get right:

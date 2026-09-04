@@ -33,7 +33,7 @@ models:
   #
   # Route by whether success is checkable, not by how hard the work looks: a harness
   # closes most of the gap on short, well-specified, verifiable work and none of it on
-  # judgment. See docs/roadmap.md #20 before splitting `compact` — a lossy summary
+  # judgment. See docs/roadmap.md #21 before splitting `compact` — a lossy summary
   # fails silently, which is the expensive kind.
   # roles:
   #   plan: gpt5-responses

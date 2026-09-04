@@ -89,6 +89,7 @@ docs/intent.md          what the project is for, and what a fork owes it
 docs/spec.md            the technical contract: values, shapes, interfaces
 docs/design-notes.md    why each subsystem behaves the way it does
 docs/roadmap.md         what is missing, and in what order to add it
+docs/threat-model.md    what is trusted, what is not, what a fork inherits
 NOTES.md                the original study notes this grew from
 ```
 
@@ -96,7 +97,7 @@ NOTES.md                the original study notes this grew from
 
 | Part | File | Today | When you outgrow it |
 | --- | --- | --- | --- |
-| Model | `model.py`, `agent_config.py`, `routing.py` | Responses API (default) and Chat Completions with cache-aware pricing, an offline scripted model, and `--config agent.yaml` for naming several profiles (including any OpenAI-compatible endpoint via `base_url`) and routing each kind of call — the agent's turns, planning, compaction, reflection, judging, subagents — to one of them | Claude's own Messages API, per-profile cost tables (roadmap #16), routing by task rather than by call site (#20) |
+| Model | `model.py`, `agent_config.py`, `routing.py` | Responses API (default) and Chat Completions with cache-aware pricing, an offline scripted model, and `--config agent.yaml` for naming several profiles (including any OpenAI-compatible endpoint via `base_url`) and routing each kind of call — the agent's turns, planning, compaction, reflection, judging, subagents — to one of them | Claude's own Messages API, per-profile cost tables (roadmap #16), routing by task rather than by call site (#21) |
 | State | `state.py` | steps, budget, time, status machine, tool trace; saved every step and resumable | distributed or concurrent runs |
 | Tools | `tools.py`, `mcp_tools.py`, `a2a/client.py` | six built-ins (search, calculate, read file, remember, checklist, send mail) plus anything an MCP server exposes, plus `delegate_a2a` for peers named in `agent.yaml` | more servers |
 | Control Loop | `loop.py` | four brakes, parallel tools, retries, a completion check, delegation to subagents | parallel subagents, delegated planning |
@@ -124,7 +125,10 @@ Each of these earned its place by fixing a run that had gone wrong. The stories 
   continues from there.
 - **MCP**: point at a server and its tools join the registry, namespaced and gated.
 - **A deny-list on `read_file`**: "inside the project" was never the same as "safe to
-  read", since the project is where the secrets are.
+  read", since the project is where the secrets are. Its project-root boundary is also
+  now an explicit, settable fact of the run (`--project-root`), not an accident of
+  whatever directory the shell happened to launch it from — see
+  [docs/threat-model.md](docs/threat-model.md).
 - **Subagents**: delegate a reading-heavy subtask to a child agent with its own context;
   only its conclusion comes back, so the bulk never enters this context.
 - **Skills**: a procedure's one-line description is always loaded, its body only when the

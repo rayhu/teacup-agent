@@ -50,20 +50,23 @@ Environment variables:
 | `--context-limit` | int | `30000` | compact once the context exceeds this estimate |
 | `--run-dir` | str | `runs/<timestamp>` | state + externalized results; `off` disables both |
 | `--memory` | str | `memory.json` | long-term memory file |
-| `--approve` | `auto` \| `deny` \| `allow` | `auto` | gate policy; `auto` = ask on a TTY, deny without one |
+| `--approve` | `auto` \| `deny` \| `allow` \| `hooks` | `auto` | gate policy; `auto` = ask on a TTY, deny without one; `hooks` defers to `hooks.py`'s `approve_tool_call`, falling back to `auto` when it has no opinion |
 | `--resume` | path | none | continue from a `state.json` or the directory holding it |
 | `--mcp` | path | `./mcp.json` if present | MCP config; `off` disables |
 | `--skills` | path | `./skills` if present | skills directory; `off` disables |
+| `--hooks` | path | `./hooks.py` if present | project-local hooks module; `off` disables. §19 |
 | `--subagents` | flag | off | offer the `delegate` tool |
 | `--subagent-steps` | int | `4` | step ceiling for one child run |
+| `--coding-tools` | flag | off | offer `list_files`/`edit_file`/`write_file`/`run_command`. §20 |
 | `--plan` | `auto` \| `on` \| `off` | `auto` | upfront checklist; `auto` = on for `--live`, off offline |
 | `--reflect` | `auto` \| `on` \| `off` | `auto` | write an experience/lesson note after a qualifying run; `auto` = on for `--live` |
 | `-q`, `--quiet` | flag | off | print only the final answer |
 | `--json` | flag | off | one machine-readable JSON object on stdout, nothing else; implies `--quiet`. [`docs/integration.md`](integration.md) |
 | `--config` | path | none | take everything from a YAML file instead of the flags above |
+| `--project-root` | path | current directory | boundary `read_file` may not read outside of; resolved once at startup and applies whether or not `--config` is set |
 
 `--config` is a **parallel track, not a merge**: once it is set, every flag except the
-goal, `--quiet` and `--resume` is ignored (section 14).
+goal, `--quiet`, `--resume` and `--project-root` is ignored (section 14).
 
 On `--resume`, the ceilings mean **additional** allowance: steps and elapsed time already
 spent live in the saved state, so the flags are added to it rather than replacing it
@@ -263,13 +266,15 @@ runs one call and **never raises** — every failure comes back as an `ERROR: ..
 | --- | --- | --- | --- |
 | `search_web` | `query`, `max_results=5` | no | three modes, below |
 | `calculate` | `expression` | no | AST-walked arithmetic, not `eval` |
-| `read_file` | `path` | no | project-relative, first 2000 chars, deny-list |
+| `read_file` | `path` | no | project-relative, full content (§18's `EXTERNALIZE_OVER` truncates, not this tool), deny-list |
 | `remember` | `fact` | no | writes long-term memory |
 | `update_todo` | `index` (1-based), `status`, `note=""` | no | see below |
 | `send_email` | `to`, `subject`, `body` | **yes** | the gated example; the demo appends to `outbox.jsonl` |
 
 Conditionally registered: `load_skill` (with `--skills`), `delegate` (with
-`--subagents`), and one entry per MCP tool.
+`--subagents`), `delegate_a2a` (with `a2a.peers` non-empty in `--config agent.yaml`,
+**yes** approval), one entry per MCP tool, and `list_files`/`edit_file`/`write_file`/
+`run_command` (with `--coding-tools`, §20).
 
 `update_todo` declares `status` as the enum `done` | `blocked`, but the value is **not
 validated**: the implementation sets `item.done = True` unconditionally and only uses
@@ -474,7 +479,7 @@ Secrets never go in it — name an env var with `api_key_env`, or embed `${VAR}`
 | `tools` | `exclude: [names]`, `subagents.enabled`, `subagents.max_steps` |
 | `skills` | `dir:` a path, or `off` |
 | `runtime` | `max_steps`, `max_tool_calls_per_step`, `budget`, `deadline`, `tool_timeout`, `context_limit`, `approve`, `plan`, `reflect`, `search`, `memory`, `run_dir` |
-| `a2a` | parsed if present, read by nothing yet (roadmap #17-#18) |
+| `a2a` | `peers.<name>` (`url`, optional `api_key_env`) offers `delegate_a2a`; `card` (`name`, `description`, `version`) is this agent's identity when served with `teacup-agent-serve` |
 
 `load(path) -> AgentConfig` expands `${VAR}` from the environment;
 `build_model(profile)` returns a `Model`; `build_router(cfg)` returns a `routing.Router`
@@ -521,6 +526,8 @@ half-written state. `persist.load()` rebuilds `trace` and `todo` into dataclasse
 | `tool_result` | a call returned |
 | `throttled` | a turn exceeded the per-turn cap |
 | `approval_required` / `approved` / `denied` | the gate |
+| `vetoed` | a project-local `hooks.py`'s `before_tool_call` blocked a call |
+| `hooks_loaded` | a project-local `hooks.py` was loaded |
 | `externalized` | a result went to disk |
 | `completion_check` | the checklist push-back fired |
 | `answer` | the model finished |
@@ -606,7 +613,58 @@ Every one of these was set by a measurement; the reasoning is in
 | `CALL_TIMEOUT` (MCP) | 60.0s | `mcp_tools.py` |
 | `Memory(limit=)` | 20 facts | `memory.py` |
 | `Memory(note_limit=)` | 10 notes | `memory.py` |
-| `read_file` truncation | 2000 chars | `tools.py` |
 | `budget_share` (subagent) | 0.4 of remaining | `subagent.py` |
 | `timeout` (delegate tool) | 300.0s | `subagent.py` |
 | checklist size | 1–5 items | `plan.py` |
+| `run_command` default timeout | 60.0s | `coding_tools.py` |
+| `run_command` max timeout | 300.0s | `coding_tools.py` |
+
+## 19. Hooks (`hooks.py`)
+
+Loaded from a project-local `hooks.py` (`--hooks`, default `./hooks.py` if present;
+`off` disables), the same opt-in-by-file convention as `mcp.json`/`skills/` — but
+**not** gitignored, since it carries policy, not secrets (`docs/threat-model.md`).
+
+| Callback | Signature | Return | Effect |
+| --- | --- | --- | --- |
+| `before_tool_call` | `(call) -> str \| None` | a string vetoes; `None` allows | checked before the approval gate; a veto becomes the call's `ERROR:` result |
+| `after_tool_result` | `(call, result) -> str` | the (possibly rewritten) result | applied to executed calls only, before emit/externalize/trace |
+| `approve_tool_call` | `(call, spec) -> bool \| None` | `True`/`False` decides; `None` = no opinion | only consulted under `--approve hooks`; `None` falls back to `auto`'s behaviour |
+
+Failure handling per callback, all in `hooks.py`'s module docstring: `before_tool_call`
+fails **closed** (an exception becomes a veto), `approve_tool_call` fails to "no
+opinion" (also closed), `after_tool_result` fails to a no-op.
+
+`hooks.example.py` is the committed template, demonstrating an argument-aware
+allowlist ("`send_email` only to these domains" — roadmap #14's own example) using
+only the built-in `send_email` tool.
+
+## 20. Coding tools (`coding_tools.py`)
+
+Registered dynamically by `--coding-tools` (`loop.run(coding_tools=True)`), the same
+`enable()`/`disable()`-on-`tools_mod.REGISTRY` shape `subagent.py`'s `delegate` uses —
+these four tools do not exist in the registry at all, and cost no prefix tokens, unless
+the flag is passed.
+
+| Tool | Parameters | Approval | Notes |
+| --- | --- | --- | --- |
+| `list_files` | `path="."`, `recursive=False` | no | top-level unless `recursive`; deny-list applies, pruned before descending |
+| `edit_file` | `path`, `old_string`, `new_string` | **yes** | exact-substring replace; errors on zero or >1 matches; always re-reads the file fresh |
+| `write_file` | `path`, `content` | **yes** | new files only — errors if `path` already exists |
+| `run_command` | `command`, `timeout=None` | **yes** | `shell=True`, cwd = project root; `timeout` passed to `subprocess.run` itself (actually kills the child, unlike the loop's generic per-call timeout) |
+
+`list_files`/`edit_file`/`write_file` all resolve `path` via `tools._resolve_project_path()`
+(the shared traversal guard, using `Path.is_relative_to()`) and `tools._is_denied()`
+(the deny-list) — the same two checks `read_file` uses, not a second copy of either.
+`read_file` and these three tools all had, until an independent review caught it, their
+own copies of a naive `str(target).startswith(str(root))` traversal check that a sibling
+directory sharing the root as a string prefix could defeat; `_resolve_project_path()` is
+the one place that check now lives.
+
+`run_command`'s `timeout` is clamped to `_MAX_COMMAND_TIMEOUT` (300.0s) regardless of
+what is requested; its registered `Tool.timeout` (310.0s) is a backstop above that, since
+`subprocess.run`'s own timeout is what actually bounds the call.
+
+`docs/threat-model.md`'s "What #20 (coding tools) added" section states what changed in
+this repo's trust boundary and what did not; `hooks.example.py`'s `run_command`
+allowlist (§19) is the concrete mechanism for using it unattended.

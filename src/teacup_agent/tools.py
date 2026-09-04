@@ -339,12 +339,54 @@ def _is_denied(relative: pathlib.PurePath) -> bool:
     parts = [p.lower() for p in relative.parts]
     if any(part in DENIED_DIRS for part in parts):
         return True
+    if not parts:
+        # relative_to() returns a zero-part path ('.') when the target *is* the
+        # project root itself (e.g. list_files(".") in coding_tools.py) — that is
+        # never denied, but parts[-1] below would otherwise raise IndexError.
+        return False
     return any(fnmatch.fnmatch(parts[-1], pattern) for pattern in DENIED_FILES)
+
+
+# The project root read_file's boundary is drawn against. Defaulting to None (falling
+# back to Path.cwd() when unset) keeps every existing test's behaviour unchanged, since
+# none of them call set_project_root(). What changes is that "project root" is now a
+# fact `cli.py` can state once and pass in, rather than something read_file recomputes
+# from the shell's cwd on every call — the same distinction #14 draws: without a way for
+# the two to diverge, "outside the project root but inside the launch directory" was
+# never a real, testable case.
+_project_root: pathlib.Path | None = None
+
+
+def set_project_root(root: pathlib.Path | None) -> None:
+    global _project_root
+    _project_root = root
+
+
+def _get_project_root() -> pathlib.Path:
+    return _project_root or pathlib.Path.cwd().resolve()
+
+
+def _resolve_project_path(path: str) -> pathlib.Path | str:
+    """Resolve `path` against the project root and confirm it stays inside it.
+    Returns the resolved absolute Path, or an ERROR string if it escapes the root.
+
+    The one traversal guard read_file and coding_tools.py's list_files/edit_file/
+    write_file all call, rather than each re-deriving its own copy: a naive
+    `str(target).startswith(str(root))` check (what this used to be) is fooled by a
+    sibling directory that shares the root as a string prefix — root=/a/repo,
+    target=/a/repo-secrets/f.txt passes that check, because relative_to() is what
+    actually rejects it, one line later, by raising. is_relative_to() does the real,
+    component-wise check up front instead of relying on that accident of ordering."""
+    root = _get_project_root()
+    target = (root / path).resolve()
+    if not target.is_relative_to(root):
+        return "ERROR: only paths inside the current project directory are allowed"
+    return target
 
 
 @tool(
     description=(
-        "Read a text file inside the current project directory (first 2000 characters). "
+        "Read a text file inside the current project directory. "
         "Credentials, configuration and saved run states are not readable."
     ),
     parameters={
@@ -356,10 +398,16 @@ def _is_denied(relative: pathlib.PurePath) -> bool:
     },
 )
 def read_file(path: str) -> str:
-    root = pathlib.Path.cwd().resolve()
-    target = (root / path).resolve()
-    if not str(target).startswith(str(root)):  # simple traversal guard
-        return "ERROR: only files inside the current project directory can be read"
+    """Returns the full file, unlike the fixed 2000-char slice this used to take:
+    a coding-agent tool that reads its own truncated view before editing is a data-
+    loss hazard (see coding_tools.py's edit_file/write_file split), and a second,
+    earlier cap here pre-empted the loop's own EXTERNALIZE_OVER/excerpt mechanism
+    (loop.py) that already exists to move a long result to disk with a path back —
+    read_file's own result could never even reach that threshold before this."""
+    target = _resolve_project_path(path)
+    if isinstance(target, str):
+        return target
+    root = _get_project_root()
 
     if _is_denied(target.relative_to(root)):
         return (
@@ -371,7 +419,7 @@ def read_file(path: str) -> str:
 
     if not target.is_file():
         return f"ERROR: no such file: {path}"
-    return target.read_text(encoding="utf-8", errors="replace")[:2000]
+    return target.read_text(encoding="utf-8", errors="replace")
 
 
 # Write side of long-term memory. Kept simple: a module-level binding injected by

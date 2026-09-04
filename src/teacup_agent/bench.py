@@ -1,7 +1,7 @@
 """Bench — run the same work under different routing policies and compare.
 
 `evals.py` asks "is the loop correct" with a scripted model, for free. This asks the
-question routing (#20) actually turns on: **where does the small model break on your
+question routing (#21) actually turns on: **where does the small model break on your
 workload**, and what does the split save. Those are not answerable from benchmark
 scores or from taste; they are answerable from a table.
 
@@ -75,7 +75,7 @@ class Goal:
 
 
 def default_policies(big: str, small: str) -> list[Policy]:
-    """The three policies #20 named, plus one that differs from `all-big` in a single
+    """The three policies #21 named, plus one that differs from `all-big` in a single
     role — `compact` is the first question Stage B was written to answer, and it cannot
     be isolated by comparing against a policy that moves four roles at once."""
     return [

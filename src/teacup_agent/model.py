@@ -160,7 +160,7 @@ class OpenAIModel:
         return chat_tool_result(call, result)
 
     def set_cache_key(self, key: str) -> None:
-        # This was missing until routing (#20) went looking for it: `complete()` has
+        # This was missing until routing (#21) went looking for it: `complete()` has
         # always read `self.cache_key`, but nothing could ever write it, so loop.py's
         # `getattr(model, "set_cache_key", None)` skipped this class and
         # `prompt_cache_key` was dead on the Chat path.

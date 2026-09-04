@@ -13,7 +13,7 @@ the main message list:
 * a subagent's answer — a tool-result string.
 
 Both are shape-neutral, which is *why* mixing a `chat` profile with a `responses` one is
-safe today and why mid-run switching (roadmap #20 Stage C) is not.
+safe today and why mid-run switching (roadmap #21 Stage C) is not.
 """
 
 import pytest

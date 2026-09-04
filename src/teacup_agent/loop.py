@@ -23,7 +23,9 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable
 
+from teacup_agent import coding_tools as coding_tools_mod
 from teacup_agent import context as ctx
+from teacup_agent import hooks as hooks_mod
 from teacup_agent import persist
 from teacup_agent import plan as plan_mod
 from teacup_agent import reflect as reflect_mod
@@ -298,6 +300,12 @@ def execute_calls(
         if cap > 0 and i >= cap:
             results[i], reasons[i] = throttled_msg, "throttled"
             continue
+        # A project-declared veto runs before anything else, including the approval
+        # gate — a call vetoed by argument never gets as far as "ask for approval".
+        if veto_reason := hooks_mod.veto(call):
+            results[i], reasons[i] = veto_reason, "vetoed"
+            emit("vetoed", name=call.name, step=state.step)
+            continue
         # The approval check must happen **before** the thread pool and serially —
         # it either asks a human or denies outright.
         spec = tools_mod.REGISTRY.get(call.name)
@@ -348,6 +356,7 @@ def execute_calls(
         result = results[i]
         executed = i not in reasons
         if executed:
+            result = hooks_mod.rewrite(call, result)
             emit("tool_result", name=call.name, result=result, step=state.step)
             # Externalize: a big result goes to disk and the context keeps an excerpt
             # plus the path (the model can read it back with read_file). The trace
@@ -390,8 +399,10 @@ def run(
     plan: bool = False,  # decompose the goal into a checklist first (one extra call)
     reflect: bool = False,  # write an experience/lesson note after a qualifying run
     skills: str | pathlib.Path | None = None,  # directory of skills; None = none
+    hooks: str | pathlib.Path | None = None,  # project-local hooks.py; None = none
     subagents: bool = False,  # offer the delegate tool (a child run with its own context)
     subagent_max_steps: int = 4,
+    coding_tools: bool = False,  # offer list_files/edit_file/write_file/run_command
     exclude_tools: list[str] | None = None,  # names the model must not see this run
     approve: Callable[[ToolCall, Any], bool] = deny_all,  # approval policy
     today: str | None = None,
@@ -484,6 +495,12 @@ def run(
         skills_mod.enable(available_skills, state)
         emit("skills", names=[s.name for s in available_skills])
 
+    # Loaded before the loop starts so before_tool_call can veto the very first
+    # tool call of the run.
+    loaded_hooks = hooks_mod.load(hooks) if hooks else False
+    if loaded_hooks:
+        emit("hooks_loaded", path=str(hooks))
+
     if subagents:
         # Registered per run, not globally: an unbound tool schema would sit in the
         # context prefix of every request for a capability the run cannot use.
@@ -497,6 +514,9 @@ def run(
             on_event=on_event,
         )
 
+    if coding_tools:
+        coding_tools_mod.enable()
+
     hidden = set(exclude_tools or [])
     specs = [s for s in tools_mod.specs() if s["function"]["name"] not in hidden]
 
@@ -508,8 +528,12 @@ def run(
     finally:
         if subagents:
             subagent_mod.disable()
+        if coding_tools:
+            coding_tools_mod.disable()
         if available_skills:
             skills_mod.disable()
+        if loaded_hooks:
+            hooks_mod.unload()
 
 
 def _loop(

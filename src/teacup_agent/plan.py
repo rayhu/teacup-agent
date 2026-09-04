@@ -43,7 +43,7 @@ def decompose(
 
     `state` is optional only so existing callers and tests can pass a model alone; when
     it is given the call is charged like any other. It went uncharged until routing
-    (#20) made the omission material — this is the one role a config is most likely to
+    (#21) made the omission material — this is the one role a config is most likely to
     point at the *expensive* model, and an unbilled expensive call is a lie in the
     budget.
     """

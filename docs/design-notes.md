@@ -79,7 +79,7 @@ every role runs on `models.default`, which is exactly what happened before this 
 
 ### Why roles, and not a classifier
 
-The obvious design is "look at the task, pick a model". That is roadmap #20's Stage C,
+The obvious design is "look at the task, pick a model". That is roadmap #21's Stage C,
 and it is deliberately not here yet, because the honest version of it needs a
 measurement first: route by measured task class on your own workload, not by vibes. A
 role map needs no measurement to be safe — it is fixed for the run, it is declared in a
@@ -130,7 +130,7 @@ context rewrite rather than just swapping the object.
 
 ### What the measurement said
 
-`bench.py` ran these choices under real models (roadmap #20 Stage B, $0.77 across two
+`bench.py` ran these choices under real models (roadmap #21 Stage B, $0.77 across two
 runs). The short version, because the defaults above are only as good as the evidence
 for them:
 

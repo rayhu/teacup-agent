@@ -176,3 +176,70 @@ def test_ordinary_project_files_still_read(tmp_path, monkeypatch):
     monkeypatch.chdir(tmp_path)
     (tmp_path / "notes.md").write_text("readable", encoding="utf-8")
     assert tools.execute("read_file", '{"path": "notes.md"}') == "readable"
+
+
+def test_read_file_no_longer_truncates_at_2000_chars(tmp_path, monkeypatch):
+    """Regression test: read_file used to slice its result to [:2000], which meant a
+    model editing from that view could clobber the part it never saw. The loop's own
+    EXTERNALIZE_OVER mechanism is what should handle long results now, not a second,
+    earlier cap here."""
+    monkeypatch.chdir(tmp_path)
+    long_content = "line\n" * 1000  # 5000 chars, well past the old cap
+    (tmp_path / "big.txt").write_text(long_content, encoding="utf-8")
+    assert tools.execute("read_file", '{"path": "big.txt"}') == long_content
+
+
+def test_read_file_rejects_a_sibling_directory_sharing_the_root_as_a_string_prefix(tmp_path):
+    """Regression test: the traversal guard used to be `str(target).startswith(str(root))`,
+    which a sibling directory that merely shares the root's characters as a string prefix
+    defeats — root=.../repo, target=.../repo-secrets/f.txt starts with str(root) even
+    though it is a completely different directory. It only used to fail safe because the
+    next line's target.relative_to(root) happened to raise, as an accident of ordering,
+    not by design — and that raised ValueError, not the guard's own ERROR message.
+    _resolve_project_path now uses is_relative_to(), the real component-wise check."""
+    root = tmp_path / "repo"
+    root.mkdir()
+    tools.set_project_root(root)
+    sibling = tmp_path / "repo-secrets"
+    sibling.mkdir()
+    (sibling / "creds.txt").write_text("hunter2", encoding="utf-8")
+    try:
+        out = tools.execute("read_file", '{"path": "../repo-secrets/creds.txt"}')
+    finally:
+        tools.set_project_root(None)
+    assert out == "ERROR: only paths inside the current project directory are allowed"
+
+
+# --- an explicit project root, independent of the launch directory (#14) -------------
+
+
+def test_project_root_defaults_to_cwd_when_never_set(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    (tmp_path / "notes.md").write_text("readable", encoding="utf-8")
+    assert tools.execute("read_file", '{"path": "notes.md"}') == "readable"
+
+
+def test_project_root_can_be_set_independent_of_the_launch_directory(tmp_path, monkeypatch):
+    """The bug #14 fixes: before this, 'project root' and 'the directory the process
+    launched from' were definitionally the same value, so a file outside the intended
+    project but inside the launch directory was unreachable to test at all. Launch from
+    one directory, set the root to a different one, and confirm the launch directory's
+    own files are refused even though the traversal guard alone would have allowed
+    them."""
+    launch_dir = tmp_path / "launch"
+    project_dir = tmp_path / "project"
+    launch_dir.mkdir()
+    project_dir.mkdir()
+    (launch_dir / "secret.txt").write_text("should not be reachable", encoding="utf-8")
+    (project_dir / "notes.md").write_text("readable", encoding="utf-8")
+
+    monkeypatch.chdir(launch_dir)
+    tools.set_project_root(project_dir.resolve())
+    try:
+        outside = tools.execute("read_file", '{"path": "secret.txt"}')
+        inside = tools.execute("read_file", '{"path": "notes.md"}')
+    finally:
+        tools.set_project_root(None)  # must not leak into other tests
+
+    assert outside.startswith("ERROR:") and "should not be reachable" not in outside
+    assert inside == "readable"
