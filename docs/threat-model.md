@@ -111,6 +111,65 @@ Two things follow from that:
 `hooks.example.py` demonstrates the mechanism with the existing `send_email` tool and
 zero new tools — roadmap #14's own suggested example, "send_email only to these domains."
 
+## What #20 (coding tools) added, and why it changes the previous section's answer
+
+Roadmap #20 added the first real code-execution tool this repo has ever shipped:
+`list_files`/`edit_file`/`write_file`/`run_command` (`coding_tools.py`), opt-in behind
+`--coding-tools`. Everything above this section was written when the honest answer to
+"does this repo execute code?" was no (`calculate` is an `ast` walker, not `eval`); it no
+longer is, and this section states what changed and what did not.
+
+**What did not change**: the approval gate is still the real boundary, not a sandbox
+(previous section). `edit_file`/`write_file`/`run_command` all carry
+`requires_approval=True` and are denied by default with nobody watching, same as
+`send_email` always was. `list_files` is the one ungated tool of the four, and it is
+read-only and filtered through the same deny-list as `read_file`.
+
+**What is new, and where the new exposure actually lives**:
+
+- **`run_command` is `shell=True`.** Anything that ends up in the `command` string —
+  including text a prior tool call returned, if a project's own logic ever built a
+  command from tool output — is a potential shell-injection vector. This is not
+  mitigated by the tool's own shape (an argv-only tool would only move the problem, not
+  remove it, since the whole point of this tool is to run an arbitrary shell command);
+  it is mitigated by the same layers as everything else in this file: the approval gate,
+  and a project's own `hooks.py` allowlist recognizing specific safe invocations
+  (`hooks.example.py`'s `git status`/`diff`/`add`/`commit`/`log` and `uv run
+  pytest`/`ruff` patterns, with `git push` explicitly denied). **A prefix allowlist alone
+  is not enough**, and an independent review of this PR caught the reason why:
+  `shell=True` still honors chaining (`&&`, `;`, `|`) and substitution (`` ` `` / `$()`)
+  after an allowed prefix — `git status && git push origin main --force` starts with
+  "git status" and never reaches the `^git push\b` deny pattern at position 0.
+  `hooks.example.py`'s `UNSAFE_SHELL_METACHARACTERS` closes this by refusing outright
+  any `run_command` containing one of those characters, checked in `before_tool_call`
+  (which runs before the approval gate, so this applies regardless of `--approve`
+  policy) and again, defensively, in `approve_tool_call`. A `hooks.py` copied from this
+  file inherits the guard; one written from scratch does not get it for free — prefix
+  matching alone is not a safe allowlist shape without it. A project that enables
+  `--coding-tools` without also writing a `hooks.py` allowlist for it gets exactly the
+  old default back: every call denied without a human at a TTY.
+- **`write_file`/`edit_file` reach the filesystem the project root exposes**, subject to
+  the same traversal guard and deny-list `read_file` has always used
+  (`tools._is_denied()`, `_resolve_in_project()` in `coding_tools.py` reuses both rather
+  than re-deriving a second copy). `write_file` cannot overwrite an existing file at all
+  — a structural guard, not a check that can be argued around — so a stale or truncated
+  view of a file can never cause silent data loss through that tool; `edit_file` always
+  re-reads the file fresh before matching, for the same reason.
+- **`run_command`'s own timeout is stronger containment than the loop's generic
+  per-call timeout.** `tool_timeout` (the loop's default per-call ceiling) can only
+  abandon a stuck thread — the underlying process keeps running unless something else
+  kills it. `run_command` passes its timeout straight to `subprocess.run`, which
+  actually terminates the child process tree on expiry. This matters specifically
+  because a runaway shell command (an infinite loop, a hung network call inside a test
+  suite) is exactly the failure mode a generic thread-abandon cannot stop.
+- **This closes the precondition, not the risk.** `AGENTS.md`'s rule — "a code-execution
+  tool must not be added until a sandbox exists to run it in" — is satisfied by
+  teacup-run's sandboxed subprocess launcher (credential scope, lifetime) plus this
+  repo's own approval gate and hooks (what the agent is allowed to do inside the repo it
+  is pointed at). It does not mean `run_command` is now safe to enable with
+  `--approve allow` or no `hooks.py` at all — see "The approval gate is the real
+  boundary, not a sandbox" above, which still applies in full to this tool.
+
 ## What this repo does not defend against
 
 Stated plainly rather than silently assumed:
@@ -126,9 +185,11 @@ Stated plainly rather than silently assumed:
   explicitly opt-in exception (`teacup-agent-serve`, behind a separate install extra and a
   separate console script); nothing here is designed to safely serve untrusted multiple
   tenants beyond that.
-- **A code-execution tool.** None exists (`calculate` is a hand-written `ast` walker, not
-  `eval`), and the rule stands: a code-execution tool must not be added until a sandbox
-  exists to run it in.
+- **`run_command`'s own execution.** #20 added a real code-execution tool
+  (`coding_tools.py`, opt-in behind `--coding-tools`) — see "What #20 (coding tools)
+  added" above for what changed and what did not. `calculate` remains a hand-written
+  `ast` walker, not `eval`, and stays that way; it is `run_command`, not `calculate`,
+  that is this repo's code-execution surface.
 - **A denial or veto is not encryption.** Stopping a call from *executing* does not undo
   a model having already read something it should not have (e.g., from an MCP server with
   no deny-list of its own) and repeating it in its final answer. Output auditing (an

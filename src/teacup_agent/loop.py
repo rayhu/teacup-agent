@@ -23,6 +23,7 @@ from concurrent.futures import ThreadPoolExecutor
 from concurrent.futures import TimeoutError as FuturesTimeout
 from typing import Any, Callable
 
+from teacup_agent import coding_tools as coding_tools_mod
 from teacup_agent import context as ctx
 from teacup_agent import hooks as hooks_mod
 from teacup_agent import persist
@@ -398,6 +399,7 @@ def run(
     hooks: str | pathlib.Path | None = None,  # project-local hooks.py; None = none
     subagents: bool = False,  # offer the delegate tool (a child run with its own context)
     subagent_max_steps: int = 4,
+    coding_tools: bool = False,  # offer list_files/edit_file/write_file/run_command
     exclude_tools: list[str] | None = None,  # names the model must not see this run
     approve: Callable[[ToolCall, Any], bool] = deny_all,  # approval policy
     today: str | None = None,
@@ -498,6 +500,9 @@ def run(
             on_event=on_event,
         )
 
+    if coding_tools:
+        coding_tools_mod.enable()
+
     hidden = set(exclude_tools or [])
     specs = [s for s in tools_mod.specs() if s["function"]["name"] not in hidden]
 
@@ -509,6 +514,8 @@ def run(
     finally:
         if subagents:
             subagent_mod.disable()
+        if coding_tools:
+            coding_tools_mod.disable()
         if available_skills:
             skills_mod.disable()
         if loaded_hooks:
