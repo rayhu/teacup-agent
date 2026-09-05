@@ -1895,3 +1895,72 @@ match in J). Fixing the trigger you found does not fix the tendency; the
 dedicated tool's own description has to make the harder case (multi-line,
 here) look easy and explicitly rule out the general-purpose escape hatch, not
 just handle the specific failure that happened to surface it this time.
+
+### K. Multi-line edits, round two: right tool, wrong anchor size — DONE (2026-09-05)
+
+**Symptom**: the very next dogfood run after J's fix, on the same task, one
+step further again. The model no longer reached for `run_command` at all —
+progress, and it used `edit_file` correctly, unprompted, for two separate
+single-line insertions (a new dataclass field, a new keyword argument in a
+call), both of which landed cleanly. But the third required edit — inserting
+a keyword argument into a *multi-line* constructor call (`ToolsConfig(...)`
+spanning several lines) — failed to match, and after a couple of failed
+attempts the model stopped entirely. Its final answer ended with an explicit
+menu of options addressed to the user — "(A) continue and attempt the
+remaining edits... (B) provide unified patch/diff content... (C) give
+step-by-step manual instructions... Choose one and I'll proceed" — despite
+`SYSTEM_PROMPT` already stating, in as many words, "do not ask 'should I
+continue'" and "no tool calls = you consider the task complete... do not use
+it to ask a question." Tool calls were still available; it chose not to use
+them.
+
+**Root cause, two layers**. The proximate one: nothing in `edit_file`'s
+description distinguished "match a whole multi-line block verbatim" from
+"match one adjacent line and insert next to it" — exactly the technique that
+made the two successful edits succeed (both matched a single, short, already-
+correct line) and its absence is exactly what made the third one hard. A model
+reconstructing a 3-4 line span from memory, with exact indentation and comma
+placement, is reconstructing far more surface area than reconstructing one
+line — the tool's own description gave no reason to prefer the easier shape.
+The deeper one, which this round's fix does **not** claim to solve: the model
+ended the run by asking a question it already had explicit standing
+instructions not to ask, with turns and budget still available. This is the
+same shape of violation Field patch E fixed once already, in a different
+trigger (there: pre-emptively not attempting a gated call; here: giving up
+after a specific technique failed) — evidence that an instruction stated once
+does not reliably bind a smaller model under a new kind of difficulty, not
+evidence that the instruction is missing.
+
+**Fix, scoped to the layer a description change can actually reach**:
+`edit_file`'s description now explicitly recommends, for inserting a new line
+next to existing ones, matching only the single adjacent line already there
+(old_string = that line; new_string = that same line plus the one being
+added) over reconstructing the whole surrounding block — stated as the normal
+way this kind of insertion is done, not a fallback. It also now says
+explicitly: if a longer match keeps failing, retry with a shorter one-line
+anchor instead of giving up. The "ask a question in the final answer" half of
+the symptom is **not** re-fixed here — `SYSTEM_PROMPT` already forbids it
+outright (Field patch E), so writing the same rule a third time is unlikely
+to be the lever that changes gpt-5-mini's behavior; if this specific
+violation recurs after the anchor-size fix has had a chance to reduce how
+often editing gets hard enough to trigger it, the next step is very likely
+"try a stronger model for real coding-task runs," not another prompt
+sentence.
+
+**Verified**: `uv run pytest` (296 passed), `uv run python -m
+teacup_agent.evals` (23/23), `uv run teacup-agent` (0.120s, unaffected) — a
+tool-description change again, no new structural behavior to pin. Whether it
+changes tool choice for the harder case is, like I and J, a live-run
+question.
+
+**The lesson**: three fixes into one task now (I, J, K), each dogfood run has
+gotten measurably further — full hang, to zero edits, to one edit, to two
+edits — which is the actual evidence this loop is converging rather than
+finding a new way to fail forever. But K also marks where tool-description
+engineering stops being obviously sufficient: the model is now failing at
+"reproduce this exactly," a capability question, not "which tool should I
+call," a knowledge question — and a capability gap is a different kind of
+problem than a missing instruction. The next data point that matters is
+whether K's fix closes this one, or whether the honest conclusion becomes
+"this specific technique is past what a prompt/description change can fix
+for this model."
