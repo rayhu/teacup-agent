@@ -67,11 +67,20 @@ def enable() -> None:
         name=EDIT_FILE,
         description=(
             "Replace one exact occurrence of old_string with new_string in an "
-            "existing file. Fails if old_string is not found, or is not unique — "
-            "read the file first (read_file) and include enough surrounding context "
-            "to make the match unambiguous. This has external side effects and "
-            "cannot be trivially undone, so it requires human approval before it "
-            "runs."
+            "existing file. old_string may span multiple lines — this works the "
+            "same way for a one-line change or a ten-line block, so a multi-line "
+            "edit is never a reason to reach for run_command instead. Fails if "
+            "old_string is not found, or is not unique — read the file first "
+            "(read_file) and copy the exact current text verbatim, including "
+            "whitespace and line breaks, rather than reconstructing it from memory; "
+            "include enough surrounding context to make the match unambiguous. If a "
+            "call fails because old_string did not match, call read_file again "
+            "(the file may not be what you expect) and retry with the exact text it "
+            "returns — do not switch to run_command (sed, heredocs, `python -c`) to "
+            "do the edit instead; that path is not part of this tool's approved "
+            "workflow and is likely to be blocked outright. This has external side "
+            "effects and cannot be trivially undone, so it requires human approval "
+            "before it runs."
         ),
         parameters={
             "type": "object",
@@ -115,7 +124,14 @@ def enable() -> None:
             "tests, git, or delete files), so it requires human approval before it "
             f"runs. Times out after {_DEFAULT_COMMAND_TIMEOUT:.0f}s by default "
             f"(max {_MAX_COMMAND_TIMEOUT:.0f}s); the process is actually terminated "
-            "on timeout, not just abandoned."
+            "on timeout, not just abandoned. This is for running tests and git, not "
+            "for reading or changing files — use list_files/read_file/edit_file/"
+            "write_file for that instead. A project's own hooks.py commonly allows "
+            "only a short, fixed list of exact commands here (e.g. specific git or "
+            "test invocations) and refuses anything containing a shell "
+            "metacharacter (chaining, substitution, redirection) outright, so a "
+            "command built to work around another tool's limits is more likely to "
+            "be denied than to succeed."
         ),
         parameters={
             "type": "object",

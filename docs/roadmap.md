@@ -1833,3 +1833,65 @@ easy thing" gets read as permission to skip straight to the easy thing, especial
 once a call has already failed once and the model is looking for a reason to
 stop. Ordering matters more than mentioning: say what to try before naming the
 fallback, not the two as equal options in one sentence.
+
+### J. Multi-line edits: the model reached for shell before the dedicated tool — DONE (2026-09-05)
+
+**Symptom**: the very next dogfood run after I's fix (same task, one step
+further this time — the model correctly used `edit_file` unprompted for a
+one-line dataclass-field insertion, no `run_command` involved at all). But the
+next two required edits both needed a **multi-line** `old_string` (a
+three-argument constructor call, a multi-line `loop.run(...)` invocation), and
+for those the model's own account says it tried to construct the exact text by
+hand, failed to match, and then attempted the edit **via `run_command`**
+(a shell/heredoc/`sed`-shaped command, per its own description) instead of
+going back to `read_file` for the literal current text. `hooks.py` correctly
+vetoed that command outright (`UNSAFE_SHELL_METACHARACTERS`, since editing a
+file with `sed`/heredocs virtually always needs a character on that list) — and
+the model gave up on the whole task rather than falling back to the very
+`edit_file`+`read_file` pattern it had just used successfully one step earlier.
+
+**Root cause**: distinct from I, even though the surface behavior rhymes.
+I fixed the model giving up after a denial instead of trying a different
+*already-available* tool. Here the model **did** try a different tool first —
+just the wrong one. Nothing in `edit_file`'s own tool description said a
+multi-line `old_string` works exactly the same as a one-line one, or told the
+model what to do specifically when a match fails (re-read, don't reach for
+shell). The tool's ERROR result for a failed match already said "re-read the
+file... and match its exact current content" — reasonably specific — but nothing
+at the point of *choosing a tool* steered it away from `run_command` for an
+editing job in the first place.
+
+**Fix**, in `coding_tools.py`'s tool descriptions rather than `SYSTEM_PROMPT` —
+this is dynamic context (`--coding-tools`-gated, paid only when those tools are
+offered), the right layer for coding-specific workflow advice per this repo's
+own context-engineering framing, not the universal system prompt every run
+pays for:
+1. `edit_file`'s description now states explicitly that `old_string` may span
+   multiple lines and works identically to a one-line match, so a multi-line
+   change is never itself a reason to switch tools; that copying the *exact*
+   text (whitespace, line breaks) from a fresh `read_file` call is the
+   reliable way to build it, not reconstructing from memory; and that a
+   failed match means "re-read and retry `edit_file`," explicitly **not**
+   "switch to `run_command`."
+2. `run_command`'s description now states it is for tests and git, not for
+   reading or changing files, and warns that a command built to route around
+   another tool's limits is more likely to be denied than to succeed (naming
+   the shell-metacharacter refusal directly), so this steers away from the
+   failure mode from the tool the model would otherwise reach for, not just
+   the one it should reach for instead.
+
+**Verified**: `uv run pytest` (296 passed, no test changes needed — this is a
+tool-description change, not new behavior to pin structurally), `uv run
+python -m teacup_agent.evals` (23/23), `uv run teacup-agent` (0.123s,
+unaffected). Whether this actually changes the model's tool choice on the next
+attempt is, like I, a live-run question a description change cannot itself
+settle — recorded here so the next failure (if it recurs in a third shape) has
+this fix on record rather than repeating the diagnosis from scratch.
+
+**The lesson**: I and J are the same underlying tendency — reach for the
+general-purpose tool (`run_command`) when a dedicated one gets even slightly
+harder to use — showing up in two different triggers (a denial in I, a failed
+match in J). Fixing the trigger you found does not fix the tendency; the
+dedicated tool's own description has to make the harder case (multi-line,
+here) look easy and explicitly rule out the general-purpose escape hatch, not
+just handle the specific failure that happened to surface it this time.
