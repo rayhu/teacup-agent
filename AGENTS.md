@@ -20,7 +20,9 @@ values, shapes, interfaces), `docs/design-notes.md` (why each subsystem behaves 
 way it does), `docs/roadmap.md` (what is missing and in what order),
 `docs/threat-model.md` (what is trusted, what is not, and what a fork inherits),
 `docs/integration.md` (the `--json` contract an external caller relies on),
-`NOTES.md` (the original study notes this grew from).
+`docs/case-studies.md` (a living log of real attempts to have this repo's own coding
+tools patch its own source, receipts included — update it in the same commit as the
+fix, not after), `NOTES.md` (the original study notes this grew from).
 
 How a change gets from an idea to `main` — the phase loop, who reviews what, what a human
 signs off — is `docs/workflow.md`, and the review pass itself is `REVIEW.md`. Read them
