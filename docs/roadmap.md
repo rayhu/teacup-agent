@@ -1794,3 +1794,104 @@ prefix match, so a future error string cannot slip through the same way.
 written.* Both are correct on their own; the failure is in the seam. It stayed invisible
 because nothing had ever tabulated `delivered` next to `status` where the contradiction
 would be obvious — which is an argument for the table itself, not only for the fix.
+
+### I. A denial is not a dead end either — try a different tool first — DONE (2026-09-05)
+
+**Symptom**: a live Phase-4 dogfood run (teacup-run driving this repo through
+`coding_task.py`, `gpt-5-mini`, `--coding-tools --approve hooks`) needed to read a
+source file as its very first step. The model called `run_command("cat ...")`
+instead of the already-ungated `read_file`, got denied (this repo's own `hooks.py`
+has no opinion on `cat`, and the unattended default is deny), and — rather than
+retrying with `read_file` for the same file — gave up on editing entirely and
+handed back a wall of unified-diff-style prose describing the changes instead of
+making them. `FILES_CHANGED: ()`, zero `edit_file` calls, cost $0.01 for nothing.
+
+**Root cause**: E (above) fixed "never even attempt the gated call", but its own
+fix wording still offered the same shape of exit one step later: "only a *denied*
+call justifies another route, **or** saying the step is left to the user". Once
+denied, the model took the second branch — the easy one — without ever trying the
+first. The prompt asked it to *consider* an alternative but never said that
+finding one and using it comes *before* giving up, and never mentioned that a
+denial is that: a signal to try a different tool, not a signal to stop.
+
+**Fix**: reworded the ERROR-result bullet in `SYSTEM_PROMPT` (`loop.py`) into an
+explicit order — fix a bad argument and retry; else, if another tool already
+available can reach the same immediate goal, use that one; only once no such
+alternative exists does the step get deferred to the user in the final answer.
+The approval-denial bullet and the `DENIED` tool-result string were reworded to
+point back at the same rule, so the message the model actually sees at the moment
+of denial repeats it, not just the system prompt it was set eight turns earlier.
+New eval (`evals.py`, "approval gate: a denial is followed by a different tool,
+not a stall") scripts the well-behaved response — `run_command` denied,
+`read_file` used for the same goal, run reaches `done` — and pins that the loop
+lets it through end to end. It cannot verify a real model *chooses* to behave
+this way; that is a live-run question, to be confirmed on the next dogfood
+attempt, not something a scripted-model eval can settle.
+
+**The lesson, sharper than E's**: an escape hatch worded as "do X, **or** do the
+easy thing" gets read as permission to skip straight to the easy thing, especially
+once a call has already failed once and the model is looking for a reason to
+stop. Ordering matters more than mentioning: say what to try before naming the
+fallback, not the two as equal options in one sentence.
+
+### J. Multi-line edits: the model reached for shell before the dedicated tool — DONE (2026-09-05)
+
+**Symptom**: the very next dogfood run after I's fix (same task, one step
+further this time — the model correctly used `edit_file` unprompted for a
+one-line dataclass-field insertion, no `run_command` involved at all). But the
+next two required edits both needed a **multi-line** `old_string` (a
+three-argument constructor call, a multi-line `loop.run(...)` invocation), and
+for those the model's own account says it tried to construct the exact text by
+hand, failed to match, and then attempted the edit **via `run_command`**
+(a shell/heredoc/`sed`-shaped command, per its own description) instead of
+going back to `read_file` for the literal current text. `hooks.py` correctly
+vetoed that command outright (`UNSAFE_SHELL_METACHARACTERS`, since editing a
+file with `sed`/heredocs virtually always needs a character on that list) — and
+the model gave up on the whole task rather than falling back to the very
+`edit_file`+`read_file` pattern it had just used successfully one step earlier.
+
+**Root cause**: distinct from I, even though the surface behavior rhymes.
+I fixed the model giving up after a denial instead of trying a different
+*already-available* tool. Here the model **did** try a different tool first —
+just the wrong one. Nothing in `edit_file`'s own tool description said a
+multi-line `old_string` works exactly the same as a one-line one, or told the
+model what to do specifically when a match fails (re-read, don't reach for
+shell). The tool's ERROR result for a failed match already said "re-read the
+file... and match its exact current content" — reasonably specific — but nothing
+at the point of *choosing a tool* steered it away from `run_command` for an
+editing job in the first place.
+
+**Fix**, in `coding_tools.py`'s tool descriptions rather than `SYSTEM_PROMPT` —
+this is dynamic context (`--coding-tools`-gated, paid only when those tools are
+offered), the right layer for coding-specific workflow advice per this repo's
+own context-engineering framing, not the universal system prompt every run
+pays for:
+1. `edit_file`'s description now states explicitly that `old_string` may span
+   multiple lines and works identically to a one-line match, so a multi-line
+   change is never itself a reason to switch tools; that copying the *exact*
+   text (whitespace, line breaks) from a fresh `read_file` call is the
+   reliable way to build it, not reconstructing from memory; and that a
+   failed match means "re-read and retry `edit_file`," explicitly **not**
+   "switch to `run_command`."
+2. `run_command`'s description now states it is for tests and git, not for
+   reading or changing files, and warns that a command built to route around
+   another tool's limits is more likely to be denied than to succeed (naming
+   the shell-metacharacter refusal directly), so this steers away from the
+   failure mode from the tool the model would otherwise reach for, not just
+   the one it should reach for instead.
+
+**Verified**: `uv run pytest` (296 passed, no test changes needed — this is a
+tool-description change, not new behavior to pin structurally), `uv run
+python -m teacup_agent.evals` (23/23), `uv run teacup-agent` (0.123s,
+unaffected). Whether this actually changes the model's tool choice on the next
+attempt is, like I, a live-run question a description change cannot itself
+settle — recorded here so the next failure (if it recurs in a third shape) has
+this fix on record rather than repeating the diagnosis from scratch.
+
+**The lesson**: I and J are the same underlying tendency — reach for the
+general-purpose tool (`run_command`) when a dedicated one gets even slightly
+harder to use — showing up in two different triggers (a denial in I, a failed
+match in J). Fixing the trigger you found does not fix the tendency; the
+dedicated tool's own description has to make the harder case (multi-line,
+here) look easy and explicitly rule out the general-purpose escape hatch, not
+just handle the specific failure that happened to surface it this time.

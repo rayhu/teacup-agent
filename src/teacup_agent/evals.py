@@ -38,6 +38,7 @@ class Case:
     time_budget: float | None = None
     context_limit: int = 30_000
     subagents: bool = False
+    coding_tools: bool = False
     skills: str | None = None
     plan: bool = False
     plan_items: list[str] | None = None
@@ -245,6 +246,31 @@ CASES: list[Case] = [
         check=lambda s: s.trace[0].executed and s.trace[0].result == "2",
     ),
     Case(
+        name="approval gate: a denial is followed by a different tool, not a stall",
+        # Pins the SYSTEM_PROMPT/DENIED rule added after a live dogfood run where the
+        # model tried run_command to read a file, got denied (unattended default), and
+        # gave up rather than using the already-ungated read_file for the same goal.
+        # This case scripts the *well-behaved* response the prompt now asks for, and
+        # checks the loop actually lets it through end to end — it does not (and
+        # cannot, with a scripted model) verify a real model chooses to behave this
+        # way; that is a prompt-effectiveness question only a live run can answer.
+        coding_tools=True,
+        script=[
+            assistant_calls([("run_command", {"command": "cat notes.txt"})]),
+            assistant_calls([("read_file", {"path": "notes.txt"})]),
+            assistant_says("Read via read_file after run_command was denied."),
+        ],
+        check=lambda s: (
+            s.trace[0].name == "run_command"
+            and s.trace[0].skip_reason == "denied"
+            and not s.trace[0].executed
+            and s.trace[1].name == "read_file"
+            and s.trace[1].executed  # the fallback tool actually ran, unlike the denied one
+            and tool_results_follow_their_call(s)
+            and s.status == "done"
+        ),
+    ),
+    Case(
         name="checklist: finishing with an untouched action item gets pushed back once",
         # Turn 1 answers without doing the second item; the completion check fires and
         # the model then sends the email.
@@ -390,6 +416,7 @@ def run_case(case: Case) -> tuple[bool, AgentState]:
         time_budget=case.time_budget,
         context_limit=case.context_limit,
         subagents=case.subagents,
+        coding_tools=case.coding_tools,
         skills=case.skills,
         plan=case.plan,
         run_dir=None,  # evals never write to disk
