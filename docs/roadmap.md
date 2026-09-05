@@ -1794,3 +1794,42 @@ prefix match, so a future error string cannot slip through the same way.
 written.* Both are correct on their own; the failure is in the seam. It stayed invisible
 because nothing had ever tabulated `delivered` next to `status` where the contradiction
 would be obvious — which is an argument for the table itself, not only for the fix.
+
+### I. A denial is not a dead end either — try a different tool first — DONE (2026-09-05)
+
+**Symptom**: a live Phase-4 dogfood run (teacup-run driving this repo through
+`coding_task.py`, `gpt-5-mini`, `--coding-tools --approve hooks`) needed to read a
+source file as its very first step. The model called `run_command("cat ...")`
+instead of the already-ungated `read_file`, got denied (this repo's own `hooks.py`
+has no opinion on `cat`, and the unattended default is deny), and — rather than
+retrying with `read_file` for the same file — gave up on editing entirely and
+handed back a wall of unified-diff-style prose describing the changes instead of
+making them. `FILES_CHANGED: ()`, zero `edit_file` calls, cost $0.01 for nothing.
+
+**Root cause**: E (above) fixed "never even attempt the gated call", but its own
+fix wording still offered the same shape of exit one step later: "only a *denied*
+call justifies another route, **or** saying the step is left to the user". Once
+denied, the model took the second branch — the easy one — without ever trying the
+first. The prompt asked it to *consider* an alternative but never said that
+finding one and using it comes *before* giving up, and never mentioned that a
+denial is that: a signal to try a different tool, not a signal to stop.
+
+**Fix**: reworded the ERROR-result bullet in `SYSTEM_PROMPT` (`loop.py`) into an
+explicit order — fix a bad argument and retry; else, if another tool already
+available can reach the same immediate goal, use that one; only once no such
+alternative exists does the step get deferred to the user in the final answer.
+The approval-denial bullet and the `DENIED` tool-result string were reworded to
+point back at the same rule, so the message the model actually sees at the moment
+of denial repeats it, not just the system prompt it was set eight turns earlier.
+New eval (`evals.py`, "approval gate: a denial is followed by a different tool,
+not a stall") scripts the well-behaved response — `run_command` denied,
+`read_file` used for the same goal, run reaches `done` — and pins that the loop
+lets it through end to end. It cannot verify a real model *chooses* to behave
+this way; that is a live-run question, to be confirmed on the next dogfood
+attempt, not something a scripted-model eval can settle.
+
+**The lesson, sharper than E's**: an escape hatch worded as "do X, **or** do the
+easy thing" gets read as permission to skip straight to the easy thing, especially
+once a call has already failed once and the model is looking for a reason to
+stop. Ordering matters more than mentioning: say what to try before naming the
+fallback, not the two as equal options in one sentence.
