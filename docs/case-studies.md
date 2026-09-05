@@ -7,8 +7,11 @@ repo's own source — and what actually broke, in order, before it worked.
 
 Most claims about agents fixing code come with no receipts: a screenshot, a
 paragraph, done. Here every fix is a merged, public pull request with its own
-commit, its own test run, its own independent review, and this file links to
-all of them. The failures are the point as much as the fixes — `docs/roadmap.md`
+commit and its own test run, and this file links to all of them — most of
+them also went through this project's own independent-review pass before
+merging (`REVIEW.md`), though that isn't uniformly true across both repos and
+this file doesn't claim it is where it isn't verifiable. The failures are the
+point as much as the fixes — `docs/roadmap.md`
 already has a "Field patches" section recording every real bug this project's
 own control loop has hit; this is the same discipline applied to something
 harder: watching an agent try, fail, and get patched while it was still
@@ -248,7 +251,7 @@ Seven attempts, one small task, zero manual patches to the target files —
 every fix that landed came from the same loop this file is about: reading the
 model's own account of what happened, finding the real root cause, writing a
 regression test that fails before the fix and passes after, shipping it as a
-normal, independently-reviewed pull request, and running the task again. Each
+normal, publicly reviewable pull request, and running the task again. Each
 attempt through teacup-agent's own tools got measurably further than the
 last: zero edits with a premature surrender, to zero edits from a different
 cause, to one edit, to two. That trend — not any single fix — is the actual

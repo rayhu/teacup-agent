@@ -1913,7 +1913,7 @@ apply the two small inserts above and run `uv run pytest`" — despite
 continue'" and "no tool calls = you consider the task complete... do not use
 it to ask a question." Tool calls were still available; it chose not to use
 them. (A separate run in this same series — the one that motivated Field
-patch J below — hit the identical pattern in a sharper form, literally ending
+patch J above — hit the identical pattern in a sharper form, literally ending
 with a lettered "(A)/(B)/(C), choose one" menu; this run's version is the
 same failure with softer wording, not a different one.)
 
