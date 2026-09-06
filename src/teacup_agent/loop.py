@@ -142,6 +142,32 @@ def status_note(state: AgentState) -> dict[str, Any]:
     return {"role": "system", "content": content}
 
 
+UNVERIFIED_CHECK = """[completion check] You changed files in this repository and are
+finishing without a single successful command run against them. You have run_command;
+running the project's tests, or whatever check this repo uses, is how you find out
+whether what you wrote actually works. Do that now, or say plainly in your answer that
+the change is unverified and why you could not check it."""
+
+
+FAILING_CHECK = """[completion check] The last command you ran reported failure:
+
+{tail}
+
+Finishing now means handing back a repository you have already been told is broken. If
+your change caused this, fix it and run the command again. If it was already failing
+before you touched anything, say so explicitly in your final answer — do not report the
+task as done while leaving this unexplained."""
+
+
+NO_EDITS_CHECK = """[completion check] You are about to finish without having changed
+a single file, and the tools to do it (edit_file, write_file) were available the whole
+time. If the task only asked you to read or explain something, say so plainly and stop —
+that is a fine answer. But if it asked you to change this repository, then describing the
+change, or saying what you intend to do next, is not doing it: nothing you have said so
+far has been written to disk. Make the edits now, or state explicitly which specific
+thing blocked you from making them."""
+
+
 COMPLETION_CHECK = """[completion check] You stopped calling tools, but the checklist
 still has open items:
 
@@ -545,6 +571,72 @@ def run(
             hooks_mod.unload()
 
 
+def _can_run_commands(specs: list[dict[str, Any]]) -> bool:
+    return "run_command" in _spec_names(specs)
+
+
+def _ran_any_command(state: AgentState) -> bool:
+    return any(
+        entry.name == "run_command" and not _is_error(entry.result) for entry in state.trace
+    )
+
+
+def _last_command_failed(state: AgentState) -> bool:
+    """Whether the most recent run_command reported a non-zero exit.
+
+    Only the most recent one: a failing test run the model then fixed and re-ran is
+    exactly the workflow we want, and penalising it would push the model away from
+    running anything at all.
+    """
+    last = _last_command_result(state)
+    return last is not None and not last.lstrip().startswith("[exit 0]")
+
+
+def _last_command_result(state: AgentState) -> str | None:
+    for entry in reversed(state.trace):
+        if entry.name == "run_command" and not _is_error(entry.result):
+            return str(entry.result)
+    return None
+
+
+def _last_command_tail(state: AgentState, limit: int = 600) -> str:
+    out = _last_command_result(state) or ""
+    return out[-limit:]
+
+
+def _is_error(result: Any) -> bool:
+    return str(result).lstrip().upper().startswith("ERROR")
+
+
+def _can_write_files(specs: list[dict[str, Any]]) -> bool:
+    """Whether this run was even given a tool that changes a file."""
+    return bool(_spec_names(specs) & {"edit_file", "write_file"})
+
+
+def _spec_names(specs: list[dict[str, Any]]) -> set[str]:
+    """Two shapes reach here: Chat Completions nests the name under "function", the
+    Responses API puts it at the top level. Read both rather than assume one."""
+    names: set[str] = set()
+    for spec in specs:
+        if spec.get("name"):
+            names.add(spec["name"])
+        fn = spec.get("function")
+        if isinstance(fn, dict) and fn.get("name"):
+            names.add(fn["name"])
+    return names
+
+
+def _wrote_any_file(state: AgentState) -> bool:
+    """Whether any edit actually landed. A call that came back ERROR (old_string not
+    found, approval denied, an edit refused for breaking the file) changed nothing, so
+    it does not count — the point is what is on disk, not what was attempted."""
+    return any(
+        entry.name in ("edit_file", "write_file")
+        and not _is_error(entry.result)
+        for entry in state.trace
+    )
+
+
 def _loop(
     state: AgentState,
     router: routing.Router,
@@ -625,17 +717,44 @@ def _loop(
             # untouched action item is the failure this check exists for: it gets one
             # push-back, once, and then the answer stands either way.
             outstanding = plan_mod.pending(state.todo)
-            if outstanding and not state.completion_checked and state.step < state.max_steps:
+            nudge: str | None = None
+            pending_names: list[str] = []
+            if not state.completion_checked and state.step < state.max_steps:
+                if outstanding:
+                    pending_names = [t.text for t in outstanding]
+                    nudge = COMPLETION_CHECK.format(
+                        pending="\n".join(f"- {t.text}" for t in outstanding)
+                    )
+                elif _can_write_files(specs) and _last_command_failed(state):
+                    # Defect seen repeatedly: the agent runs the suite, watches it go
+                    # red, and reports the task done anyway. The task had said "confirm
+                    # the full suite passes"; three separate runs shipped a broken tree
+                    # with a confident summary on top.
+                    pending_names = ["the last command run reported failure"]
+                    nudge = FAILING_CHECK.format(tail=_last_command_tail(state))
+                elif (
+                    _can_write_files(specs)
+                    and _wrote_any_file(state)
+                    and _can_run_commands(specs)
+                    and not _ran_any_command(state)
+                ):
+                    pending_names = ["files changed but nothing was run to check them"]
+                    nudge = UNVERIFIED_CHECK
+                elif _can_write_files(specs) and not _wrote_any_file(state):
+                    # The checklist branch above only protects a run that kept a
+                    # checklist. A model that never called update_todo has an empty
+                    # todo, so `outstanding` is empty, and it could stop whenever it
+                    # liked. Seen live: a coding run stopped at step 8 of 30, having
+                    # made no edits at all, with the final answer "Proceeding: in the
+                    # next step I'll re-open the three files..." — an intention, filed
+                    # as a result. Having written nothing is a fact worth one push-back
+                    # on its own, independent of any checklist.
+                    pending_names = ["no file has been changed"]
+                    nudge = NO_EDITS_CHECK
+            if nudge is not None:
                 state.completion_checked = True
-                state.messages.append(
-                    {
-                        "role": "system",
-                        "content": COMPLETION_CHECK.format(
-                            pending="\n".join(f"- {t.text}" for t in outstanding)
-                        ),
-                    }
-                )
-                emit("completion_check", pending=[t.text for t in outstanding])
+                state.messages.append({"role": "system", "content": nudge})
+                emit("completion_check", pending=pending_names)
                 continue
 
             state.answer = reply.text

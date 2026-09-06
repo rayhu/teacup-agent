@@ -34,6 +34,7 @@ WRITE_FILE = "write_file"
 RUN_COMMAND = "run_command"
 _NAMES = (LIST_FILES, EDIT_FILE, WRITE_FILE, RUN_COMMAND)
 
+_MAX_ECHO_LINES = 24  # cap on the post-edit echo; see _edited_region
 _DEFAULT_COMMAND_TIMEOUT = 60.0
 _MAX_COMMAND_TIMEOUT = 300.0
 
@@ -248,8 +249,90 @@ def _edit_file(path: str, old_string: str, new_string: str) -> str:
             f"ERROR: old_string appears {count} times in {path}; it must match "
             "exactly one location. Include more surrounding context to disambiguate."
         )
-    target.write_text(content.replace(old_string, new_string, 1), encoding="utf-8")
-    return f"Edited {path}: replaced 1 occurrence."
+    updated = content.replace(old_string, new_string, 1)
+    broke = _newly_unparsable(target, content, updated)
+    if broke is not None:
+        # Leave the file exactly as it was. An edit that makes the file unparsable is
+        # never the edit that was intended, and the model cannot see that it happened:
+        # edit_file's reply used to be "replaced 1 occurrence" whether the result was
+        # correct or wreckage. Observed live — a run inserted a keyword argument into a
+        # call that already passed it, producing `f(subagent_max_steps=..., ...,
+        # subagent_max_steps=...)`; that is a SyntaxError, so every module importing it
+        # failed and the agent still reported the task done. Refusing here turns a
+        # silently broken repo into one failed tool call the model gets to retry.
+        return (
+            f"ERROR: that edit was NOT applied — {path} is left unchanged, because "
+            f"applying it would have made the file unparsable: {broke}. The edit was "
+            "found and matched; what you asked to put there is the problem. Re-read "
+            "the file and check whether new_string duplicates something already on "
+            "the line below or above it."
+        )
+    target.write_text(updated, encoding="utf-8")
+    at = content.index(old_string)
+    return f"Edited {path}: replaced 1 occurrence.\n\n{_edited_region(updated, at, new_string)}"
+
+
+def _newly_unparsable(target: pathlib.Path, before: str, after: str) -> str | None:
+    """The syntax error `after` has and `before` did not, if any.
+
+    Only Python, and only a *regression*: a file already broken when the model found
+    it stays the model's to fix, and this must never block the edit that repairs it.
+    """
+    if target.suffix != ".py":
+        return None
+    if _compiles(after):
+        return None
+    if not _compiles(before):
+        return None  # already broken before this edit — not ours to refuse
+    try:
+        compile(after, str(target), "exec")
+    except (SyntaxError, ValueError) as exc:
+        lineno = getattr(exc, "lineno", None)
+        return f"{getattr(exc, 'msg', exc)}" + (f" (line {lineno})" if lineno else "")
+    return None
+
+
+def _compiles(source: str) -> bool:
+    """`compile`, not `ast.parse` — deliberately. The duplicate-keyword-argument bug
+    this guard exists to catch (`f(a=1, a=2)`) parses cleanly into an AST and is only
+    rejected later, when the compiler walks it; `ast.parse` returns happily and the
+    broken edit sails through. Verified both ways before relying on it."""
+    try:
+        compile(source, "<edit-check>", "exec")
+        return True
+    except (SyntaxError, ValueError):
+        return False
+
+
+def _edited_region(content: str, at: int, new_string: str, context: int = 3) -> str:
+    """The edited lines plus a little around them, numbered.
+
+    Returned on success because "replaced 1 occurrence" told the model nothing about
+    what it actually wrote. Every wrong-indentation bug observed in a real run was
+    invisible for exactly this reason: the model inserted a line at the wrong depth,
+    got told the edit succeeded, and moved on. Showing the result next to its
+    neighbours makes an indentation mistake visible in the same turn it is made.
+    """
+    lines = content.splitlines()
+    # Derived from where the replacement actually happened, not by searching for the
+    # new text: a one-line insertion is very often a copy of a line that also appears
+    # earlier in the file, and searching would then show a confidently wrong region.
+    idx = content[:at].count("\n")
+    start = max(0, idx - context)
+    end = min(len(lines), idx + len(new_string.splitlines()) + context)
+    width = len(str(end))
+    numbered = [f"{i + 1:>{width}} | {lines[i]}" for i in range(start, end)]
+    # Cap it. This string is a tool result, and a result over 2000 characters gets
+    # externalized to disk and replaced by an excerpt — an echo meant to make one
+    # edit reviewable should never be big enough to trigger that machinery itself.
+    if len(numbered) > _MAX_ECHO_LINES:
+        head, tail = _MAX_ECHO_LINES // 2, _MAX_ECHO_LINES // 2
+        numbered = numbered[:head] + [f"{'':>{width}} | ... {len(numbered) - head - tail} more lines ..."] + numbered[-tail:]
+    shown = "\n".join(numbered)
+    return (
+        "The file now reads (check that what you added lines up with its "
+        f"neighbours):\n{shown}"
+    )
 
 
 def _write_file(path: str, content: str) -> str:

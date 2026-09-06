@@ -146,3 +146,127 @@ def test_forced_wrapup_names_the_unfinished_items():
     )
     wrapup = [m for m in state.messages if "[forced wrap-up]" in str(m.get("content", ""))][0]
     assert "email the result" in wrapup["content"]  # the run admits what it never did
+
+
+# --- finishing without having written anything -------------------------------
+
+
+def _coding_run(replies, *, approve=lambda call, spec: True, tmp_path=None):
+    """A run with coding tools registered, so edit_file/write_file are in `specs`.
+
+    `approve` defaults to allow: the point of these tests is what the model does with
+    a working tool, not the approval gate (denied calls are covered in test_hooks).
+    """
+    from teacup_agent import coding_tools
+
+    coding_tools.enable()
+    try:
+        return loop.run(
+            "make the change",
+            ScriptedModel(replies),
+            memory=NullMemory(),
+            coding_tools=True,
+            plan=False,
+            approve=approve,
+        )
+    finally:
+        coding_tools.disable()
+
+
+def test_finishing_without_changing_a_file_is_pushed_back_once():
+    """The checklist branch cannot catch this: a model that never called update_todo
+    has an empty todo, so nothing was outstanding. A live coding run stopped at step
+    8 of 30 with no edits and "in the next step I'll re-open the three files" as its
+    final answer."""
+    state = _coding_run([assistant_says("I'll start by re-reading those files now.") for _ in range(5)])
+    checks = [m for m in state.messages if "[completion check]" in str(m.get("content", ""))]
+    assert len(checks) == 1  # exactly one push-back, never a loop
+    assert "without having changed" in checks[0]["content"]
+    assert state.completion_checked and state.status == "done"
+
+
+def test_no_pushback_once_a_file_is_written_and_a_command_has_passed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "true"})]),
+                assistant_says("done"),
+            ]
+        )
+    finally:
+        tools.set_project_root(None)
+    assert (tmp_path / "new.py").exists()  # the write really landed
+    assert not state.completion_checked
+
+
+def test_changing_files_without_running_anything_is_pushed_back(tmp_path, monkeypatch):
+    """Writing is not verifying. run_command was available the whole time."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})])]
+            + [assistant_says("all done") for _ in range(4)]
+        )
+    finally:
+        tools.set_project_root(None)
+    checks = [m for m in state.messages if "[completion check]" in str(m.get("content", ""))]
+    assert len(checks) == 1
+    assert "without a single successful command run" in checks[0]["content"]
+
+
+def test_finishing_while_the_last_command_failed_is_pushed_back(tmp_path, monkeypatch):
+    """The defect this exists for: run the suite, watch it go red, report done."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "false"})]),
+            ]
+            + [assistant_says("task complete") for _ in range(4)]
+        )
+    finally:
+        tools.set_project_root(None)
+    checks = [m for m in state.messages if "[completion check]" in str(m.get("content", ""))]
+    assert len(checks) == 1
+    assert "reported failure" in checks[0]["content"]
+
+
+def test_a_failure_that_was_fixed_and_rerun_is_not_pushed_back(tmp_path, monkeypatch):
+    """Only the most recent command counts — red, fix, green is the workflow we want."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "false"})]),
+                assistant_calls([("run_command", {"command": "true"})]),
+                assistant_says("fixed and green"),
+            ]
+        )
+    finally:
+        tools.set_project_root(None)
+    assert not state.completion_checked
+
+
+def test_a_denied_write_still_counts_as_having_written_nothing(tmp_path, monkeypatch):
+    """An attempted edit is not a made edit. If approval denied it, the file on disk
+    is unchanged and the push-back is exactly as warranted as if nothing was tried."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})])]
+            + [assistant_says("could not do it") for _ in range(4)],
+            approve=lambda call, spec: False,
+        )
+    finally:
+        tools.set_project_root(None)
+    assert not (tmp_path / "new.py").exists()
+    assert state.completion_checked

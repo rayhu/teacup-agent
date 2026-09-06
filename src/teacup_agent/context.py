@@ -75,7 +75,19 @@ def externalize(result: str, run_dir: pathlib.Path, step: int, index: int, name:
     try:
         rel = path.relative_to(pathlib.Path.cwd())
     except ValueError:
-        rel = path
+        # The run dir is outside the project, so read_file — which refuses every path
+        # outside its own root — cannot open what we just wrote. The excerpt-plus-path
+        # bargain only works if the model can actually collect the rest, and this whole
+        # function is worth doing only because it can. Keep the file (a human reading
+        # the trajectory still wants it) and hand the model the full result instead of
+        # 600 characters and an address it is forbidden to visit.
+        #
+        # This is not hypothetical: teacup-run drove this agent with --run-dir pointing
+        # at a temp directory beside the worktree, and every large read silently became
+        # 864 characters of a 12147-character file plus an unusable pointer. The model
+        # could not see the code it had been asked to edit and spent six edit_file calls
+        # guessing at text it had never been shown.
+        return result
     return (
         f"{result[:EXCERPT]}\n\n"
         f"[Result was long ({len(result)} characters) and has been saved to {rel}. "

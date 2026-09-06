@@ -145,7 +145,13 @@ def big_tool(monkeypatch):
     monkeypatch.setattr(tools, "REGISTRY", registry)
 
 
-def test_big_tool_result_is_written_to_disk_and_shrunk(big_tool, tmp_path):
+def test_big_tool_result_is_written_to_disk_and_shrunk(big_tool, tmp_path, monkeypatch):
+    # chdir first: the excerpt-plus-path bargain is only offered when the run dir is
+    # somewhere read_file can actually reach, and read_file refuses anything outside
+    # the project root. cli.py's own default (`runs/<timestamp>`, relative) always is;
+    # a test that passes an absolute tmp_path from outside would exercise the fallback
+    # below instead, which is what this test used to do without meaning to.
+    monkeypatch.chdir(tmp_path)
     state = loop.run(
         "externalization test",
         ScriptedModel([assistant_calls([("dump", {})]), assistant_says("ok")]),
@@ -163,6 +169,33 @@ def test_big_tool_result_is_written_to_disk_and_shrunk(big_tool, tmp_path):
     # the details.
     assert state.trace[0].result == kept
 
+
+
+def test_result_is_kept_inline_when_the_run_dir_is_unreachable(big_tool, tmp_path, monkeypatch):
+    """A run dir outside the project keeps the full result in the context instead.
+
+    read_file refuses paths outside the project root, so pointing the model at one is
+    an instruction it cannot follow — it would see 600 characters and a dead address.
+    Confirmed in a live run driven by teacup-run, which put --run-dir beside the
+    worktree rather than inside it: a 12147-character file reached the model as 864
+    characters, and it spent six edit_file calls guessing at what it had never seen.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "elsewhere"
+    monkeypatch.chdir(project)
+
+    state = loop.run(
+        "externalization test",
+        ScriptedModel([assistant_calls([("dump", {})]), assistant_says("ok")]),
+        memory=NullMemory(),
+        run_dir=outside,
+    )
+    kept = [m for m in state.messages if m.get("role") == "tool"][0]["content"]
+    assert len(kept) == 5000  # the whole thing, not an excerpt
+    assert "read_file" not in kept  # and no instruction to fetch what it cannot open
+    # still written out, because a human reading the trajectory afterwards wants it
+    assert len(list(outside.glob("*.txt"))[0].read_text()) == 5000
 
 # --- compaction --------------------------------------------------------------
 

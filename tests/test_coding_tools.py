@@ -259,3 +259,69 @@ def test_run_command_timeout_is_capped_at_the_maximum(_project, monkeypatch):
     monkeypatch.setattr(coding_tools.subprocess, "run", spy)
     _call("run_command", command="echo x", timeout=999999)
     assert captured["timeout"] == coding_tools._MAX_COMMAND_TIMEOUT
+
+
+# --- refusing to finish without having written anything ----------------------
+
+
+def test_edit_that_would_break_the_file_is_refused_and_nothing_is_written(_project):
+    """A repeated keyword argument compiles to a SyntaxError, so every module that
+    imports the file stops loading. A live run produced exactly this and still
+    reported the task done, because edit_file replied "replaced 1 occurrence"
+    whether the result was correct or wreckage."""
+    f = _project / "cli.py"
+    before = "loop.run(\n    subagents=cfg.subagents,\n    max_steps=cfg.max_steps,\n)\n"
+    f.write_text(before)
+
+    out = _call(
+        "edit_file",
+        path="cli.py",
+        old_string="    subagents=cfg.subagents,",
+        new_string="    subagents=cfg.subagents,\n    max_steps=cfg.max_steps,",
+    )
+    assert out.startswith("ERROR")
+    assert "keyword argument repeated" in out
+    assert f.read_text() == before  # the file is untouched, not half-edited
+
+
+def test_a_good_edit_shows_the_result_back_so_indentation_is_visible(_project):
+    """Wrong-indentation insertions are valid Python, so no guard can reject them —
+    but the model can only notice one if it is shown what it wrote."""
+    f = _project / "cli.py"
+    f.write_text("loop.run(\n    subagents=cfg.subagents,\n)\n")
+    out = _call(
+        "edit_file",
+        path="cli.py",
+        old_string="    subagents=cfg.subagents,",
+        new_string="    subagents=cfg.subagents,\n    coding_tools=cfg.coding_tools,",
+    )
+    assert not out.startswith("ERROR")
+    assert "coding_tools=cfg.coding_tools," in out  # the new line is echoed back
+    assert "|" in out  # with line numbers, next to its neighbours
+
+
+def test_an_edit_repairing_an_already_broken_file_is_still_allowed(_project):
+    """The guard refuses *regressions* only. A file the model found broken is the
+    model's to fix, and refusing that edit would trap it."""
+    f = _project / "broken.py"
+    f.write_text("def go(:\n    pass\n")
+    out = _call("edit_file", path="broken.py", old_string="def go(:", new_string="def go():")
+    assert not out.startswith("ERROR")
+    assert f.read_text().startswith("def go():")
+
+
+def test_the_region_shown_back_is_the_one_that_changed(_project):
+    """A one-line insertion is usually a copy of a line that appears elsewhere too,
+    so the echo is located by replacement offset rather than by searching for it."""
+    f = _project / "dup.py"
+    f.write_text("a = 1\nmarker = 0\nb = 2\nc = 3\nd = 4\ne = 5\nmarker = 0\nz = 9\n")
+    out = _call(
+        "edit_file",
+        path="dup.py",
+        old_string="e = 5\nmarker = 0",
+        new_string="e = 5\nmarker = 0\nadded = 1",
+    )
+    assert not out.startswith("ERROR")
+    assert "added = 1" in out
+    assert "8 | added = 1" in out  # the second marker's region, not the first
+    assert "a = 1" not in out  # not the first marker's region
