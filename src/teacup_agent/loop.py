@@ -149,14 +149,17 @@ whether what you wrote actually works. Do that now, or say plainly in your answe
 the change is unverified and why you could not check it."""
 
 
-FAILING_CHECK = """[completion check] The last command you ran reported failure:
+FAILING_CHECK = """[completion check] The last command you ran did not succeed:
 
-{tail}
+{head}
 
 Finishing now means handing back a repository you have already been told is broken. If
 your change caused this, fix it and run the command again. If it was already failing
 before you touched anything, say so explicitly in your final answer — do not report the
-task as done while leaving this unexplained."""
+task as done while leaving this unexplained.
+
+If this command is one whose non-zero exit is not a failure at all (a grep that matched
+nothing, a diff that found a difference), say that in one line and finish."""
 
 
 NO_EDITS_CHECK = """[completion check] You are about to finish without having changed
@@ -571,72 +574,6 @@ def run(
             hooks_mod.unload()
 
 
-def _can_run_commands(specs: list[dict[str, Any]]) -> bool:
-    return "run_command" in _spec_names(specs)
-
-
-def _ran_any_command(state: AgentState) -> bool:
-    return any(
-        entry.name == "run_command" and not _is_error(entry.result) for entry in state.trace
-    )
-
-
-def _last_command_failed(state: AgentState) -> bool:
-    """Whether the most recent run_command reported a non-zero exit.
-
-    Only the most recent one: a failing test run the model then fixed and re-ran is
-    exactly the workflow we want, and penalising it would push the model away from
-    running anything at all.
-    """
-    last = _last_command_result(state)
-    return last is not None and not last.lstrip().startswith("[exit 0]")
-
-
-def _last_command_result(state: AgentState) -> str | None:
-    for entry in reversed(state.trace):
-        if entry.name == "run_command" and not _is_error(entry.result):
-            return str(entry.result)
-    return None
-
-
-def _last_command_tail(state: AgentState, limit: int = 600) -> str:
-    out = _last_command_result(state) or ""
-    return out[-limit:]
-
-
-def _is_error(result: Any) -> bool:
-    return str(result).lstrip().upper().startswith("ERROR")
-
-
-def _can_write_files(specs: list[dict[str, Any]]) -> bool:
-    """Whether this run was even given a tool that changes a file."""
-    return bool(_spec_names(specs) & {"edit_file", "write_file"})
-
-
-def _spec_names(specs: list[dict[str, Any]]) -> set[str]:
-    """Two shapes reach here: Chat Completions nests the name under "function", the
-    Responses API puts it at the top level. Read both rather than assume one."""
-    names: set[str] = set()
-    for spec in specs:
-        if spec.get("name"):
-            names.add(spec["name"])
-        fn = spec.get("function")
-        if isinstance(fn, dict) and fn.get("name"):
-            names.add(fn["name"])
-    return names
-
-
-def _wrote_any_file(state: AgentState) -> bool:
-    """Whether any edit actually landed. A call that came back ERROR (old_string not
-    found, approval denied, an edit refused for breaking the file) changed nothing, so
-    it does not count — the point is what is on disk, not what was attempted."""
-    return any(
-        entry.name in ("edit_file", "write_file")
-        and not _is_error(entry.result)
-        for entry in state.trace
-    )
-
-
 def _loop(
     state: AgentState,
     router: routing.Router,
@@ -719,28 +656,47 @@ def _loop(
             outstanding = plan_mod.pending(state.todo)
             nudge: str | None = None
             pending_names: list[str] = []
-            if not state.completion_checked and state.step < state.max_steps:
-                if outstanding:
+            check_name = ""
+            # Each condition is tracked by name and fires at most once. They are not
+            # alternatives to each other: a run nudged about an open checklist item at
+            # step 4 must still be nudged at step 20 for finishing with the suite red.
+            # A single shared flag made whichever fired first silence the rest, and
+            # because the checklist branch is tested first, --plan — the flag meant to
+            # make a run *more* careful — reliably disabled the other three.
+            if state.step < state.max_steps:
+                if outstanding and "checklist" not in state.completion_checks:
+                    check_name = "checklist"
                     pending_names = [t.text for t in outstanding]
                     nudge = COMPLETION_CHECK.format(
                         pending="\n".join(f"- {t.text}" for t in outstanding)
                     )
-                elif _can_write_files(specs) and _last_command_failed(state):
+                elif (
+                    coding_tools_mod.offers_file_writes(specs)
+                    and "failing_command" not in state.completion_checks
+                    and coding_tools_mod.last_command_failed(state)
+                ):
                     # Defect seen repeatedly: the agent runs the suite, watches it go
                     # red, and reports the task done anyway. The task had said "confirm
                     # the full suite passes"; three separate runs shipped a broken tree
                     # with a confident summary on top.
+                    check_name = "failing_command"
                     pending_names = ["the last command run reported failure"]
-                    nudge = FAILING_CHECK.format(tail=_last_command_tail(state))
+                    nudge = FAILING_CHECK.format(head=coding_tools_mod.last_command_head(state))
                 elif (
-                    _can_write_files(specs)
-                    and _wrote_any_file(state)
-                    and _can_run_commands(specs)
-                    and not _ran_any_command(state)
+                    coding_tools_mod.offers_file_writes(specs)
+                    and "unverified" not in state.completion_checks
+                    and coding_tools_mod.wrote_any_file(state)
+                    and coding_tools_mod.offers_run_command(specs)
+                    and not coding_tools_mod.ran_any_command(state)
                 ):
+                    check_name = "unverified"
                     pending_names = ["files changed but nothing was run to check them"]
                     nudge = UNVERIFIED_CHECK
-                elif _can_write_files(specs) and not _wrote_any_file(state):
+                elif (
+                    coding_tools_mod.offers_file_writes(specs)
+                    and "no_edits" not in state.completion_checks
+                    and not coding_tools_mod.wrote_any_file(state)
+                ):
                     # The checklist branch above only protects a run that kept a
                     # checklist. A model that never called update_todo has an empty
                     # todo, so `outstanding` is empty, and it could stop whenever it
@@ -749,10 +705,11 @@ def _loop(
                     # next step I'll re-open the three files..." — an intention, filed
                     # as a result. Having written nothing is a fact worth one push-back
                     # on its own, independent of any checklist.
+                    check_name = "no_edits"
                     pending_names = ["no file has been changed"]
                     nudge = NO_EDITS_CHECK
             if nudge is not None:
-                state.completion_checked = True
+                state.completion_checks.append(check_name)
                 state.messages.append({"role": "system", "content": nudge})
                 emit("completion_check", pending=pending_names)
                 continue

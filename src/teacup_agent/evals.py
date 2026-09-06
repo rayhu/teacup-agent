@@ -318,6 +318,60 @@ CASES: list[Case] = [
         ),
     ),
     Case(
+        name="completion: finishing without having written anything gets pushed back",
+        # The checklist branch cannot cover this: a run that never called update_todo has
+        # an empty todo, so nothing is outstanding and it could stop whenever it liked.
+        # From a live coding run that stopped at step 8 of 30 with no edits and "in the
+        # next step I'll re-open the three files" as its final answer.
+        coding_tools=True,
+        script=[assistant_says("I'll start by re-reading those files now.") for _ in range(4)],
+        check=lambda s: (
+            s.completion_checks == ["no_edits"]
+            and sum("[completion check]" in str(m.get("content", "")) for m in s.messages) == 1
+            and s.status == "done"  # pushed back once, then the answer stands
+        ),
+    ),
+    Case(
+        name="completion: a verification attempt that died does not count as verified",
+        # The last run_command is denied here (evals run unattended, so the gate denies),
+        # which is an ERROR result. Skipping error results let an older successful command
+        # answer for the one that actually ended the run.
+        coding_tools=True,
+        script=[
+            assistant_calls([("run_command", {"command": "pytest -q"})]),
+            assistant_says("done, verified"),
+            assistant_says("done, verified"),
+        ],
+        check=lambda s: (
+            "failing_command" in s.completion_checks
+            and not s.trace[0].executed  # it never actually ran
+            and s.status == "done"
+        ),
+    ),
+    Case(
+        name="completion: an earlier push-back does not silence a later one",
+        # One shared flag made whichever check fired first disable the rest — and since
+        # the checklist is tested first, --plan reliably switched the others off for the
+        # whole run, which is the opposite of what asking for a plan should do.
+        coding_tools=True,
+        plan=True,
+        plan_items=["change the config", "run the tests"],
+        script=[
+            assistant_says("stopping with an item open"),
+            assistant_calls([("run_command", {"command": "pytest -q"})]),
+            assistant_says("all done, suite is green"),
+            assistant_says("all done, suite is green"),
+        ],
+        check=lambda s: (
+            # All three conditions genuinely hold for this run, and each is allowed to
+            # say so exactly once. Under the single shared flag only the first ever did.
+            s.completion_checks == ["checklist", "failing_command", "no_edits"]
+            and len(set(s.completion_checks)) == len(s.completion_checks)  # never twice
+            and sum("[completion check]" in str(m.get("content", "")) for m in s.messages) == 3
+            and s.status == "done"
+        ),
+    ),
+    Case(
         name="checklist: an unrecognised update_todo status is refused, not silently done",
         # The failure this pins down: a bogus status used to set done=True, the item
         # left the pending list, and the run could report finished with the work

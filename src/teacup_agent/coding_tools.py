@@ -25,8 +25,10 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+from typing import Any
 
 from teacup_agent import tools as tools_mod
+from teacup_agent.state import AgentState
 
 LIST_FILES = "list_files"
 EDIT_FILE = "edit_file"
@@ -34,7 +36,7 @@ WRITE_FILE = "write_file"
 RUN_COMMAND = "run_command"
 _NAMES = (LIST_FILES, EDIT_FILE, WRITE_FILE, RUN_COMMAND)
 
-_MAX_ECHO_LINES = 24  # cap on the post-edit echo; see _edited_region
+_MAX_ECHO_LINES = 24  # lines in the post-edit echo, elision marker included
 _DEFAULT_COMMAND_TIMEOUT = 60.0
 _MAX_COMMAND_TIMEOUT = 300.0
 
@@ -262,10 +264,14 @@ def _edit_file(path: str, old_string: str, new_string: str) -> str:
         # silently broken repo into one failed tool call the model gets to retry.
         return (
             f"ERROR: that edit was NOT applied — {path} is left unchanged, because "
-            f"applying it would have made the file unparsable: {broke}. The edit was "
-            "found and matched; what you asked to put there is the problem. Re-read "
-            "the file and check whether new_string duplicates something already on "
-            "the line below or above it."
+            f"applying it would have left the file unparsable: {broke}. old_string was "
+            "found and matched exactly once; the problem is what it would be replaced "
+            "with. Two things cause this most often. Either new_string repeats "
+            "something already on an adjacent line (a keyword argument, an import) so "
+            "the result is a duplicate — re-read the surrounding lines and check. Or "
+            "you are removing code you intend to replace, and the file is only invalid "
+            "in between: make the removal and its replacement one edit, rather than "
+            "two that leave a class or function body empty at the halfway point."
         )
     target.write_text(updated, encoding="utf-8")
     at = content.index(old_string)
@@ -322,11 +328,14 @@ def _edited_region(content: str, at: int, new_string: str, context: int = 3) -> 
     end = min(len(lines), idx + len(new_string.splitlines()) + context)
     width = len(str(end))
     numbered = [f"{i + 1:>{width}} | {lines[i]}" for i in range(start, end)]
-    # Cap it. This string is a tool result, and a result over 2000 characters gets
-    # externalized to disk and replaced by an excerpt — an echo meant to make one
-    # edit reviewable should never be big enough to trigger that machinery itself.
+    # Cap it. The echo exists to make one edit reviewable at a glance; past a couple of
+    # dozen lines it stops doing that and starts costing context. This bounds the line
+    # *count*, not the character count — a wide enough file can still push the result
+    # over the externalize threshold, and that is fine: the excerpt keeps the head,
+    # which is where the edited line and its neighbours are.
     if len(numbered) > _MAX_ECHO_LINES:
-        head, tail = _MAX_ECHO_LINES // 2, _MAX_ECHO_LINES // 2
+        head = _MAX_ECHO_LINES // 2
+        tail = _MAX_ECHO_LINES - head - 1  # -1: the elision marker is one of the lines
         numbered = numbered[:head] + [f"{'':>{width}} | ... {len(numbered) - head - tail} more lines ..."] + numbered[-tail:]
     shown = "\n".join(numbered)
     return (
@@ -375,3 +384,110 @@ def _run_command(command: str, timeout: float | None = None) -> str:
     if proc.stderr:
         output += f"\n[stderr]\n{proc.stderr}"
     return f"[exit {proc.returncode}]\n{output}"
+
+
+# --- reading a run back: what did these tools actually do? --------------------
+#
+# The control loop needs to answer "were any files changed?" and "did the last command
+# pass?" before it lets a run finish. Those questions are about *these* tools' result
+# strings — "[exit 0]", "Edited ...", "ERROR: ..." — so they are answered here rather
+# than in loop.py, which should not have to know how run_command formats an exit code.
+
+
+def offers_run_command(specs: list[dict[str, Any]]) -> bool:
+    return "run_command" in _spec_names(specs)
+
+
+def ran_any_command(state: AgentState) -> bool:
+    """Whether a command actually ran to completion. Same reasoning as wrote_any_file:
+    `executed` is the loop's own record, the result string is not."""
+    return any(
+        entry.name == "run_command" and entry.executed and not _is_error(entry.result)
+        for entry in state.trace
+    )
+
+
+def last_command_failed(state: AgentState) -> bool:
+    """Whether the run's final command did not succeed.
+
+    Only the final one: red, fix, green is the workflow we want, and treating an
+    earlier failure as disqualifying would push the model away from running anything
+    at all.
+
+    "Final" means the last run_command in the trace, full stop — including one that
+    came back ERROR because it timed out or was denied. Skipping those let an *older*
+    successful command stand in for the one that actually ended the run: a trace of
+    `[exit 0]` before any edit, then a timed-out verification after them, reported as
+    verified. A verification attempt that died is not a verification.
+    """
+    last = _last_command(state)
+    if last is None:
+        return False
+    if not last.executed or _is_error(last.result):
+        return True  # denied, throttled, vetoed, timed out: not a verification
+    return not str(last.result).lstrip().startswith("[exit 0]")
+
+
+def _last_command(state: AgentState):
+    for entry in reversed(state.trace):
+        if entry.name == "run_command":
+            return entry
+    return None
+
+
+def last_command_head(state: AgentState, limit: int = 600) -> str:
+    """The *start* of the last command's output, not the end.
+
+    The tail is the wrong half twice over. A result over EXTERNALIZE_OVER has been
+    replaced by an excerpt whose last lines are the "saved to <path>" pointer, so the
+    tail is the machinery rather than the failure. And even inline, `[exit N]` and the
+    first error a runner prints are at the top — which is the part that tells the model
+    what went wrong.
+    """
+    last = _last_command(state)
+    return str(last.result)[:limit] if last is not None else ""
+
+
+def _is_error(result: Any) -> bool:
+    return str(result).lstrip().upper().startswith("ERROR")
+
+
+def offers_file_writes(specs: list[dict[str, Any]]) -> bool:
+    """Whether this run was even given a tool that changes a file."""
+    return bool(_spec_names(specs) & {"edit_file", "write_file"})
+
+
+def _spec_names(specs: list[dict[str, Any]]) -> set[str]:
+    """Tool names out of a specs list, whichever shape it is in.
+
+    tools.specs() emits only the Chat Completions shape today, so the nested branch is
+    the one that runs; the flat branch is defensive, for a caller assembling specs
+    itself or a future Responses-shaped list. Cheap, and the alternative is a silent
+    empty set that would switch every completion check off without saying so.
+    """
+    names: set[str] = set()
+    for spec in specs:
+        if spec.get("name"):
+            names.add(spec["name"])
+        fn = spec.get("function")
+        if isinstance(fn, dict) and fn.get("name"):
+            names.add(fn["name"])
+    return names
+
+
+def wrote_any_file(state: AgentState) -> bool:
+    """Whether any edit actually landed — what is on disk, not what was attempted.
+
+    `executed` first, because it is a fact the loop recorded rather than a string a
+    project's hooks may have rewritten: a throttled, denied or vetoed call never ran,
+    and `hooks.veto` returns project-supplied text that is only *documented* to start
+    with "ERROR:". A veto phrased as "skipped" would otherwise be read as a write that
+    happened. The result is still checked after that, for the failures that occur inside
+    a call that did run — old_string not found, an edit refused for breaking the file.
+    """
+    return any(
+        entry.name in ("edit_file", "write_file")
+        and entry.executed
+        and not _is_error(entry.result)
+        for entry in state.trace
+    )

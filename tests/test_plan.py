@@ -151,7 +151,7 @@ def test_forced_wrapup_names_the_unfinished_items():
 # --- finishing without having written anything -------------------------------
 
 
-def _coding_run(replies, *, approve=lambda call, spec: True, tmp_path=None):
+def _coding_run(replies, *, approve=lambda call, spec: True, plan_items=None, run_dir=None):
     """A run with coding tools registered, so edit_file/write_file are in `specs`.
 
     `approve` defaults to allow: the point of these tests is what the model does with
@@ -161,13 +161,19 @@ def _coding_run(replies, *, approve=lambda call, spec: True, tmp_path=None):
 
     coding_tools.enable()
     try:
+        model = (
+            ScriptedWithSummarizer(list(replies), plan_items=plan_items)
+            if plan_items
+            else ScriptedModel(replies)
+        )
         return loop.run(
             "make the change",
-            ScriptedModel(replies),
+            model,
             memory=NullMemory(),
             coding_tools=True,
-            plan=False,
+            plan=bool(plan_items),
             approve=approve,
+            run_dir=run_dir,
         )
     finally:
         coding_tools.disable()
@@ -234,7 +240,7 @@ def test_finishing_while_the_last_command_failed_is_pushed_back(tmp_path, monkey
         tools.set_project_root(None)
     checks = [m for m in state.messages if "[completion check]" in str(m.get("content", ""))]
     assert len(checks) == 1
-    assert "reported failure" in checks[0]["content"]
+    assert "did not succeed" in checks[0]["content"]
 
 
 def test_a_failure_that_was_fixed_and_rerun_is_not_pushed_back(tmp_path, monkeypatch):
@@ -270,3 +276,69 @@ def test_a_denied_write_still_counts_as_having_written_nothing(tmp_path, monkeyp
         tools.set_project_root(None)
     assert not (tmp_path / "new.py").exists()
     assert state.completion_checked
+
+
+
+def test_an_earlier_pushback_does_not_silence_a_later_one(tmp_path, monkeypatch):
+    """Each condition fires on its own. A single shared flag made whichever came first
+    silence the rest — and since the checklist is tested first, --plan reliably disabled
+    the failing-command check for the whole run, which is the opposite of what asking
+    for a plan should do."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                # stop once with a checklist item open -> checklist push-back
+                assistant_calls([("update_todo", {"index": 1, "status": "in_progress"})]),
+                assistant_says("I'll stop here"),
+                # then edit and finish on a red command -> must still be pushed back
+                assistant_calls([("write_file", {"path": "n.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "false"})]),
+            ]
+            + [assistant_says("all done, suite is green") for _ in range(4)],
+            plan_items=["do the thing"],
+        )
+    finally:
+        tools.set_project_root(None)
+    assert state.completion_checks == ["checklist", "failing_command"]
+
+
+def test_a_final_command_that_died_is_not_treated_as_verification(tmp_path, monkeypatch):
+    """A command that timed out or was denied comes back ERROR. Skipping those let an
+    older successful run stand in for the one that actually ended the run: green before
+    the edits, dead after them, reported as verified."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("run_command", {"command": "true"})]),  # green, pre-edit
+                assistant_calls([("write_file", {"path": "n.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "sleep 5", "timeout": 1})]),
+            ]
+            + [assistant_says("done, verified") for _ in range(4)],
+        )
+    finally:
+        tools.set_project_root(None)
+    assert "failing_command" in state.completion_checks
+
+
+def test_the_failure_shown_back_is_the_head_of_the_output(tmp_path, monkeypatch):
+    """A long failure is externalized to an excerpt whose *tail* is the saved-to
+    pointer, so showing the tail shows the machinery instead of the error."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("write_file", {"path": "n.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "echo THE_REAL_FAILURE; exit 1"})]),
+            ]
+            + [assistant_says("all good") for _ in range(4)],
+            run_dir=tmp_path / "runs",
+        )
+    finally:
+        tools.set_project_root(None)
+    checks = [m for m in state.messages if "[completion check]" in str(m.get("content", ""))]
+    assert "THE_REAL_FAILURE" in checks[0]["content"]

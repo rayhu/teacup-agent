@@ -36,6 +36,7 @@ import pathlib
 import re
 from typing import Any
 
+from teacup_agent import tools as tools_mod
 from teacup_agent.model import Model
 
 # --- token estimation --------------------------------------------------------
@@ -72,11 +73,9 @@ def externalize(result: str, run_dir: pathlib.Path, step: int, index: int, name:
     run_dir.mkdir(parents=True, exist_ok=True)
     path = run_dir / f"step{step:02d}_{index}_{name}.txt"
     path.write_text(result, encoding="utf-8")
-    try:
-        rel = path.relative_to(pathlib.Path.cwd())
-    except ValueError:
-        # The run dir is outside the project, so read_file — which refuses every path
-        # outside its own root — cannot open what we just wrote. The excerpt-plus-path
+    rel = _readable_pointer(path)
+    if rel is None:
+        # read_file cannot open what we just wrote. The excerpt-plus-path
         # bargain only works if the model can actually collect the rest, and this whole
         # function is worth doing only because it can. Keep the file (a human reading
         # the trajectory still wants it) and hand the model the full result instead of
@@ -95,6 +94,32 @@ def externalize(result: str, run_dir: pathlib.Path, step: int, index: int, name:
         f"the full content.]"
     )
 
+
+def _readable_pointer(path: pathlib.Path) -> pathlib.Path | None:
+    """The path to hand the model, or None if read_file would refuse to open it.
+
+    This asks read_file's own question rather than a lookalike. The obvious test —
+    `path.relative_to(pathlib.Path.cwd())` — is wrong three ways, and the first is not
+    an edge case but the default: cli.py builds `runs/<timestamp>`, a *relative* path,
+    and a relative path is never a subpath of an absolute cwd, so relative_to() raises
+    for every ordinary CLI run. An unresolved absolute run dir (`/tmp/x` where cwd is
+    `/private/tmp/x`) fails the same way. And --project-root moves read_file's boundary
+    off cwd entirely, so a cwd comparison can say "reachable" about a path read_file
+    will still reject.
+
+    tools._get_project_root() is that boundary, and _is_denied is the second half of
+    the same guard: `runs/` is deliberately kept off the deny-list so externalized
+    results stay readable, but asking rather than assuming is what keeps this honest if
+    that ever changes.
+    """
+    root = tools_mod._get_project_root()
+    resolved = (root / path).resolve() if not path.is_absolute() else path.resolve()
+    if not resolved.is_relative_to(root):
+        return None
+    rel = resolved.relative_to(root)
+    if tools_mod._is_denied(rel):
+        return None
+    return rel
 
 # --- compact: find a safe cut point, replace early context with one summary ---
 
