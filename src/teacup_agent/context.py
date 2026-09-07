@@ -75,7 +75,15 @@ def externalize(result: str, run_dir: pathlib.Path, step: int, index: int, name:
     path.write_text(result, encoding="utf-8")
     rel = _readable_pointer(path)
     if rel is None:
-        # read_file cannot open what we just wrote. The excerpt-plus-path
+        # read_file cannot open what we just wrote.
+        #
+        # The cost of this branch, stated rather than hidden: the full result goes into
+        # the context unshrunk, and compaction does not catch it on this turn — it is
+        # checked at the top of the *next* one, against the previous request's token
+        # count. A single result large enough to overflow the window would therefore end
+        # the run with an error rather than being compacted. That is a worse failure than
+        # a truncated read, but a much rarer one, and it is loud where the truncation was
+        # silent. The real answer is to give the agent a run dir it can reach. The excerpt-plus-path
         # bargain only works if the model can actually collect the rest, and this whole
         # function is worth doing only because it can. Keep the file (a human reading
         # the trajectory still wants it) and hand the model the full result instead of

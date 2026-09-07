@@ -157,26 +157,24 @@ def _coding_run(replies, *, approve=lambda call, spec: True, plan_items=None, ru
     `approve` defaults to allow: the point of these tests is what the model does with
     a working tool, not the approval gate (denied calls are covered in test_hooks).
     """
-    from teacup_agent import coding_tools
-
-    coding_tools.enable()
-    try:
-        model = (
-            ScriptedWithSummarizer(list(replies), plan_items=plan_items)
-            if plan_items
-            else ScriptedModel(replies)
-        )
-        return loop.run(
-            "make the change",
-            model,
-            memory=NullMemory(),
-            coding_tools=True,
-            plan=bool(plan_items),
-            approve=approve,
-            run_dir=run_dir,
-        )
-    finally:
-        coding_tools.disable()
+    # No explicit coding_tools.enable() here: loop.run(coding_tools=True) registers and
+    # unregisters them itself, and doing both left the module-global REGISTRY enabled
+    # and disabled twice per test — exactly the double-registration coding_tools.py's
+    # docstring warns about.
+    model = (
+        ScriptedWithSummarizer(list(replies), plan_items=plan_items)
+        if plan_items
+        else ScriptedModel(replies)
+    )
+    return loop.run(
+        "make the change",
+        model,
+        memory=NullMemory(),
+        coding_tools=True,
+        plan=bool(plan_items),
+        approve=approve,
+        run_dir=run_dir,
+    )
 
 
 def test_finishing_without_changing_a_file_is_pushed_back_once():
