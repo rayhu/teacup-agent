@@ -216,6 +216,81 @@ def _search_web_backend(query: str, max_results: int) -> str:
     return "\n".join(lines)
 
 
+
+# The hosted backend, and why it is opt-in rather than the default. ddgs scrapes a
+# search page: free, key-less, no account, and average at both quality and stability
+# — which is exactly right for `auto`, because `auto` is what runs when nobody has
+# configured anything. A hosted search is better on both counts and costs real money
+# per call, so it is selected explicitly and never fallen back *into*: a mode that
+# silently starts spending is a worse surprise than a mediocre result.
+_HOSTED_MODEL_ENV = "TEACUP_AGENT_SEARCH_MODEL"
+_HOSTED_DEFAULT_MODEL = "gpt-5-mini"
+
+
+def _search_hosted_backend(query: str, max_results: int) -> str:
+    """The model provider's own hosted web search, via the Responses API.
+
+    Returns the same title/url/snippet shape the ddgs backend does, so nothing
+    downstream can tell which backend answered — plus the synthesis the hosted tool
+    produces, which ddgs has no equivalent for. Sources come from the response's
+    `url_citation` annotations rather than from parsing the prose: a citation the API
+    attached is a link it actually used, where a URL scraped out of the text is a
+    string the model may have written from memory.
+
+    No throttling here, unlike the scraper: this is a metered API being called
+    normally, not a public page being polled faster than it likes.
+    """
+    from openai import OpenAI  # lazy, same as the ddgs import above
+
+    if not os.getenv("OPENAI_API_KEY"):
+        raise RuntimeError(
+            "hosted search needs OPENAI_API_KEY. Set it, or use "
+            "TEACUP_AGENT_SEARCH=auto for the key-less backend."
+        )
+    model = os.getenv(_HOSTED_MODEL_ENV, _HOSTED_DEFAULT_MODEL)
+    resp = OpenAI().responses.create(
+        model=model,
+        tools=[{"type": "web_search"}],
+        input=(
+            f"Search the web for: {query}\n\n"
+            f"Summarise what you find in a few sentences, citing your sources. "
+            f"Prefer the {max_results} most relevant and most recent results."
+        ),
+    )
+
+    summary = (getattr(resp, "output_text", "") or "").strip()
+    sources = _url_citations(resp)[:max_results]
+    if not summary and not sources:
+        return f"No web results for {query!r}."
+
+    lines = []
+    for i, (title, url) in enumerate(sources, 1):
+        lines.append(f"{i}. {title}\n   {url}")
+    parts = []
+    if lines:
+        parts.append("\n".join(lines))
+    if summary:
+        parts.append(f"Summary (hosted search, {model}):\n{summary}")
+    return "\n\n".join(parts)
+
+
+def _url_citations(resp: Any) -> list[tuple[str, str]]:
+    """(title, url) pairs from the response's annotations, de-duplicated in order."""
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for item in getattr(resp, "output", None) or []:
+        for block in getattr(item, "content", None) or []:
+            for ann in getattr(block, "annotations", None) or []:
+                if getattr(ann, "type", None) != "url_citation":
+                    continue
+                url = (getattr(ann, "url", "") or "").strip()
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                out.append(((getattr(ann, "title", "") or url).strip(), url))
+    return out
+
+
 @tool(
     description=(
         "Search the web. Returns a list of results with title, link and snippet. "
@@ -239,17 +314,36 @@ def _search_web_backend(query: str, max_results: int) -> str:
 def search_web(query: str, max_results: int = 5) -> str:
     """Three modes, selected by the TEACUP_AGENT_SEARCH environment variable:
 
-    auto (default): use the network; on failure fall back to the offline corpus
-                    and say why.
-    web           : network only; on failure return an error (so the model never
+    auto (default): the key-less scraper; on failure fall back to the offline
+                    corpus and say why.
+    web           : scraper only; on failure return an error (so the model never
                     reads a broken search as "this does not exist").
+    hosted        : the provider's own hosted web search (better results, costs
+                    money per call, needs OPENAI_API_KEY). Errors are reported,
+                    never degraded into the corpus — a paid backend quietly
+                    answering from a local corpus is worse than saying it failed.
     offline       : local corpus only, zero network calls (evals and unit tests).
+
+    `auto` deliberately does not reach for `hosted` even when a key is present:
+    picking the backend that costs money should be a decision someone made, not
+    one an unset environment variable made for them.
     """
     mode = os.getenv("TEACUP_AGENT_SEARCH", "auto").lower()
     max_results = max(1, min(int(max_results), 10))
 
     if mode == "offline":
         return _search_corpus(query)
+
+    if mode == "hosted":
+        try:
+            return _search_hosted_backend(query, max_results)
+        except Exception as e:
+            return (
+                f"ERROR: hosted search failed ({type(e).__name__}: {e}). This does "
+                "**not** mean the information does not exist, only that the search "
+                "channel is temporarily unavailable. Retry later, reword the query, "
+                "or answer from what you already have and mark this item unverified."
+            )
 
     try:
         return _search_web_backend(query, max_results)

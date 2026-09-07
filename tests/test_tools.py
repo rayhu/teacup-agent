@@ -1,4 +1,5 @@
 import json
+from types import SimpleNamespace
 
 import pytest
 
@@ -243,3 +244,109 @@ def test_project_root_can_be_set_independent_of_the_launch_directory(tmp_path, m
 
     assert outside.startswith("ERROR:") and "should not be reachable" not in outside
     assert inside == "readable"
+
+
+# --- hosted search backend (#11) ---------------------------------------------
+
+
+class _Ann(SimpleNamespace):
+    pass
+
+
+def _hosted_response(summary, citations):
+    """A Responses object shaped the way the hosted web_search tool returns one."""
+    anns = [_Ann(type="url_citation", url=u, title=t) for t, u in citations]
+    block = SimpleNamespace(annotations=anns)
+    return SimpleNamespace(output_text=summary, output=[SimpleNamespace(content=[block])])
+
+
+def _fake_openai(resp, monkeypatch):
+    sent = {}
+
+    class Responses:
+        def create(self, **kwargs):
+            sent.update(kwargs)
+            return resp
+
+    class FakeOpenAI:
+        def __init__(self, *a, **k):
+            self.responses = Responses()
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    return sent
+
+
+def test_hosted_search_returns_sources_and_a_summary(monkeypatch):
+    resp = _hosted_response(
+        "NVIDIA sells GPUs.", [("NVIDIA Q3", "https://a.example"), ("Analysis", "https://b.example")]
+    )
+    sent = _fake_openai(resp, monkeypatch)
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    out = tools.search_web("nvidia strategy")
+    assert "https://a.example" in out and "https://b.example" in out
+    assert "NVIDIA sells GPUs." in out
+    assert sent["tools"] == [{"type": "web_search"}]  # the hosted tool, not ours
+
+
+def test_hosted_search_uses_citations_not_urls_scraped_from_the_prose(monkeypatch):
+    """A citation the API attached is a link it actually used; a URL parsed out of
+    the text is a string the model may have written from memory."""
+    resp = _hosted_response("See https://hallucinated.example for details.", [])
+    _fake_openai(resp, monkeypatch)
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    out = tools.search_web("q")
+    assert "1. " not in out  # no source list, because there were no citations
+    assert "Summary" in out
+
+
+def test_hosted_search_respects_max_results(monkeypatch):
+    cites = [(f"t{i}", f"https://{i}.example") for i in range(10)]
+    _fake_openai(_hosted_response("s", cites), monkeypatch)
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    out = tools.search_web("q", max_results=3)
+    assert out.count("https://") == 3
+
+
+def test_hosted_search_failure_is_an_error_never_the_offline_corpus(monkeypatch):
+    """A paid backend quietly answering from a local corpus is worse than saying it
+    failed — the model cannot tell it is reading a fixture."""
+    class Boom:
+        def __init__(self, *a, **k):
+            raise RuntimeError("upstream 503")
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", Boom)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    out = tools.search_web("q")
+    assert out.startswith("ERROR: hosted search failed")
+    assert "does **not** mean the information does not exist" in out
+
+
+def test_hosted_search_without_a_key_says_so(monkeypatch):
+    monkeypatch.delenv("OPENAI_API_KEY", raising=False)
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+    out = tools.search_web("q")
+    assert out.startswith("ERROR: hosted search failed")
+    assert "OPENAI_API_KEY" in out
+
+
+def test_auto_never_reaches_for_the_paid_backend(monkeypatch):
+    """Picking the backend that costs money should be a decision someone made, not
+    one an unset environment variable made for them."""
+    called = []
+    monkeypatch.setattr(tools, "_search_hosted_backend", lambda *a: called.append(a) or "hosted")
+    monkeypatch.setattr(tools, "_search_web_backend", lambda *a: "scraped")
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # a key IS present
+    monkeypatch.delenv("TEACUP_AGENT_SEARCH", raising=False)
+
+    assert tools.search_web("q") == "scraped"
+    assert called == []

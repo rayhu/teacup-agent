@@ -325,3 +325,104 @@ def test_main_config_wires_delegate_a2a_through_the_cli(tmp_path, monkeypatch):
         m for m in scripted.calls[-1] if m.get("name") == "delegate_a2a"
     )
     assert tool_result["content"] == "echo: ping"
+
+
+# --- per-profile price overrides (#16) ---------------------------------------
+
+_PRICED = """
+models:
+  default: local
+  profiles:
+    local:
+      provider: openai-compatible
+      api: chat
+      model: qwen3-coder
+      base_url: http://localhost:8000/v1
+      price_input: 0.10
+      price_cached: 0.01
+      price_output: 0.30
+runtime:
+  plan: off
+  run_dir: off
+"""
+
+
+def test_a_profile_can_state_its_own_prices(tmp_path):
+    cfg = agent_config.load(_write(tmp_path, _PRICED))
+    profile = cfg.models["local"]
+    assert profile.prices() == (0.10, 0.01, 0.30)
+
+
+def test_a_profile_without_prices_falls_back_to_the_table(tmp_path):
+    cfg = agent_config.load(_write(tmp_path, MINIMAL))
+    assert cfg.models["main"].prices() is None
+
+
+def test_stated_prices_actually_change_what_a_run_is_charged(tmp_path):
+    """The definition of done: the override has to reach cost accounting, not just
+    sit in the config. `qwen3-coder` is not in model.PRICES, so without an override
+    it is billed at _DEFAULT_PRICE — gpt-5's rate, for a model that is not gpt-5."""
+    from teacup_agent import model as model_mod
+
+    guessed = model_mod.estimate_cost("qwen3-coder", 1_000_000, 1_000_000)
+    cfg = agent_config.load(_write(tmp_path, _PRICED))
+    stated = model_mod.estimate_cost(
+        "qwen3-coder", 1_000_000, 1_000_000, prices=cfg.models["local"].prices()
+    )
+    assert guessed == pytest.approx(1.25 + 10.00)  # the table's fallback guess
+    assert stated == pytest.approx(0.10 + 0.30)  # what the endpoint actually charges
+    assert stated < guessed
+
+
+def test_cached_tokens_are_billed_at_the_stated_cached_rate(tmp_path):
+    from teacup_agent import model as model_mod
+
+    prices = agent_config.load(_write(tmp_path, _PRICED)).models["local"].prices()
+    # 1M input of which 1M served from cache, no output: the cached rate, not the input one.
+    assert model_mod.estimate_cost("x", 1_000_000, 0, 1_000_000, prices) == pytest.approx(0.01)
+
+
+def test_half_a_price_is_refused_at_load_time(tmp_path):
+    """A profile stating only price_input would be charged its own input rate and
+    gpt-5's output rate — a plausible-looking number that is simply wrong."""
+    partial = _PRICED.replace("      price_output: 0.30\n", "")
+    with pytest.raises(ValueError, match="all three prices or none"):
+        agent_config.load(_write(tmp_path, partial))
+
+
+def test_a_negative_price_is_refused(tmp_path):
+    with pytest.raises(ValueError, match="must not be negative"):
+        agent_config.load(_write(tmp_path, _PRICED.replace("0.30", "-1")))
+
+
+# --- provider: anthropic (#16) -----------------------------------------------
+
+_ANTHROPIC = """
+models:
+  default: claude
+  profiles:
+    claude:
+      provider: anthropic
+      model: claude-sonnet-5
+      price_input: 3.0
+      price_cached: 0.3
+      price_output: 15.0
+runtime:
+  plan: off
+  run_dir: off
+"""
+
+
+def test_an_anthropic_profile_loads_without_the_sdk_installed(tmp_path):
+    """Parsing must not import the SDK — it is an optional extra, and a config file
+    is read by tooling that has no intention of making a call."""
+    cfg = agent_config.load(_write(tmp_path, _ANTHROPIC))
+    profile = cfg.models["claude"]
+    assert profile.provider == "anthropic"
+    assert profile.prices() == (3.0, 0.3, 15.0)
+
+
+def test_an_unknown_provider_is_refused_at_load_time(tmp_path):
+    bad = _ANTHROPIC.replace("provider: anthropic", "provider: gemini")
+    with pytest.raises(ValueError, match="provider must be"):
+        agent_config.load(_write(tmp_path, bad))

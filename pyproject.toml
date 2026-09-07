@@ -27,6 +27,9 @@ dependencies = [
 # Only teacup-agent-serve needs this (Starlette + uvicorn); installed via
 # `uv sync --extra a2a-server`, never by default — see docs/roadmap.md #18.
 a2a-server = ["a2a-sdk[http-server]>=1.1.2"]
+# Only a `provider: anthropic` model profile needs this — the OpenAI paths, the
+# offline demo and the whole test suite never import it. See docs/roadmap.md #16.
+anthropic = ["anthropic>=0.40"]
 
 [project.urls]
 Homepage = "https://github.com/rayhu/teacup-agent"

@@ -462,14 +462,31 @@ per-turn cap applies), and passing curated context down instead of a blank slate
 
 ---
 
-### 11. A better search backend
+### 11. A better search backend — DONE (2026-09-06)
 
-**Now**: `search_web` scrapes DuckDuckGo through ddgs — free and key-less, but average
+**Was**: `search_web` scraped DuckDuckGo through ddgs — free and key-less, but average
 in both quality and stability.
 
-**Options**: the model's own hosted web search (via the Responses API, see #1), or a
-dedicated agentic search API. The interface does not change; only the inside of
-`search_web` does — the three-mode structure (auto/web/offline) is already there.
+**Built**: the model's own hosted web search, via the Responses API's `web_search` tool,
+as a fourth mode on the existing switch: `TEACUP_AGENT_SEARCH=hosted`
+(`TEACUP_AGENT_SEARCH_MODEL` picks the model, default `gpt-5-mini`). The tool's
+interface is unchanged — same name, same arguments, same title/url/snippet shape out —
+so nothing downstream can tell which backend answered. What the hosted path adds on top
+is a synthesis, which the scraper has no equivalent for.
+
+Sources come from the response's `url_citation` annotations, not from parsing URLs out
+of the prose: a citation the API attached is a link it actually used, where a URL
+scraped from generated text is a string the model may have written from memory. That
+distinction is the same one #11 existed to fix, one level down.
+
+**Two decisions worth keeping.** `auto` does **not** reach for the hosted backend even
+when `OPENAI_API_KEY` is set. Choosing the backend that costs money per call should be a
+decision someone made, not one an unset environment variable made for them, and `auto`
+is by definition what runs when nobody configured anything. And `hosted` failures are
+reported as errors, never degraded into the offline corpus: a paid backend quietly
+answering from a local fixture is worse than one that says it failed, because the model
+cannot tell the difference. That is the same rule the scraper path already followed —
+"the search failed" and "there is nothing to find" are completely different statements.
 
 ---
 
@@ -778,7 +795,7 @@ uv run teacup-agent                    # offline demo unaffected, still instant
 
 ---
 
-### 16. Multi-provider models: price overrides and a native second protocol
+### 16. Multi-provider models: price overrides and a native second protocol — DONE (2026-09-06)
 
 **Now**: `#15` already reaches any OpenAI-compatible endpoint (vLLM, Ollama, OpenRouter)
 via `base_url`, for free. What is left is smaller than originally scoped:
@@ -795,6 +812,31 @@ via `base_url`, for free. What is left is smaller than originally scoped:
 **Definition of done**: a model profile with `price_input`/`price_cached`/`price_output`
 changes `state.snapshot()`'s cost accounting; an `AnthropicModel` class round-trips a
 tool call through the Messages API shape with a test pinning its `tool_result_item()`.
+
+**Built**, both halves.
+
+*Prices*: `ModelProfile` takes the three rates and `estimate_cost()` takes an optional
+override that wins over the name-keyed table. All three or none, enforced at load time —
+a profile stating only `price_input` would otherwise be charged its own input rate and
+gpt-5's output rate, and the resulting number looks entirely plausible. That was the
+whole point: `_DEFAULT_PRICE` silently attaches gpt-5's price to whatever a `base_url`
+happens to be pointing at.
+
+*Anthropic*: `AnthropicModel` behind the unchanged `Model` Protocol, no loop change,
+behind an `anthropic` install extra that nothing else imports. Five shape differences are
+sealed inside it — the system prompt is a parameter rather than a message, tools carry
+`input_schema` rather than a nested `function`, output is a block list, a tool result is
+a `user` message keyed by `tool_use_id`, and consecutive same-role turns must be merged
+before sending. The last two are the ones that would have leaked: the loop writes several
+`role: "system"` entries mid-run (status notes, completion push-backs), and this API
+takes neither a system role nor two user turns in a row. Only the *first* system entry
+becomes `system=`; the later ones stay where they are as user turns, because they are
+feedback about the turn that just happened and hoisting them to the top moves them away
+from it.
+
+Anthropic models are deliberately **not** added to `PRICES`. Inventing rates that go
+stale is worse than the honest fallback plus the override this same item just built —
+give the profile its three prices and the accounting is exact.
 
 ---
 

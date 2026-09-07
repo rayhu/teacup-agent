@@ -28,7 +28,8 @@ Environment variables:
 | Variable | Read by | Meaning |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | `model.py`, via `.env` | required only for `--live` |
-| `TEACUP_AGENT_SEARCH` | `tools.py` | `auto` \| `web` \| `offline`; set by `cli.py` from `--search` |
+| `TEACUP_AGENT_SEARCH` | `tools.py` | `auto` \| `web` \| `hosted` \| `offline`; set by `cli.py` from `--search` |
+| `TEACUP_AGENT_SEARCH_MODEL` | `tools.py` | model behind `hosted` search, default `gpt-5-mini` |
 | any name in `api_key_env` | `agent_config.py` | per-profile key when running `--config agent.yaml` |
 
 ## 2. CLI surface
@@ -234,6 +235,12 @@ is the **total** input, cache hits included:
 | `gpt-4.1-mini` | 0.40 | 0.10 | 1.60 |
 | anything else (`_DEFAULT_PRICE`) | 1.25 | 0.125 | 10.00 |
 
+A profile may state its own rates instead (`price_input`/`price_cached`/`price_output`,
+all three or none), and they win over this table. The table only knows OpenAI's own
+models, so the fallback row silently attaches gpt-5's price to whatever a `base_url` is
+pointing at — accurate-looking and wrong. Anthropic models are deliberately absent for
+the same reason: an invented rate that goes stale is worse than one the profile states.
+
 An unknown model is priced as `gpt-5` — deliberately pessimistic, so the budget brake
 never under-charges. Prices are a local table and go stale; they bound spending, they do
 not bill.
@@ -283,7 +290,9 @@ typo — is therefore treated as `done`. The enum is advisory, not enforced.
 
 ### `search_web` modes
 
-Selected by `TEACUP_AGENT_SEARCH`: `web` always hits the network, `offline` always uses a
+Selected by `TEACUP_AGENT_SEARCH`: `web` always hits the key-less scraper, `hosted`
+uses the provider's own web search (costs money per call, needs `OPENAI_API_KEY`, and
+`auto` never falls back *into* it), `offline` always uses a
 built-in corpus and makes zero network calls, `auto` tries the network and falls back
 to the corpus **only when the corpus has something** — a broken search over an empty
 corpus returns an ERROR, never "no results".
@@ -500,7 +509,7 @@ Secrets never go in it — name an env var with `api_key_env`, or embed `${VAR}`
 | --- | --- |
 | `models.default` | the profile every unmapped role falls back to |
 | `models.roles` | `main` \| `plan` \| `compact` \| `reflect` \| `judge` \| `subagent` -> a profile name. Omit the block for single-model behaviour |
-| `models.profiles.<name>` | `provider` (`openai` \| `openai-compatible`), `api` (`responses` \| `chat`), `model`, `api_key_env`, optional `base_url`, optional `reasoning_effort` |
+| `models.profiles.<name>` | `provider` (`openai` \| `openai-compatible` \| `anthropic`), `api` (`responses` \| `chat`), `model`, `api_key_env`, optional `base_url`, optional `reasoning_effort`, optional `price_input`/`price_cached`/`price_output` (all three or none) |
 | `mcp` | the same per-server shape as `mcp.json`'s `servers`, nested one level deeper |
 | `tools` | `exclude: [names]`, `subagents.enabled`, `subagents.max_steps` |
 | `skills` | `dir:` a path, or `off` |

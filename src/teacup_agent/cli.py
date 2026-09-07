@@ -266,10 +266,11 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--search",
-        choices=["auto", "web", "offline"],
+        choices=["auto", "web", "hosted", "offline"],
         default=None,
-        help="search mode; defaults to auto (real network) with --live and offline "
-        "(zero network calls) for the offline demo",
+        help="search mode; defaults to auto (key-less scraper) with --live and "
+        "offline (zero network calls) for the offline demo. hosted uses the "
+        "provider's own web search: better results, costs money per call",
     )
     p.add_argument(
         "--tool-timeout",
