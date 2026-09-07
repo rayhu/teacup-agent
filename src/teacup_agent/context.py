@@ -38,7 +38,7 @@ import re
 from typing import Any
 
 from teacup_agent import tools as tools_mod
-from teacup_agent.model import Model
+from teacup_agent.model import Model, content_blocks
 
 # --- token estimation --------------------------------------------------------
 
@@ -133,13 +133,6 @@ def _readable_pointer(path: pathlib.Path) -> pathlib.Path | None:
 # --- compact: find a safe cut point, replace early context with one summary ---
 
 
-def _blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:
-    """A message's content as a list of blocks. Empty for the string-bodied shapes,
-    so a caller can ask any message without checking which backend wrote it."""
-    content = msg.get("content")
-    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
-
-
 def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
     """Every position where no tool call is left dangling — the only places where
     cutting cannot break the message protocol.
@@ -175,14 +168,14 @@ def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
                 open_ids.add(tc["id"])
             # Messages-API shape: the call is a block *inside* the assistant turn's
             # content list, not a sibling `tool_calls` field.
-            for block in _blocks(msg):
+            for block in content_blocks(msg):
                 if block.get("type") == "tool_use":
                     open_ids.add(block["id"])
         elif msg.get("role") == "tool":
             open_ids.discard(msg.get("tool_call_id"))
         elif msg.get("role") == "user":
             # ...and the result comes back as a *user* turn, not a role of its own.
-            for block in _blocks(msg):
+            for block in content_blocks(msg):
                 if block.get("type") == "tool_result":
                     open_ids.discard(block.get("tool_use_id"))
         elif msg.get("type") == "function_call":

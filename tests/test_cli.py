@@ -38,3 +38,33 @@ def test_json_implies_quiet(tmp_path, monkeypatch, capsys):
 
     assert human_lines > 1
     assert len(json_lines) == 1
+
+
+# --- the hosted-search money gate --------------------------------------------
+
+
+def test_hosted_search_is_refused_without_live():
+    """--live is this repo's money gate, and the offline demo really does call
+    search_web — so this combination would bill a real API call from the path README
+    and --help describe as key-less and instant."""
+    assert "needs --live" in cli._search_refusal("hosted", live=False)
+
+
+def test_hosted_search_is_allowed_with_live():
+    assert cli._search_refusal("hosted", live=True) == ""
+
+
+def test_every_free_mode_is_allowed_either_way():
+    for mode in (None, "auto", "web", "offline"):
+        assert cli._search_refusal(mode, live=False) == ""
+        assert cli._search_refusal(mode, live=True) == ""
+
+
+def test_the_refusal_honours_the_json_contract(capsys):
+    """docs/integration.md promises exactly one JSON object on stdout and an exit_code
+    field. A bare SystemExit would hand an external caller empty stdout to guess at."""
+    code = cli.main(["x", "--search", "hosted", "--json"])
+    out = capsys.readouterr().out.strip()
+    payload = json.loads(out)  # one object, parseable
+    assert code == 2 and payload["exit_code"] == 2
+    assert payload["status"] == "error" and "needs --live" in payload["answer"]

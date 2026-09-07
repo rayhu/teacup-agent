@@ -383,13 +383,57 @@ class ScriptedModel:
 
 
 
+def content_blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """A message's content as a list of blocks; empty for the string-bodied shapes.
+
+    One definition, deliberately. Three modules have to agree on what a content block
+    is — this one, `context.safe_cut_points`/`render`, and `evals`'s protocol guard —
+    and three copies drifting apart is the exact failure this backend already caused
+    once: a scanner that did not recognise a shape reported everything fine.
+    """
+    content = msg.get("content")
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
 def _has_tool_blocks(messages: list[dict[str, Any]]) -> bool:
     """Whether a Messages-API history contains any tool_use or tool_result block."""
     return any(
-        isinstance(block, dict) and block.get("type") in ("tool_use", "tool_result")
+        block.get("type") in ("tool_use", "tool_result")
+        for m in messages
+        for block in content_blocks(m)
+    )
+
+
+
+def _tools_for_history(
+    messages: list[dict[str, Any]], known: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Definitions covering every tool_use name in `messages`.
+
+    Real definitions where we still have them, a minimal stand-in where we do not. The
+    stand-in exists only to satisfy "requests which include tool_use or tool_result
+    blocks must define tools" on a turn that is sending `tool_choice: none` — nothing
+    can be called, so a placeholder description costs the model nothing and an empty
+    schema is the honest shape for a tool we no longer hold the spec for.
+    """
+    by_name = {t["name"]: t for t in known}
+    used = [
+        block["name"]
         for m in messages
         for block in (m.get("content") or [])
-    )
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name")
+    ]
+    out = list(known)
+    for name in dict.fromkeys(used):  # de-duplicated, order preserved
+        if name not in by_name:
+            out.append(
+                {
+                    "name": name,
+                    "description": "(previously available; not callable on this turn)",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            )
+    return out
 
 
 class AnthropicModel:
@@ -535,7 +579,7 @@ class AnthropicModel:
         if tools:
             self._last_tools = self._tools(tools)
             kwargs["tools"] = self._last_tools
-        elif self._last_tools and _has_tool_blocks(msgs):
+        elif _has_tool_blocks(msgs):
             # "An empty tool list cannot be ignored" is the loop's way of ending a run
             # without letting the model start more work (loop.py's forced wrap-up, and
             # finalize()). Dropping the array outright is not how to say that here: the
@@ -544,7 +588,15 @@ class AnthropicModel:
             # budget or time ceiling would die on the turn meant to rescue its answer.
             # Send the definitions the conversation already contains, and forbid their
             # use explicitly.
-            kwargs["tools"] = self._last_tools
+            #
+            # Derived from the history, not from what this instance happens to remember.
+            # `_last_tools` alone was wrong in two reachable ways: a resumed run builds a
+            # *fresh* model over a history full of tool blocks, so the memory is empty and
+            # the key was dropped again — on exactly the path a run that hit its ceiling
+            # takes next — and `routing.Router.child()` shares instances, so a subagent
+            # overwrites the parent's memory with its own restricted list. The history is
+            # the thing the API is actually validating against, so it is what to read.
+            kwargs["tools"] = _tools_for_history(msgs, self._last_tools)
             kwargs["tool_choice"] = {"type": "none"}
 
         resp = self.client.messages.create(**kwargs)

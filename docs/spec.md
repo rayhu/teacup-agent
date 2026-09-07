@@ -47,7 +47,7 @@ Environment variables:
 | `--max-tool-calls` | int | `3` | tool calls executed per turn; `0` = unlimited |
 | `--budget` | float | `0.05` | spending ceiling in USD |
 | `--deadline` | float | `600.0` | wall-clock ceiling in seconds; `0` = unlimited |
-| `--search` | `auto` \| `web` \| `offline` | `auto` with `--live`, else `offline` | search backend mode |
+| `--search` | `auto` \| `web` \| `hosted` \| `offline` | `auto` with `--live`, else `offline` | search backend mode. `hosted` costs money per call and is refused without `--live` (exit 2); the `--config` path takes it from `runtime.search` and needs no flag, since a config run is real by construction |
 | `--tool-timeout` | float | `30.0` | per-tool-call timeout in seconds |
 | `--context-limit` | int | `30000` | compact once the context exceeds this estimate |
 | `--run-dir` | str | `runs/<timestamp>` | state + externalized results; `off` disables both |
@@ -272,7 +272,7 @@ runs one call and **never raises** — every failure comes back as an `ERROR: ..
 
 | Tool | Parameters | Approval | Notes |
 | --- | --- | --- | --- |
-| `search_web` | `query`, `max_results=5` | no | three modes, below |
+| `search_web` | `query`, `max_results=5` | no | four modes, below |
 | `calculate` | `expression` | no | AST-walked arithmetic, not `eval` |
 | `read_file` | `path` | no | project-relative, full content (§18's `EXTERNALIZE_OVER` truncates, not this tool), deny-list |
 | `remember` | `fact` | no | writes long-term memory |
@@ -292,7 +292,8 @@ typo — is therefore treated as `done`. The enum is advisory, not enforced.
 ### `search_web` modes
 
 Selected by `TEACUP_AGENT_SEARCH`: `web` always hits the key-less scraper, `hosted`
-uses the provider's own web search (costs money per call, needs `OPENAI_API_KEY`, and
+uses OpenAI's web search — always OpenAI, whatever provider the model profile names
+(costs money per call, needs `OPENAI_API_KEY`, and
 `auto` never falls back *into* it), `offline` always uses a
 built-in corpus and makes zero network calls, `auto` tries the network and falls back
 to the corpus **only when the corpus has something** — a broken search over an empty

@@ -255,8 +255,26 @@ def take_hosted_spend() -> float:
     return spent
 
 
+def reset_hosted_spend() -> None:
+    """Drop anything not yet collected. Called at the start of a run.
+
+    The accumulator is module state and a process runs many agents — bench.py's whole
+    matrix, an A2A server answering task after task. A search whose thread finished
+    after its own run ended (execute_calls abandons a timed-out tool rather than
+    killing it) would otherwise be charged to whichever run happened to drain next,
+    which is both a wrong number and a wrong run.
+    """
+    global _hosted_spend
+    _hosted_spend = 0.0
+
+
 def _search_hosted_backend(query: str, max_results: int) -> str:
-    """The model provider's own hosted web search, via the Responses API.
+    """OpenAI's hosted web search, via the Responses API.
+
+    OpenAI's specifically, not "whatever provider this run is using": it builds its own
+    client and reads OPENAI_API_KEY, so a run whose model profile points at Anthropic or
+    a local endpoint still searches through OpenAI — or fails here for want of a key it
+    was never told it needed.
 
     Same tool, same arguments, same numbered list of sources — but not byte-identical
     output: this backend has no per-source snippet, and carries a summary the scraper
@@ -291,12 +309,28 @@ def _search_hosted_backend(query: str, max_results: int) -> str:
             f"Prefer the {max_results} most relevant and most recent results."
         ),
     )
-    _hosted_spend += _HOSTED_CALL_FEE + _hosted_token_cost(resp, model)
+    done, broken = _search_actions(resp)
+    # Billed per search action, not per API call: a reasoning model routinely issues
+    # several in one response, and a response that searched none should cost none. The
+    # fee is charged after counting, so the "it never searched" branch below no longer
+    # bills for a search that did not happen.
+    _hosted_spend += _HOSTED_CALL_FEE * done + _hosted_token_cost(resp, model)
 
-    if not _search_actually_ran(resp):
-        # A successful API call in which no search happened. Saying "no results" here
-        # would tell the model the information does not exist, which is the single
-        # distinction this repo has been bitten by before.
+    if broken:
+        # The API says the search itself failed or was cut short. This is the
+        # distinction that has caused real wrong answers here, and the first version of
+        # this backend reintroduced it one layer down by only asking *whether* a search
+        # item existed and never what it said.
+        return (
+            f"ERROR: the hosted search did not complete ({broken}). This does **not** "
+            "mean the information does not exist, only that the search channel is "
+            "unhealthy. Retry later, or reword the query."
+        )
+
+    if not done:
+        # A successful API call in which no search happened at all — the model answered
+        # from memory. Saying "no results" here would tell it the information does not
+        # exist, which is the same failure in a different coat.
         return (
             "ERROR: the hosted search did not run a query (the model answered without "
             "searching). This does **not** mean the information does not exist. Retry, "
@@ -305,11 +339,14 @@ def _search_hosted_backend(query: str, max_results: int) -> str:
 
     sources = _url_citations(resp)[:max_results]
     if not sources:
-        # A search ran and produced nothing citable. Deliberately *not* returning the
-        # summary: without a citation there is no way to tell text the search grounded
-        # from text the model wrote from memory, and an uncited paragraph presented as a
-        # search result is exactly the failure this backend was built to remove.
-        return f"No web results for {query!r}."
+        # A search ran, completed, and produced nothing citable. Deliberately *not*
+        # returning the summary: without a citation there is no way to tell text the
+        # search grounded from text the model wrote from memory, and an uncited
+        # paragraph presented as a search result is the failure this backend removes.
+        return (
+            f"The hosted search ran and returned no citable sources for {query!r}. "
+            "(The search itself worked; treat this as 'nothing found', not as an error.)"
+        )
 
     summary = (getattr(resp, "output_text", "") or "").strip()
     lines = [f"{i}. {title}\n   {url}" for i, (title, url) in enumerate(sources, 1)]
@@ -319,12 +356,25 @@ def _search_hosted_backend(query: str, max_results: int) -> str:
     return "\n\n".join(parts)
 
 
-def _search_actually_ran(resp: Any) -> bool:
-    """Whether the response contains a real web_search_call item."""
-    return any(
-        getattr(item, "type", None) == "web_search_call"
-        for item in (getattr(resp, "output", None) or [])
-    )
+def _search_actions(resp: Any) -> tuple[int, str]:
+    """(completed searches, why-it-is-broken) from the response's web_search_call items.
+
+    The status field is the point. It is documented as one of in_progress, searching,
+    completed, failed or incomplete — so "a web_search_call item exists" and "a search
+    happened" are different claims, and treating the first as the second turns a failed
+    search into "there is nothing to find".
+    """
+    done = 0
+    bad: list[str] = []
+    for item in getattr(resp, "output", None) or []:
+        if getattr(item, "type", None) != "web_search_call":
+            continue
+        status = getattr(item, "status", None) or "completed"
+        if status == "completed":
+            done += 1
+        elif status in ("failed", "incomplete"):
+            bad.append(status)
+    return done, ", ".join(sorted(set(bad)))
 
 
 def _hosted_token_cost(resp: Any, model: str) -> float:
@@ -333,10 +383,12 @@ def _hosted_token_cost(resp: Any, model: str) -> float:
     usage = getattr(resp, "usage", None)
     if usage is None:
         return 0.0
+    details = getattr(usage, "input_tokens_details", None)
     return estimate_cost(
         model,
         getattr(usage, "input_tokens", 0) or 0,
         getattr(usage, "output_tokens", 0) or 0,
+        getattr(details, "cached_tokens", 0) or 0 if details else 0,
     )
 
 
@@ -385,7 +437,8 @@ def search_web(query: str, max_results: int = 5) -> str:
                     corpus and say why.
     web           : scraper only; on failure return an error (so the model never
                     reads a broken search as "this does not exist").
-    hosted        : the provider's own hosted web search (better results, costs
+    hosted        : OpenAI's hosted web search, whatever provider the model
+                    profile names (better results, costs
                     money per call, needs OPENAI_API_KEY). Errors are reported,
                     never degraded into the corpus — a paid backend quietly
                     answering from a local corpus is worse than saying it failed.

@@ -426,3 +426,17 @@ def test_an_unknown_provider_is_refused_at_load_time(tmp_path):
     bad = _ANTHROPIC.replace("provider: anthropic", "provider: gemini")
     with pytest.raises(ValueError, match="provider must be"):
         agent_config.load(_write(tmp_path, bad))
+
+
+def test_runtime_search_is_validated_at_load(tmp_path):
+    """It used to be a free string, so `search: ofline` silently fell through to the
+    network. Now that one mode bills per call, a typo is a money question too."""
+    bad = MINIMAL.replace("  plan: off", "  search: ofline\n  plan: off")
+    with pytest.raises(ValueError, match="runtime.search must be"):
+        agent_config.load(_write(tmp_path, bad))
+
+
+def test_every_real_search_mode_is_accepted(tmp_path):
+    for mode in ("auto", "web", "hosted", "offline"):
+        text = MINIMAL.replace("  plan: off", f"  search: {mode}\n  plan: off")
+        assert agent_config.load(_write(tmp_path, text)).runtime.search == mode

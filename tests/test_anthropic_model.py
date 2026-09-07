@@ -287,3 +287,51 @@ def test_cache_writes_are_counted_not_dropped():
     reply = AnthropicModel(client=client, prices=(3.0, 0.3, 15.0)).complete([], [])
     assert reply.input_tokens == 5010
     assert reply.cost == pytest.approx((5010 * 3.0 + 2 * 15.0) / 1_000_000)
+
+
+def test_the_guard_catches_a_tool_use_with_no_result():
+    """The discriminating input. A well-formed history returns True under both the old
+    and the new scanner, so a test built only on one proves nothing about the fix — an
+    earlier version of this file made exactly that mistake. A *dangling* tool_use is
+    the input where the old scanner said True and the new one says False."""
+    from teacup_agent.evals import tool_results_follow_their_call
+    from teacup_agent.state import AgentState
+
+    s = AgentState(goal="g")
+    s.messages = [
+        {"role": "user", "content": "goal"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "tu_1", "name": "c", "input": {}}]},
+    ]
+    assert not tool_results_follow_their_call(s)
+
+
+def test_the_guard_catches_a_result_for_a_call_that_was_never_announced():
+    """The other half of the new branch: an orphan tool_result. Also old-True/new-False,
+    and also untested until now."""
+    from teacup_agent.evals import tool_results_follow_their_call
+    from teacup_agent.state import AgentState
+
+    s = AgentState(goal="g")
+    s.messages = [
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "never_announced", "content": "2"}]},
+    ]
+    assert not tool_results_follow_their_call(s)
+
+
+def test_the_wrap_up_works_on_a_fresh_model_as_a_resume_builds_one():
+    """_last_tools is per-instance memory guarding a per-history API requirement. A
+    resumed run constructs a *new* model over a history full of tool blocks, so the
+    memory is empty — and that is exactly the path a run that hit its ceiling takes
+    next. The definitions have to come from the history, not from what this object
+    happens to remember."""
+    hist = [
+        {"role": "user", "content": "goal"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "tu_1", "name": "calculate", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "4"}]},
+    ]
+    client, sent = _scripted_client([_blocks({"type": "text", "text": "4"})])
+    AnthropicModel(client=client).complete(hist, [])  # fresh instance, never saw tools
+
+    assert "tools" in sent[0], "a resumed wrap-up dropped the tool definitions -> 400"
+    assert [t["name"] for t in sent[0]["tools"]] == ["calculate"]
+    assert sent[0]["tool_choice"] == {"type": "none"}

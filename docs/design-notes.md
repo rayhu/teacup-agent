@@ -18,7 +18,7 @@ environment variable:
 | --- | --- | --- |
 | `auto` (default) | search the web; on failure fall back to the local corpus and say why | everyday use |
 | `web` | web only; on failure return `ERROR:` | when offline material must not stand in |
-| `hosted` | the model provider's own web search (OpenAI Responses `web_search`), forced with `tool_choice: required`; costs money per call, needs `--live` | when result quality matters more than the per-call fee |
+| `hosted` | **OpenAI's** web search (Responses `web_search`), forced with `tool_choice: required`; costs money per call, needs `--live` on the flag path. Always OpenAI, whatever provider the run's model profile names — it builds its own client and reads `OPENAI_API_KEY` | when result quality matters more than the per-call fee |
 | `offline` | the three local corpus entries only, zero network calls | evals, unit tests, demos |
 
 `--search` overrides it on the command line. The default follows the run mode:

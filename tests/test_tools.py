@@ -253,7 +253,7 @@ class _Ann(SimpleNamespace):
     pass
 
 
-def _hosted_response(summary, citations, *, searched=True, usage=None):
+def _hosted_response(summary, citations, *, searched=True, usage=None, status="completed", n=1):
     """A Responses object shaped the way the hosted web_search tool returns one.
 
     `searched=False` models the case the docs are explicit about — "the model can
@@ -263,7 +263,7 @@ def _hosted_response(summary, citations, *, searched=True, usage=None):
     anns = [_Ann(type="url_citation", url=u, title=t) for t, u in citations]
     items = []
     if searched:
-        items.append(SimpleNamespace(type="web_search_call"))
+        items.extend(SimpleNamespace(type="web_search_call", status=status) for _ in range(n))
     items.append(SimpleNamespace(type="message", content=[SimpleNamespace(annotations=anns)]))
     return SimpleNamespace(output_text=summary, output=items, usage=usage)
 
@@ -328,7 +328,8 @@ def test_a_search_that_returns_nothing_citable_withholds_the_summary(monkeypatch
 
     out = tools.search_web("acme funding")
     assert "made-up.example" not in out
-    assert out == "No web results for 'acme funding'."
+    assert "no citable sources" in out
+    assert not out.startswith("ERROR")  # the search worked; it just found nothing
 
 
 def test_hosted_search_respects_max_results(monkeypatch):
@@ -405,3 +406,61 @@ def test_the_client_carries_a_timeout(monkeypatch):
     sent = _fake_openai(_hosted_response("s", [("t", "https://a.example")]), monkeypatch)
     tools.search_web("q")
     assert sent["_client_kwargs"]["timeout"] == tools._HOSTED_TIMEOUT
+
+
+def test_a_failed_search_is_not_reported_as_nothing_to_find(monkeypatch):
+    """web_search_call carries a status — completed, failed, incomplete. Asking only
+    whether the item exists turns a broken search into "the information does not
+    exist", which is the distinction this repo has been bitten by before."""
+    _fake_openai(_hosted_response("", [], status="failed"), monkeypatch)
+
+    out = tools.search_web("does it exist")
+    assert out.startswith("ERROR: the hosted search did not complete")
+    assert "does **not** mean the information does not exist" in out
+
+
+def test_the_fee_counts_search_actions_not_api_calls(monkeypatch):
+    """A reasoning model issues several searches in one response; OpenAI bills per
+    search action."""
+    _fake_openai(_hosted_response("s", [("t", "https://a.example")], n=3), monkeypatch)
+    tools.search_web("q")
+    assert tools.take_hosted_spend() == pytest.approx(3 * tools._HOSTED_CALL_FEE)
+
+
+def test_a_response_that_never_searched_is_not_billed_a_search_fee(monkeypatch):
+    _fake_openai(_hosted_response("from memory", [], searched=False), monkeypatch)
+    tools.search_web("q")
+    assert tools.take_hosted_spend() == 0.0
+
+
+def test_spend_does_not_leak_from_one_run_into_the_next(monkeypatch):
+    """The accumulator is module state and a process runs many agents (bench.py's
+    matrix, an A2A server). A charge stranded by one run must not land on another."""
+    _fake_openai(_hosted_response("s", [("t", "https://a.example")]), monkeypatch)
+    tools.search_web("q")
+    assert tools._hosted_spend > 0
+    tools.reset_hosted_spend()
+    assert tools.take_hosted_spend() == 0.0
+
+
+def test_hosted_spend_reaches_the_budget_brake_through_the_loop(monkeypatch):
+    """The accumulator only means something if the loop drains it. Without the hook in
+    loop.py a run could spend many times its ceiling while remaining_budget sat still."""
+    from teacup_agent import loop, tools as tools_mod
+    from teacup_agent.memory import NullMemory
+    from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
+
+    _fake_openai(_hosted_response("s", [("t", "https://a.example")]), monkeypatch)
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    state = loop.run(
+        "search for something",
+        ScriptedModel([assistant_calls([("search_web", {"query": "q"})]), assistant_says("done")]),
+        memory=NullMemory(),
+        budget=0.05,
+        run_dir=None,
+        plan=False,
+    )
+    # the per-call fee landed against the budget, not just in the module global
+    assert state.remaining_budget < 0.05 - tools_mod._HOSTED_CALL_FEE / 2
+    assert tools_mod.take_hosted_spend() == 0.0  # fully drained by the loop

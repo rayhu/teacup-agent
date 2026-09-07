@@ -19,7 +19,7 @@ from typing import Callable
 from teacup_agent import loop
 from teacup_agent import routing
 from teacup_agent.memory import NullMemory
-from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says, content_blocks
 from teacup_agent.state import AgentState
 
 
@@ -53,11 +53,6 @@ class Case:
     model_factory: Callable[[], Any] | None = None
 
 
-def _content_blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:
-    content = msg.get("content")
-    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
-
-
 def tool_results_follow_their_call(state: AgentState) -> bool:
     """Every tool result's id must appear in an entry **before** it that announced
     the call, and every announced id must be filled exactly once. All three API shapes
@@ -70,12 +65,12 @@ def tool_results_follow_their_call(state: AgentState) -> bool:
             for tc in msg.get("tool_calls") or []:
                 announced.add(tc["id"])
             # Messages API shape: a tool_use block inside the assistant turn
-            for block in _content_blocks(msg):
+            for block in content_blocks(msg):
                 if block.get("type") == "tool_use":
                     announced.add(block["id"])
         elif msg.get("role") == "user":
             # ...whose result arrives as a tool_result block in a *user* turn
-            for block in _content_blocks(msg):
+            for block in content_blocks(msg):
                 if block.get("type") == "tool_result":
                     if block.get("tool_use_id") not in announced:
                         return False
@@ -512,6 +507,12 @@ def run_case(case: Case) -> tuple[bool, AgentState]:
     os.environ.setdefault("TEACUP_AGENT_SEARCH", "offline")
     main_model = ScriptedWithSummarizer(list(case.script), plan_items=case.plan_items)
     model = case.model_factory() if case.model_factory else main_model
+    if case.roles and case.model_factory:
+        # Refused rather than silently resolved: `roles` builds a router over scripted
+        # models and would discard the factory's model entirely, so the case would run
+        # on ScriptedModel while claiming to exercise another backend — the precise
+        # "proof by construction" failure `roles` exists to provide.
+        raise ValueError(f"case {case.name!r} sets both model_factory and roles; pick one")
     if case.roles:
         # A separate scripted model per other profile: proof by construction that a
         # routed role did not quietly run on the main one.

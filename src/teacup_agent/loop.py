@@ -491,6 +491,11 @@ def run(
         state = resume
         started_at = clock() - state.elapsed  # splice the already-spent time back on
     else:
+        # Anything a previous run in this process left uncollected is not this run's
+        # to pay for. Threads outlive their run here (execute_calls abandons a
+        # timed-out tool), and bench.py and the A2A server both run many agents in one
+        # process, so without this a stranded charge lands on whoever drains next.
+        tools_mod.reset_hosted_spend()
         state = AgentState(
             goal=goal,
             max_steps=max_steps,
@@ -572,6 +577,21 @@ def run(
             skills_mod.disable()
         if loaded_hooks:
             hooks_mod.unload()
+
+
+def _collect_tool_spend(state: AgentState, emit: Callable[..., None]) -> None:
+    """Charge whatever the money-spending tools have run up since the last collection.
+
+    A tool function has no access to `state`, and threading one into every tool
+    signature for the sake of one tool is a worse trade than collecting here. Charged
+    unnamed: it is not any model profile's spend, so putting it in the per-profile
+    breakdown would misattribute it to whichever profile happened to run the turn —
+    which is why `spend_by_profile` can sum to less than the budget consumed.
+    """
+    spent = tools_mod.take_hosted_spend()
+    if spent:
+        state.charge(spent)
+        emit("tool_spend", tool="search_web", cost=spent, step=state.step)
 
 
 def _loop(
@@ -727,10 +747,7 @@ def _loop(
         # — so it accumulates and the loop collects. Charged unnamed: it is not any
         # model profile's spend, and putting it in the per-profile breakdown would
         # misattribute it to whichever profile happened to run the turn.
-        hosted = tools_mod.take_hosted_spend()
-        if hosted:
-            state.charge(hosted)
-            emit("tool_spend", tool="search_web", cost=hosted, step=state.step)
+        _collect_tool_spend(state, emit)
 
         # ---- 5. persist: save every step, or there is nothing to resume from -
         # elapsed uses the value measured at the top of this turn, so we do not ask
@@ -741,6 +758,7 @@ def _loop(
         # is the difference between an agent and a single function call.
 
     state.elapsed = clock() - started_at
+    _collect_tool_spend(state, emit)  # a search on the last step must not go uncharged
     if state.status != "done" and not state.answer:
         state.answer = f"(no final answer; stopped because: {state.status})"
     if reflect:
