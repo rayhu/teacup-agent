@@ -1964,3 +1964,74 @@ problem than a missing instruction. The next data point that matters is
 whether K's fix closes this one, or whether the honest conclusion becomes
 "this specific technique is past what a prompt/description change can fix
 for this model."
+
+
+### L. The harness was lying, and reported success either way — DONE (2026-09-06)
+
+**Symptom**: thirteen live dogfood runs of the same task, driven through
+teacup-run's coding-task bridge. Run one landed 1 of 4 required edits and
+stopped to explain, in prose, what a human should type to finish the job:
+"I could not reliably locate the exact strings to edit with the available
+tools in this session." K had predicted the next data point would decide
+whether tool-description engineering was still sufficient. It was the wrong
+question. The model was not failing at "reproduce this exactly" — it was
+never shown the text it was asked to reproduce.
+
+**Root cause**: three separate defects, all the same shape. The harness told
+the model to do something the harness itself forbade, or accepted work it had
+already been told was broken, and reported success either way. None surfaced
+as an error, which is why the model's own summary blamed the model.
+
+1. `context.externalize()` wrote any result over 2000 chars to the run dir and
+   left a 600-char excerpt plus "read that path with `read_file`". When the run
+   dir sat outside the project — which is what teacup-run does, and what any
+   caller passing an absolute `--run-dir` does — the emitted path was absolute,
+   and `read_file` refuses every path outside its root. Measured: a 12147-char
+   source file reached the model as **864 characters** and an address it was
+   forbidden to visit. The `ToolsConfig(...)` call K blamed the model for
+   failing to match was never in its context at all.
+2. `edit_file` replied "replaced 1 occurrence" whether the result compiled or
+   was wreckage. One run inserted a keyword argument into a call that already
+   passed it; a repeated keyword is a `SyntaxError`, so every module importing
+   the file stopped loading, and the run reported the task done.
+3. The completion push-back only guarded runs that kept a checklist. A model
+   that never called `update_todo` has an empty todo, so nothing was
+   outstanding and it could stop whenever it liked. One run did: step 8 of 30,
+   zero edits, final answer "Proceeding: in the next step I'll re-open the
+   three files..." — an intention, filed as a result.
+
+**Fix**: `externalize` now asks `read_file`'s own question — resolve against
+`tools._get_project_root()`, check the deny-list — and keeps the whole result
+inline when the answer is no, rather than offering a pointer nobody can
+follow. `edit_file` compiles a `.py` file after editing and refuses a
+*regression*, leaving the file untouched, and echoes the edited region back
+with line numbers so a wrong-indentation insertion is visible in the turn it
+is made. Three more push-backs join the checklist one — wrote nothing, wrote
+something but ran nothing, last command did not succeed — each tracked by name
+in `state.completion_checks` so that one firing cannot silence the others.
+
+**The lesson**, and it is the answer to the question K left open: the ceiling
+K ran into was not the model's. Two rounds of tool-description engineering (J,
+K) were spent teaching a model to match text more carefully, when the text was
+being withheld from it by the harness. A capability explanation is the most
+expensive kind of wrong answer, because it ends the investigation — there is
+nothing to do about a capability gap but wait for a better model. What made
+the difference was not a better prompt but a preserved trajectory: the run
+artifacts were being written into a `TemporaryDirectory` that was deleted the
+moment the subprocess exited, so the first four runs were diagnosed by
+guesswork. Every root cause above was found by reading a trace that survived.
+
+The general principle, which is why all three defects are one entry: **a
+harness that cannot fail loudly will be debugged as if the model were at
+fault.** Before concluding a model cannot do something, check that the harness
+let it try. And the corollary, paid for twice here — raising `max_steps` from
+16 to 24 while the model was still blind made things strictly worse (it
+renamed `load()`, never landed the replacement, and left the suite 28 tests
+red): more budget given to a stuck agent buys improvisation, not progress.
+
+**Honest status**: measured reliability on this task after the teacup-run
+fixes but before this one was roughly 2 in 5, and instruction-level pressure
+did not move it (2/6 before strengthening the task text, 2/5 after — noise at
+that sample size). These three fixes are not yet validated by a live run
+against a merged `main`; the tests and evals cover the mechanisms, not the
+outcome. The next honest data point is a dogfood run after this lands.

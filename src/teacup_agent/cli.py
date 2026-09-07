@@ -194,10 +194,7 @@ def _printer(quiet: bool):
         elif event == "planned":
             print("  [checklist] " + " | ".join(f"{i}. {t}" for i, t in enumerate(data["items"], 1)))
         elif event == "completion_check":
-            print(
-                "  [completion check] stopped early with open items: "
-                + "; ".join(data["pending"])
-            )
+            print("  [completion check] " + "; ".join(data["pending"]))
         elif event == "denied":
             print(f"  [denied] {data['name']} needs human approval and did not get it")
         elif event == "approved":

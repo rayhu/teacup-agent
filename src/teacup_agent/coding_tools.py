@@ -25,8 +25,10 @@ from __future__ import annotations
 import os
 import pathlib
 import subprocess
+from typing import Any
 
 from teacup_agent import tools as tools_mod
+from teacup_agent.state import AgentState
 
 LIST_FILES = "list_files"
 EDIT_FILE = "edit_file"
@@ -34,6 +36,7 @@ WRITE_FILE = "write_file"
 RUN_COMMAND = "run_command"
 _NAMES = (LIST_FILES, EDIT_FILE, WRITE_FILE, RUN_COMMAND)
 
+_MAX_ECHO_LINES = 24  # lines in the post-edit echo, elision marker included
 _DEFAULT_COMMAND_TIMEOUT = 60.0
 _MAX_COMMAND_TIMEOUT = 300.0
 
@@ -248,8 +251,97 @@ def _edit_file(path: str, old_string: str, new_string: str) -> str:
             f"ERROR: old_string appears {count} times in {path}; it must match "
             "exactly one location. Include more surrounding context to disambiguate."
         )
-    target.write_text(content.replace(old_string, new_string, 1), encoding="utf-8")
-    return f"Edited {path}: replaced 1 occurrence."
+    updated = content.replace(old_string, new_string, 1)
+    broke = _newly_unparsable(target, content, updated)
+    if broke is not None:
+        # Leave the file exactly as it was. An edit that makes the file unparsable is
+        # never the edit that was intended, and the model cannot see that it happened:
+        # edit_file's reply used to be "replaced 1 occurrence" whether the result was
+        # correct or wreckage. Observed live — a run inserted a keyword argument into a
+        # call that already passed it, producing `f(subagent_max_steps=..., ...,
+        # subagent_max_steps=...)`; that is a SyntaxError, so every module importing it
+        # failed and the agent still reported the task done. Refusing here turns a
+        # silently broken repo into one failed tool call the model gets to retry.
+        return (
+            f"ERROR: that edit was NOT applied — {path} is left unchanged, because "
+            f"applying it would have left the file unparsable: {broke}. old_string was "
+            "found and matched exactly once; the problem is what it would be replaced "
+            "with. Two things cause this most often. Either new_string repeats "
+            "something already on an adjacent line (a keyword argument, an import) so "
+            "the result is a duplicate — re-read the surrounding lines and check. Or "
+            "you are removing code you intend to replace, and the file is only invalid "
+            "in between: make the removal and its replacement one edit, rather than "
+            "two that leave a class or function body empty at the halfway point."
+        )
+    target.write_text(updated, encoding="utf-8")
+    at = content.index(old_string)
+    return f"Edited {path}: replaced 1 occurrence.\n\n{_edited_region(updated, at, new_string)}"
+
+
+def _newly_unparsable(target: pathlib.Path, before: str, after: str) -> str | None:
+    """The syntax error `after` has and `before` did not, if any.
+
+    Only Python, and only a *regression*: a file already broken when the model found
+    it stays the model's to fix, and this must never block the edit that repairs it.
+    """
+    if target.suffix != ".py":
+        return None
+    if _compiles(after):
+        return None
+    if not _compiles(before):
+        return None  # already broken before this edit — not ours to refuse
+    try:
+        compile(after, str(target), "exec")
+    except (SyntaxError, ValueError) as exc:
+        lineno = getattr(exc, "lineno", None)
+        return f"{getattr(exc, 'msg', exc)}" + (f" (line {lineno})" if lineno else "")
+    return None
+
+
+def _compiles(source: str) -> bool:
+    """`compile`, not `ast.parse` — deliberately. The duplicate-keyword-argument bug
+    this guard exists to catch (`f(a=1, a=2)`) parses cleanly into an AST and is only
+    rejected later, when the compiler walks it; `ast.parse` returns happily and the
+    broken edit sails through. Verified both ways before relying on it."""
+    try:
+        compile(source, "<edit-check>", "exec")
+        return True
+    except (SyntaxError, ValueError):
+        return False
+
+
+def _edited_region(content: str, at: int, new_string: str, context: int = 3) -> str:
+    """The edited lines plus a little around them, numbered.
+
+    Returned on success because "replaced 1 occurrence" told the model nothing about
+    what it actually wrote. Every wrong-indentation bug observed in a real run was
+    invisible for exactly this reason: the model inserted a line at the wrong depth,
+    got told the edit succeeded, and moved on. Showing the result next to its
+    neighbours makes an indentation mistake visible in the same turn it is made.
+    """
+    lines = content.splitlines()
+    # Derived from where the replacement actually happened, not by searching for the
+    # new text: a one-line insertion is very often a copy of a line that also appears
+    # earlier in the file, and searching would then show a confidently wrong region.
+    idx = content[:at].count("\n")
+    start = max(0, idx - context)
+    end = min(len(lines), idx + len(new_string.splitlines()) + context)
+    width = len(str(end))
+    numbered = [f"{i + 1:>{width}} | {lines[i]}" for i in range(start, end)]
+    # Cap it. The echo exists to make one edit reviewable at a glance; past a couple of
+    # dozen lines it stops doing that and starts costing context. This bounds the line
+    # *count*, not the character count — a wide enough file can still push the result
+    # over the externalize threshold, and that is fine: the excerpt keeps the head,
+    # which is where the edited line and its neighbours are.
+    if len(numbered) > _MAX_ECHO_LINES:
+        head = _MAX_ECHO_LINES // 2
+        tail = _MAX_ECHO_LINES - head - 1  # -1: the elision marker is one of the lines
+        numbered = numbered[:head] + [f"{'':>{width}} | ... {len(numbered) - head - tail} more lines ..."] + numbered[-tail:]
+    shown = "\n".join(numbered)
+    return (
+        "The file now reads (check that what you added lines up with its "
+        f"neighbours):\n{shown}"
+    )
 
 
 def _write_file(path: str, content: str) -> str:
@@ -292,3 +384,110 @@ def _run_command(command: str, timeout: float | None = None) -> str:
     if proc.stderr:
         output += f"\n[stderr]\n{proc.stderr}"
     return f"[exit {proc.returncode}]\n{output}"
+
+
+# --- reading a run back: what did these tools actually do? --------------------
+#
+# The control loop needs to answer "were any files changed?" and "did the last command
+# pass?" before it lets a run finish. Those questions are about *these* tools' result
+# strings — "[exit 0]", "Edited ...", "ERROR: ..." — so they are answered here rather
+# than in loop.py, which should not have to know how run_command formats an exit code.
+
+
+def offers_run_command(specs: list[dict[str, Any]]) -> bool:
+    return "run_command" in _spec_names(specs)
+
+
+def ran_any_command(state: AgentState) -> bool:
+    """Whether a command actually ran to completion. Same reasoning as wrote_any_file:
+    `executed` is the loop's own record, the result string is not."""
+    return any(
+        entry.name == "run_command" and entry.executed and not _is_error(entry.result)
+        for entry in state.trace
+    )
+
+
+def last_command_failed(state: AgentState) -> bool:
+    """Whether the run's final command did not succeed.
+
+    Only the final one: red, fix, green is the workflow we want, and treating an
+    earlier failure as disqualifying would push the model away from running anything
+    at all.
+
+    "Final" means the last run_command in the trace, full stop — including one that
+    came back ERROR because it timed out or was denied. Skipping those let an *older*
+    successful command stand in for the one that actually ended the run: a trace of
+    `[exit 0]` before any edit, then a timed-out verification after them, reported as
+    verified. A verification attempt that died is not a verification.
+    """
+    last = _last_command(state)
+    if last is None:
+        return False
+    if not last.executed or _is_error(last.result):
+        return True  # denied, throttled, vetoed, timed out: not a verification
+    return not str(last.result).lstrip().startswith("[exit 0]")
+
+
+def _last_command(state: AgentState):
+    for entry in reversed(state.trace):
+        if entry.name == "run_command":
+            return entry
+    return None
+
+
+def last_command_head(state: AgentState, limit: int = 600) -> str:
+    """The *start* of the last command's output, not the end.
+
+    The tail is the wrong half twice over. A result over EXTERNALIZE_OVER has been
+    replaced by an excerpt whose last lines are the "saved to <path>" pointer, so the
+    tail is the machinery rather than the failure. And even inline, `[exit N]` and the
+    first error a runner prints are at the top — which is the part that tells the model
+    what went wrong.
+    """
+    last = _last_command(state)
+    return str(last.result)[:limit] if last is not None else ""
+
+
+def _is_error(result: Any) -> bool:
+    return str(result).lstrip().upper().startswith("ERROR")
+
+
+def offers_file_writes(specs: list[dict[str, Any]]) -> bool:
+    """Whether this run was even given a tool that changes a file."""
+    return bool(_spec_names(specs) & {"edit_file", "write_file"})
+
+
+def _spec_names(specs: list[dict[str, Any]]) -> set[str]:
+    """Tool names out of a specs list, whichever shape it is in.
+
+    tools.specs() emits only the Chat Completions shape today, so the nested branch is
+    the one that runs; the flat branch is defensive, for a caller assembling specs
+    itself or a future Responses-shaped list. Cheap, and the alternative is a silent
+    empty set that would switch every completion check off without saying so.
+    """
+    names: set[str] = set()
+    for spec in specs:
+        if spec.get("name"):
+            names.add(spec["name"])
+        fn = spec.get("function")
+        if isinstance(fn, dict) and fn.get("name"):
+            names.add(fn["name"])
+    return names
+
+
+def wrote_any_file(state: AgentState) -> bool:
+    """Whether any edit actually landed — what is on disk, not what was attempted.
+
+    `executed` first, because it is a fact the loop recorded rather than a string a
+    project's hooks may have rewritten: a throttled, denied or vetoed call never ran,
+    and `hooks.veto` returns project-supplied text that is only *documented* to start
+    with "ERROR:". A veto phrased as "skipped" would otherwise be read as a write that
+    happened. The result is still checked after that, for the failures that occur inside
+    a call that did run — old_string not found, an edit refused for breaking the file.
+    """
+    return any(
+        entry.name in ("edit_file", "write_file")
+        and entry.executed
+        and not _is_error(entry.result)
+        for entry in state.trace
+    )

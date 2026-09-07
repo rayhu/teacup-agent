@@ -55,4 +55,23 @@ def load(path: str | pathlib.Path) -> AgentState:
     # on the way out, and everything downstream expects the objects back.
     trace = [ToolTrace(**t) for t in data.pop("trace", [])]
     todo = [TodoItem(**t) for t in data.pop("todo", [])]
+    _migrate(data)
     return AgentState(**data, trace=trace, todo=todo)
+
+
+def _migrate(data: dict[str, Any]) -> None:
+    """Rename fields that have changed shape, in place.
+
+    AgentState(**data) passes every key straight through as a keyword argument, so a
+    key that no longer exists is not ignored — it raises TypeError and the resume dies
+    on a file that is otherwise perfectly good. A run interrupted before an upgrade is
+    exactly when someone reaches for --resume, so this is the moment it must not fail.
+
+    `completion_checked` (bool) -> `completion_checks` (list of names). The old file
+    cannot say *which* push-back fired, and inventing a name would be a lie; what it
+    does record is that one did, which is enough to preserve the "at most once"
+    guarantee for the rest of the resumed run.
+    """
+    if "completion_checked" in data:
+        fired = data.pop("completion_checked")
+        data.setdefault("completion_checks", ["legacy"] if fired else [])

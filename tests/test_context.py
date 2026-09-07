@@ -6,6 +6,7 @@ function_call from its reasoning item. Either one makes the next request fail wi
 400. So every case here also re-checks the message-protocol invariant.
 """
 
+import pathlib
 from types import SimpleNamespace
 
 import pytest
@@ -145,7 +146,13 @@ def big_tool(monkeypatch):
     monkeypatch.setattr(tools, "REGISTRY", registry)
 
 
-def test_big_tool_result_is_written_to_disk_and_shrunk(big_tool, tmp_path):
+def test_big_tool_result_is_written_to_disk_and_shrunk(big_tool, tmp_path, monkeypatch):
+    # chdir first: the excerpt-plus-path bargain is only offered when the run dir is
+    # somewhere read_file can actually reach, and read_file refuses anything outside
+    # the project root. A test that passed an absolute path from outside the project
+    # would exercise the inline fallback instead, which is what this test used to do
+    # without meaning to.
+    monkeypatch.chdir(tmp_path)
     state = loop.run(
         "externalization test",
         ScriptedModel([assistant_calls([("dump", {})]), assistant_says("ok")]),
@@ -163,6 +170,57 @@ def test_big_tool_result_is_written_to_disk_and_shrunk(big_tool, tmp_path):
     # the details.
     assert state.trace[0].result == kept
 
+
+
+def test_result_is_kept_inline_when_the_run_dir_is_unreachable(big_tool, tmp_path, monkeypatch):
+    """A run dir outside the project keeps the full result in the context instead.
+
+    read_file refuses paths outside the project root, so pointing the model at one is
+    an instruction it cannot follow — it would see 600 characters and a dead address.
+    Confirmed in a live run driven by teacup-run, which put --run-dir beside the
+    worktree rather than inside it: a 12147-character file reached the model as 864
+    characters, and it spent six edit_file calls guessing at what it had never seen.
+    """
+    project = tmp_path / "project"
+    project.mkdir()
+    outside = tmp_path / "elsewhere"
+    monkeypatch.chdir(project)
+
+    state = loop.run(
+        "externalization test",
+        ScriptedModel([assistant_calls([("dump", {})]), assistant_says("ok")]),
+        memory=NullMemory(),
+        run_dir=outside,
+    )
+    kept = [m for m in state.messages if m.get("role") == "tool"][0]["content"]
+    assert len(kept) == 5000  # the whole thing, not an excerpt
+    assert "read_file" not in kept  # and no instruction to fetch what it cannot open
+    # still written out, because a human reading the trajectory afterwards wants it
+    assert len(list(outside.glob("*.txt"))[0].read_text()) == 5000
+
+
+def test_the_default_relative_run_dir_still_externalizes(big_tool, tmp_path, monkeypatch):
+    """cli.py builds `runs/<timestamp>` — a *relative* path — and that is what almost
+    every real run uses. A relative path is never a subpath of an absolute cwd, so a
+    reachability test written as `path.relative_to(Path.cwd())` raises here and silently
+    turns externalization off for the default configuration. This test exists because
+    that regression shipped once and no test caught it: the one test there was passed an
+    absolute path, which is the only shape that kept working.
+    """
+    monkeypatch.chdir(tmp_path)
+    state = loop.run(
+        "externalization test",
+        ScriptedModel([assistant_calls([("dump", {})]), assistant_says("ok")]),
+        memory=NullMemory(),
+        run_dir=pathlib.Path("runs") / "20260906-000000",
+    )
+    kept = [m for m in state.messages if m.get("role") == "tool"][0]["content"]
+    assert len(kept) < 1200  # an excerpt, not the whole 5000 chars
+    assert "read_file" in kept
+    # and the pointer is one read_file will actually accept
+    pointer = kept.rsplit("saved to ", 1)[1].split(".", 1)[0]
+    assert not pathlib.Path(pointer).is_absolute()
+    assert (tmp_path / "runs" / "20260906-000000").is_dir()
 
 # --- compaction --------------------------------------------------------------
 

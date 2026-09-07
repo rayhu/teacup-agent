@@ -58,8 +58,24 @@ class AgentState:
     answer: str = ""
     salvaged: bool = False  # True = answer rescued by the forced wrap-up turn
     todo: list[TodoItem] = field(default_factory=list)
-    completion_checked: bool = False  # the "anything left undone?" push-back fired
+    # Which completion push-backs have already fired, by name. A single bool was enough
+    # when there was one condition; with several orthogonal ones it would mean "we
+    # pushed back on something", and they are not substitutes for each other — a run
+    # nudged about an open checklist item would then never be nudged about finishing
+    # with the test suite red. Each fires at most once, and the answer stands either way.
+    completion_checks: list[str] = field(default_factory=list)
     subagent_runs: int = 0  # how many subagents this run delegated to
+
+    @property
+    def completion_checked(self) -> bool:
+        """Whether any push-back has fired — the question most callers actually ask.
+
+        Read-only: which check fired is what the loop needs, and a setter would let a
+        caller assert "something fired" without saying what, which is the ambiguity
+        `completion_checks` exists to remove. persist.load translates the old boolean
+        off disk; see the migration note there."""
+        return bool(self.completion_checks)
+
     loaded_skills: list[str] = field(default_factory=list)  # skills pulled into context
     trace: list[ToolTrace] = field(default_factory=list)
     # profile name -> dollars, when a run routes roles to different models (routing.py).

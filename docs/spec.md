@@ -147,7 +147,7 @@ any status >= 500, and any error carrying no status code at all; a 4xx is not re
 | `answer` | str | `""` | loop |
 | `salvaged` | bool | `False` | `finalize()` |
 | `todo` | list[TodoItem] | `[]` | `plan.decompose()`, `update_todo` |
-| `completion_checked` | bool | `False` | loop, at most once |
+| `completion_checks` | list[str] | `[]` | loop, each name appended at most once |
 | `subagent_runs` | int | `0` | `subagent._delegate()` |
 | `loaded_skills` | list[str] | `[]` | `skills._load_skill()` |
 | `trace` | list[ToolTrace] | `[]` | `execute_calls()` |
@@ -325,6 +325,15 @@ permission, so it does not retry a different spelling.
   `externalize=False` (`load_skill`) are exempt — a procedure is an instruction, not raw
   material.
 
+  The excerpt is only offered when `read_file` would actually open the path: the run dir
+  is resolved against `tools._get_project_root()` — the same boundary `read_file`
+  enforces, which `--project-root` can move off the cwd — and checked against the
+  deny-list. When it is out of reach the whole result stays inline instead, because the
+  alternative is handing the model 600 characters and an address it is forbidden to
+  visit. That is not hypothetical: driven through teacup-run with a run dir beside the
+  worktree, a 12147-char file reached the model as 864 characters, and it spent six
+  `edit_file` calls guessing at code it had never been shown.
+
 ### Approval policies
 
 `deny_all` is the default passed into `loop.run()`. `cli.py` maps `--approve` to
@@ -384,9 +393,25 @@ behaviour — a broken planner must never stop a run. `render()` produces the `[
 block carried in every turn's status note; `pending()` returns items still open.
 
 The model ticks items off with `update_todo(index, status, note)`. `blocked` is settled:
-it stops being outstanding but keeps its reason. The completion push-back
-(`COMPLETION_CHECK`) fires **at most once per run**, guarded by
-`state.completion_checked`.
+it stops being outstanding but keeps its reason.
+
+Four completion push-backs guard "the model stopped calling tools". Each fires **at most
+once per run**, tracked by name in `state.completion_checks`; after it fires, the answer
+stands either way. `state.completion_checked` remains as a read-only "did any fire?"
+property, and `persist.load` translates the old boolean off disk.
+
+| name | condition | prompt |
+| --- | --- | --- |
+| `checklist` | an item is still outstanding | `COMPLETION_CHECK` |
+| `failing_command` | the run's last `run_command` did not succeed — including one that errored, timed out or was denied | `FAILING_CHECK` |
+| `unverified` | files were changed and no command was ever run against them | `UNVERIFIED_CHECK` |
+| `no_edits` | file-writing tools were offered and nothing was written | `NO_EDITS_CHECK` |
+
+The last three only apply when the run was given `edit_file`/`write_file` at all. They are
+tracked separately rather than behind one flag because they are not substitutes: a run
+nudged about an open checklist item at step 4 must still be nudged at step 20 for
+finishing with the suite red. Under a single shared flag the checklist branch — tested
+first — meant `--plan` reliably disabled the other three for the rest of the run.
 
 ## 10. Reflection (`reflect.py`)
 
@@ -530,7 +555,7 @@ half-written state. `persist.load()` rebuilds `trace` and `todo` into dataclasse
 | `vetoed` | a project-local `hooks.py`'s `before_tool_call` blocked a call |
 | `hooks_loaded` | a project-local `hooks.py` was loaded |
 | `externalized` | a result went to disk |
-| `completion_check` | the checklist push-back fired |
+| `completion_check` | a completion push-back fired (checklist, no edits, unverified, or failing command) |
 | `answer` | the model finished |
 | `stopped` | a ceiling was hit |
 | `salvaged` | the forced wrap-up produced an answer |

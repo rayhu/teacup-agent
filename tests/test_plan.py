@@ -146,3 +146,197 @@ def test_forced_wrapup_names_the_unfinished_items():
     )
     wrapup = [m for m in state.messages if "[forced wrap-up]" in str(m.get("content", ""))][0]
     assert "email the result" in wrapup["content"]  # the run admits what it never did
+
+
+# --- finishing without having written anything -------------------------------
+
+
+def _coding_run(replies, *, approve=lambda call, spec: True, plan_items=None, run_dir=None):
+    """A run with coding tools registered, so edit_file/write_file are in `specs`.
+
+    `approve` defaults to allow: the point of these tests is what the model does with
+    a working tool, not the approval gate (denied calls are covered in test_hooks).
+    """
+    # No explicit coding_tools.enable() here: loop.run(coding_tools=True) registers and
+    # unregisters them itself, and doing both left the module-global REGISTRY enabled
+    # and disabled twice per test — exactly the double-registration coding_tools.py's
+    # docstring warns about.
+    model = (
+        ScriptedWithSummarizer(list(replies), plan_items=plan_items)
+        if plan_items
+        else ScriptedModel(replies)
+    )
+    return loop.run(
+        "make the change",
+        model,
+        memory=NullMemory(),
+        coding_tools=True,
+        plan=bool(plan_items),
+        approve=approve,
+        run_dir=run_dir,
+    )
+
+
+def test_finishing_without_changing_a_file_is_pushed_back_once():
+    """The checklist branch cannot catch this: a model that never called update_todo
+    has an empty todo, so nothing was outstanding. A live coding run stopped at step
+    8 of 30 with no edits and "in the next step I'll re-open the three files" as its
+    final answer."""
+    state = _coding_run([assistant_says("I'll start by re-reading those files now.") for _ in range(5)])
+    checks = [m for m in state.messages if "[completion check]" in str(m.get("content", ""))]
+    assert len(checks) == 1  # exactly one push-back, never a loop
+    assert "without having changed" in checks[0]["content"]
+    assert state.completion_checked and state.status == "done"
+
+
+def test_no_pushback_once_a_file_is_written_and_a_command_has_passed(tmp_path, monkeypatch):
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "true"})]),
+                assistant_says("done"),
+            ]
+        )
+    finally:
+        tools.set_project_root(None)
+    assert (tmp_path / "new.py").exists()  # the write really landed
+    assert not state.completion_checked
+
+
+def test_changing_files_without_running_anything_is_pushed_back(tmp_path, monkeypatch):
+    """Writing is not verifying. run_command was available the whole time."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})])]
+            + [assistant_says("all done") for _ in range(4)]
+        )
+    finally:
+        tools.set_project_root(None)
+    checks = [m for m in state.messages if "[completion check]" in str(m.get("content", ""))]
+    assert len(checks) == 1
+    assert "without a single successful command run" in checks[0]["content"]
+
+
+def test_finishing_while_the_last_command_failed_is_pushed_back(tmp_path, monkeypatch):
+    """The defect this exists for: run the suite, watch it go red, report done."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "false"})]),
+            ]
+            + [assistant_says("task complete") for _ in range(4)]
+        )
+    finally:
+        tools.set_project_root(None)
+    checks = [m for m in state.messages if "[completion check]" in str(m.get("content", ""))]
+    assert len(checks) == 1
+    assert "did not succeed" in checks[0]["content"]
+
+
+def test_a_failure_that_was_fixed_and_rerun_is_not_pushed_back(tmp_path, monkeypatch):
+    """Only the most recent command counts — red, fix, green is the workflow we want."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "false"})]),
+                assistant_calls([("run_command", {"command": "true"})]),
+                assistant_says("fixed and green"),
+            ]
+        )
+    finally:
+        tools.set_project_root(None)
+    assert not state.completion_checked
+
+
+def test_a_denied_write_still_counts_as_having_written_nothing(tmp_path, monkeypatch):
+    """An attempted edit is not a made edit. If approval denied it, the file on disk
+    is unchanged and the push-back is exactly as warranted as if nothing was tried."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [assistant_calls([("write_file", {"path": "new.py", "content": "x = 1\n"})])]
+            + [assistant_says("could not do it") for _ in range(4)],
+            approve=lambda call, spec: False,
+        )
+    finally:
+        tools.set_project_root(None)
+    assert not (tmp_path / "new.py").exists()
+    assert state.completion_checked
+
+
+
+def test_an_earlier_pushback_does_not_silence_a_later_one(tmp_path, monkeypatch):
+    """Each condition fires on its own. A single shared flag made whichever came first
+    silence the rest — and since the checklist is tested first, --plan reliably disabled
+    the failing-command check for the whole run, which is the opposite of what asking
+    for a plan should do."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                # stop once with a checklist item open -> checklist push-back
+                assistant_calls([("update_todo", {"index": 1, "status": "in_progress"})]),
+                assistant_says("I'll stop here"),
+                # then edit and finish on a red command -> must still be pushed back
+                assistant_calls([("write_file", {"path": "n.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "false"})]),
+            ]
+            + [assistant_says("all done, suite is green") for _ in range(4)],
+            plan_items=["do the thing"],
+        )
+    finally:
+        tools.set_project_root(None)
+    assert state.completion_checks == ["checklist", "failing_command"]
+
+
+def test_a_final_command_that_died_is_not_treated_as_verification(tmp_path, monkeypatch):
+    """A command that timed out or was denied comes back ERROR. Skipping those let an
+    older successful run stand in for the one that actually ended the run: green before
+    the edits, dead after them, reported as verified."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("run_command", {"command": "true"})]),  # green, pre-edit
+                assistant_calls([("write_file", {"path": "n.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "sleep 5", "timeout": 1})]),
+            ]
+            + [assistant_says("done, verified") for _ in range(4)],
+        )
+    finally:
+        tools.set_project_root(None)
+    assert "failing_command" in state.completion_checks
+
+
+def test_the_failure_shown_back_is_the_head_of_the_output(tmp_path, monkeypatch):
+    """A long failure is externalized to an excerpt whose *tail* is the saved-to
+    pointer, so showing the tail shows the machinery instead of the error."""
+    monkeypatch.chdir(tmp_path)
+    tools.set_project_root(tmp_path)
+    try:
+        state = _coding_run(
+            [
+                assistant_calls([("write_file", {"path": "n.py", "content": "x = 1\n"})]),
+                assistant_calls([("run_command", {"command": "echo THE_REAL_FAILURE; exit 1"})]),
+            ]
+            + [assistant_says("all good") for _ in range(4)],
+            run_dir=tmp_path / "runs",
+        )
+    finally:
+        tools.set_project_root(None)
+    checks = [m for m in state.messages if "[completion check]" in str(m.get("content", ""))]
+    assert "THE_REAL_FAILURE" in checks[0]["content"]
