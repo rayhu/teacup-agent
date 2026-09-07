@@ -528,6 +528,22 @@ candidates. The model does now load the skill on a research task, so the move is
 option, but it needs its own before-and-after: those rules fix a failure that was
 expensive to find, and one successful load is not proof of reliable loading.
 
+**Addendum (2026-09-07): brought into spec conformance.** This format — folder +
+`SKILL.md`, frontmatter, progressive disclosure — turned out to already match the
+[Agent Skills](https://github.com/anthropics/skills) open standard Anthropic released
+in December 2025, since adopted by OpenAI Codex CLI, Microsoft Agent Framework, Cursor
+and GitHub Copilot. It wasn't built to that spec (the spec postdates this feature), so
+`_frontmatter()`'s hand-rolled `key: value` scanner never validated `name` against the
+spec's actual constraints (lowercase/hyphens/≤64 chars/must equal the folder name) and
+silently dropped the spec's optional fields (`license`, `compatibility`, `metadata`,
+`allowed-tools`) rather than exposing them. Replaced with real YAML parsing (the repo
+already carries `pyyaml` for `agent.yaml`, so this is not a new dependency), added the
+name/folder/length validation, and added the four optional fields to `Skill`. A skill
+package written for, or by, any other Agent-Skills-conformant tool now loads here
+unmodified, and vice versa — this was previously true by accident, not by design.
+5 new tests in `tests/test_skills.py`; the two shipped skills (`web-research`,
+`long-document`) still parse unchanged.
+
 ---
 
 ### 13. Hooks — DONE (2026-09-03)
