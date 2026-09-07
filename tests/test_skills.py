@@ -53,6 +53,129 @@ def test_a_missing_directory_is_not_fatal(tmp_path):
     assert skills.discover(tmp_path / "nope") == []
 
 
+# --- Agent Skills spec conformance ---------------------------------------------
+
+
+def test_a_name_that_disagrees_with_its_folder_is_skipped(tmp_path):
+    """The spec requires name == folder name. Accepting a mismatch would make the
+    same skill answer to two different identities depending on which tool read it —
+    discover() finds it by folder, so that's the identity that has to win, or the
+    skill is dropped rather than silently misidentified."""
+    d = tmp_path / "skills" / "the-folder"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: a-different-name\ndescription: does a thing.\n---\n\nBody.",
+        encoding="utf-8",
+    )
+    assert skills.discover(tmp_path / "skills") == []
+
+
+def test_a_name_with_spec_illegal_characters_is_skipped(tmp_path):
+    """Spec: lowercase letters, digits, hyphens only. Not underscores, not
+    uppercase — those are exactly the characters a tool written against the spec
+    would refuse, so accepting them here would produce a skill that works in this
+    harness and nowhere else, defeating the point of a shared format."""
+    d = tmp_path / "skills" / "Bad_Name"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: Bad_Name\ndescription: does a thing.\n---\n\nBody.",
+        encoding="utf-8",
+    )
+    assert skills.discover(tmp_path / "skills") == []
+
+
+def test_a_description_past_the_spec_limit_is_capped(tmp_path):
+    d = tmp_path / "skills" / "long-desc"
+    d.mkdir(parents=True)
+    long_description = "x" * 2000
+    (d / "SKILL.md").write_text(
+        f"---\nname: long-desc\ndescription: {long_description}\n---\n\nBody.",
+        encoding="utf-8",
+    )
+    found = skills.discover(tmp_path / "skills")
+    assert len(found[0].description) == 1024
+
+
+def test_the_spec_optional_fields_are_parsed_not_dropped(tmp_path):
+    d = tmp_path / "skills" / "full-metadata"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        """---
+name: full-metadata
+description: exercises every optional field the spec defines.
+license: Apache-2.0
+compatibility: requires git and docker
+allowed-tools: read_file run_command
+metadata:
+  author: someone
+  version: "1.0"
+---
+
+Body.""",
+        encoding="utf-8",
+    )
+    found = skills.discover(tmp_path / "skills")
+    assert found[0].license == "Apache-2.0"
+    assert found[0].compatibility == "requires git and docker"
+    assert found[0].allowed_tools == ("read_file", "run_command")
+    assert found[0].metadata == {"author": "someone", "version": "1.0"}
+
+
+def test_a_reserved_word_in_the_name_is_skipped(tmp_path):
+    """The spec forbids "claude"/"anthropic" in a skill name — distinct from the
+    folder-match and character-set rules above, and previously unenforced here."""
+    d = tmp_path / "skills" / "claude-helper"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: claude-helper\ndescription: does a thing.\n---\n\nBody.",
+        encoding="utf-8",
+    )
+    assert skills.discover(tmp_path / "skills") == []
+
+
+def test_a_malformed_frontmatter_skip_prints_why(tmp_path, capsys):
+    """AGENTS.md's own rule for tools — a failure must say it failed, not read as
+    "this does not exist" — applies to a skill an author expected to see loaded."""
+    d = tmp_path / "skills" / "broken-yaml"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text("---\nname: [unterminated\n---\n\nBody.", encoding="utf-8")
+
+    assert skills.discover(tmp_path / "skills") == []
+    assert "broken-yaml" in capsys.readouterr().err
+
+
+def test_allowed_tools_as_a_yaml_list_is_accepted_not_mis_parsed(tmp_path):
+    """The spec defines allowed-tools as a space-delimited string, but it lives
+    inside a YAML block, and writing it as a YAML list is a plausible authoring
+    mistake. str(list).split() on that silently produces garbage tool names with no
+    error — this must not happen."""
+    d = tmp_path / "skills" / "list-shaped"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: list-shaped\ndescription: d.\nallowed-tools:\n  - read_file\n"
+        "  - run_command\n---\n\nBody.",
+        encoding="utf-8",
+    )
+    found = skills.discover(tmp_path / "skills")
+    assert found[0].allowed_tools == ("read_file", "run_command")
+
+
+def test_optional_fields_default_to_empty_not_none_where_iterable(tmp_path):
+    """A skill with none of the optional fields must not crash code that iterates
+    metadata or allowed_tools unconditionally."""
+    d = tmp_path / "skills" / "minimal"
+    d.mkdir(parents=True)
+    (d / "SKILL.md").write_text(
+        "---\nname: minimal\ndescription: the bare minimum.\n---\n\nBody.",
+        encoding="utf-8",
+    )
+    found = skills.discover(tmp_path / "skills")
+    assert found[0].license is None
+    assert found[0].compatibility is None
+    assert found[0].metadata == {}
+    assert found[0].allowed_tools == ()
+
+
 # --- the static/dynamic split, which is the whole point ------------------------
 
 

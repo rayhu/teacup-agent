@@ -20,19 +20,44 @@ The result is an agent that carries many specialities and pays for the one it is
 A skill is knowledge, not code: it is text the model reads. That makes the skills
 directory a trust boundary in the same way tool descriptions are, which is why they are
 loaded from the project rather than fetched from anywhere.
+
+**This is the open Agent Skills format** (a folder + `SKILL.md`, YAML frontmatter,
+progressive disclosure), not a one-off invented here — the same shape OpenAI Codex CLI,
+Microsoft Agent Framework, Cursor and GitHub Copilot all read. A skill written for any
+of those loads here unmodified, and one written here loads there. `discover()` validates
+`name`/`description` against the spec's own constraints (openly, at
+https://agentskills.io/specification) rather than accepting whatever a hand-rolled
+parser happened to tolerate, and exposes the spec's optional fields (`license`,
+`compatibility`, `metadata`, `allowed-tools`) instead of silently dropping them.
 """
 
 from __future__ import annotations
 
 import pathlib
 import re
-from dataclasses import dataclass
+import sys
+from dataclasses import dataclass, field
 from typing import Any
+
+import yaml
 
 from teacup_agent import tools as tools_mod
 
 NAME = "load_skill"
 DEFAULT_DIR = "skills"
+
+# Agent Skills spec (platform.claude.com/docs/en/agents-and-tools/agent-skills): name
+# is lowercase letters, digits and hyphens, max 64 chars, must not contain the reserved
+# words "claude"/"anthropic", and (this repo's own added rule, matched by teacup-run's
+# manifest.py so a skill validates the same way in either) must equal the folder name —
+# the folder is how discover() finds it, so a name that disagreed would make the skill
+# answer to two different identities depending on who's asking. description has no
+# charset constraint but is capped at 1024 chars, meant to read as one catalog line,
+# not a paragraph.
+_NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
+_MAX_NAME_LEN = 64
+_MAX_DESCRIPTION_LEN = 1024
+_RESERVED_NAME_WORDS = ("claude", "anthropic")
 
 
 @dataclass
@@ -41,6 +66,10 @@ class Skill:
     description: str
     body: str
     path: pathlib.Path
+    license: str | None = None
+    compatibility: str | None = None
+    metadata: dict[str, Any] = field(default_factory=dict)
+    allowed_tools: tuple[str, ...] = ()
 
     @property
     def folder(self) -> str:
@@ -50,37 +79,79 @@ class Skill:
             return str(self.path.parent)
 
 
-def _frontmatter(text: str) -> tuple[dict[str, str], str]:
-    """Parse the `---` header of a SKILL.md.
+def _frontmatter(text: str) -> tuple[dict[str, Any], str]:
+    """Parse the `---`-delimited YAML header of a SKILL.md.
 
-    Deliberately not a YAML parser: skills use `key: value` lines, and adding a YAML
-    dependency to read two fields would cost more than it explains.
+    Real YAML, not a hand-rolled `key: value` scanner — `metadata` in the spec is
+    arbitrary key/value data, which a line-based parser cannot represent, and the repo
+    already carries `pyyaml` for `agent.yaml` (agent_config.py), so this adds no new
+    dependency to read the format properly.
     """
     match = re.match(r"^---\s*\n(.*?)\n---\s*\n?(.*)$", text, re.S)
     if not match:
         return {}, text
-    meta = {}
-    for line in match.group(1).splitlines():
-        if ":" in line:
-            key, _, value = line.partition(":")
-            meta[key.strip()] = value.strip().strip("\"'")
+    parsed = yaml.safe_load(match.group(1))
+    meta = parsed if isinstance(parsed, dict) else {}
     return meta, match.group(2).strip()
 
 
 def discover(root: str | pathlib.Path = DEFAULT_DIR) -> list[Skill]:
-    """Find every `<root>/*/SKILL.md`. A malformed skill is skipped, not fatal."""
+    """Find every `<root>/*/SKILL.md`. A malformed skill is skipped, not fatal — but
+    "skipped" prints why, on stderr, rather than the skill just quietly not being
+    there. AGENTS.md's own rule for tools ("never let a broken tool read as 'this does
+    not exist'") applies just as much to a skill an author expected to see loaded."""
     base = pathlib.Path(root)
     found = []
     for path in sorted(base.glob("*/SKILL.md")):
         try:
             meta, body = _frontmatter(path.read_text(encoding="utf-8"))
-        except OSError:
+        except OSError as exc:
+            print(f"[skills] {path}: could not read ({exc}), skipping", file=sys.stderr)
             continue
-        name = meta.get("name") or path.parent.name
-        description = meta.get("description", "").strip()
+        except yaml.YAMLError as exc:
+            print(f"[skills] {path}: malformed YAML frontmatter ({exc}), skipping", file=sys.stderr)
+            continue
+        folder_name = path.parent.name
+        name = str(meta.get("name") or folder_name)
+        description = str(meta.get("description", "")).strip()
         if not description or not body:
-            continue  # without a description the model cannot know when to load it
-        found.append(Skill(name=name, description=description, body=body, path=path))
+            print(f"[skills] {path}: needs both a description and a body, skipping", file=sys.stderr)
+            continue
+        # A name that isn't spec-shaped, disagrees with the folder discover() found it
+        # under, or uses a reserved word is exactly the kind of thing that silently
+        # works today and quietly breaks the moment this same folder is read by a
+        # different, spec-strict tool.
+        if (
+            name != folder_name
+            or not _NAME_RE.match(name)
+            or len(name) > _MAX_NAME_LEN
+            or any(word in name for word in _RESERVED_NAME_WORDS)
+        ):
+            print(f"[skills] {path}: name {name!r} is not Agent Skills-conformant, skipping", file=sys.stderr)
+            continue
+        if len(description) > _MAX_DESCRIPTION_LEN:
+            description = description[:_MAX_DESCRIPTION_LEN]
+        allowed_tools_raw = meta.get("allowed-tools", "")
+        if isinstance(allowed_tools_raw, (list, tuple)):
+            # The spec defines this as a space-delimited string, but it lives inside a
+            # YAML block, and writing it as a YAML list is an easy, plausible mistake.
+            # str(list).split() on that would silently produce garbage tool names
+            # ("['read_file',", "'run_command']") with no error — accept the list
+            # shape directly instead of letting that happen.
+            allowed_tools = tuple(str(t) for t in allowed_tools_raw)
+        else:
+            allowed_tools = tuple(str(allowed_tools_raw).split()) if allowed_tools_raw else ()
+        metadata = meta.get("metadata") or {}
+        found.append(Skill(
+            name=name,
+            description=description,
+            body=body,
+            path=path,
+            license=meta.get("license"),
+            compatibility=meta.get("compatibility"),
+            metadata=metadata if isinstance(metadata, dict) else {},
+            allowed_tools=allowed_tools,
+        ))
     return found
 
 
