@@ -382,6 +382,16 @@ class ScriptedModel:
         return chat_tool_result(call, result)
 
 
+
+def _has_tool_blocks(messages: list[dict[str, Any]]) -> bool:
+    """Whether a Messages-API history contains any tool_use or tool_result block."""
+    return any(
+        isinstance(block, dict) and block.get("type") in ("tool_use", "tool_result")
+        for m in messages
+        for block in (m.get("content") or [])
+    )
+
+
 class AnthropicModel:
     """The Anthropic Messages API — a genuinely different request/response shape,
     added the same way `ResponsesModel` was added beside `OpenAIModel`: a new class
@@ -426,6 +436,12 @@ class AnthropicModel:
         self.prices = prices
         self.max_tokens = max_tokens
         self.cache_key: str | None = None
+        # The last non-empty tool list this model was given. The loop deliberately
+        # passes [] on the forced wrap-up turn ("no tools on the final turn"), but this
+        # API rejects a request whose history contains tool_use/tool_result blocks and
+        # no tools array — so the wrap-up needs the definitions back, with tool_choice
+        # saying they may not be used. See complete().
+        self._last_tools: list[dict[str, Any]] = []
         if client is None:
             from anthropic import Anthropic  # lazy: offline runs need no SDK
 
@@ -517,7 +533,19 @@ class AnthropicModel:
                 block["cache_control"] = {"type": "ephemeral"}
             kwargs["system"] = [block]
         if tools:
-            kwargs["tools"] = self._tools(tools)
+            self._last_tools = self._tools(tools)
+            kwargs["tools"] = self._last_tools
+        elif self._last_tools and _has_tool_blocks(msgs):
+            # "An empty tool list cannot be ignored" is the loop's way of ending a run
+            # without letting the model start more work (loop.py's forced wrap-up, and
+            # finalize()). Dropping the array outright is not how to say that here: the
+            # API returns 400 "Requests which include tool_use or tool_result blocks
+            # must define tools", so every run that called a tool and then hit the step,
+            # budget or time ceiling would die on the turn meant to rescue its answer.
+            # Send the definitions the conversation already contains, and forbid their
+            # use explicitly.
+            kwargs["tools"] = self._last_tools
+            kwargs["tool_choice"] = {"type": "none"}
 
         resp = self.client.messages.create(**kwargs)
 
@@ -540,12 +568,23 @@ class AnthropicModel:
         usage = getattr(resp, "usage", None)
         fresh = getattr(usage, "input_tokens", 0) if usage else 0
         cached = getattr(usage, "cache_read_input_tokens", 0) or 0 if usage else 0
+        written = getattr(usage, "cache_creation_input_tokens", 0) or 0 if usage else 0
         output = getattr(usage, "output_tokens", 0) if usage else 0
-        # This API reports fresh and cached input separately; estimate_cost wants the
-        # total with the cached part named inside it.
-        total_input = fresh + cached
+        # Three buckets, not two, and `input_tokens` contains none of the other two:
+        # the API's own total is input + cache_read + cache_creation. Leaving the write
+        # bucket out made turn 1 of every cached run — the turn that uploads the whole
+        # system prompt — cost almost nothing and report a context far smaller than the
+        # one actually sent, which also shortens the --context-limit brake.
+        #
+        # Cache writes really bill at 1.25x base input, which a three-rate tuple cannot
+        # express; counting them as ordinary fresh input still under-charges by that
+        # 25%. That is a known, bounded gap, and much smaller than omitting them.
+        total_input = fresh + cached + written
         return Reply(
-            items=[{"role": "assistant", "content": blocks}],
+            # An assistant turn with an empty content array is rejected on the next
+            # request, so a reply that produced no blocks contributes nothing to the
+            # history rather than something unsendable.
+            items=[{"role": "assistant", "content": blocks}] if blocks else [],
             text=text,
             tool_calls=calls,
             cost=estimate_cost(self.model, total_input, output, cached, self.prices),

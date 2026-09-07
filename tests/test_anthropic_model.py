@@ -176,3 +176,114 @@ def test_a_run_with_no_tools_sends_no_tools_key():
     client, sent = _fake_client([])
     AnthropicModel(client=client).complete([{"role": "user", "content": "hi"}], [])
     assert "tools" not in sent
+
+
+# --- through the real loop ----------------------------------------------------
+#
+# The tests above call complete() directly, which structurally cannot see a bug that
+# only appears in how the loop *uses* the model — the wrap-up turn's empty tool list,
+# the protocol invariant across a whole run, what compaction does to this shape. Those
+# are the ones that cost real money to find.
+
+
+def _scripted_client(responses):
+    """A client that returns each response in turn, recording every request sent."""
+    sent = []
+
+    class Messages:
+        def create(self, **kwargs):
+            sent.append(kwargs)
+            return responses[min(len(sent) - 1, len(responses) - 1)]
+
+    return SimpleNamespace(messages=Messages()), sent
+
+
+def _blocks(*bs):
+    return SimpleNamespace(content=list(bs), usage=SimpleNamespace(input_tokens=10, output_tokens=5))
+
+
+def test_a_whole_run_keeps_the_tool_call_protocol_intact():
+    from teacup_agent import loop
+    from teacup_agent.evals import tool_results_follow_their_call
+    from teacup_agent.memory import NullMemory
+
+    call = {"type": "tool_use", "id": "tu_1", "name": "calculate", "input": {"expression": "2+2"}}
+    client, sent = _scripted_client([_blocks(call), _blocks({"type": "text", "text": "it is 4"})])
+
+    state = loop.run(
+        "compute 2+2",
+        AnthropicModel(client=client),
+        memory=NullMemory(),
+        max_steps=4,
+        run_dir=None,
+        plan=False,
+    )
+    assert state.status == "done"
+    assert tool_results_follow_their_call(state)  # would be vacuously True before the guard learned this shape
+    assert state.trace[0].name == "calculate"
+
+
+def test_the_forced_wrap_up_still_sends_the_tool_definitions():
+    """The loop passes an empty tool list on the final turn to stop the model starting
+    more work. Dropping the `tools` array outright is a 400 here — "requests which
+    include tool_use or tool_result blocks must define tools" — so a run that called a
+    tool and then hit its step ceiling would die on the turn meant to rescue its answer.
+    """
+    from teacup_agent import loop
+    from teacup_agent.memory import NullMemory
+
+    call = {"type": "tool_use", "id": "tu_1", "name": "calculate", "input": {"expression": "2+2"}}
+    # never stops calling tools, so the run is guaranteed to hit the ceiling
+    client, sent = _scripted_client([_blocks(call)])
+
+    loop.run(
+        "compute 2+2",
+        AnthropicModel(client=client),
+        memory=NullMemory(),
+        max_steps=2,
+        run_dir=None,
+        plan=False,
+    )
+    wrap_up = sent[-1]
+    assert "tools" in wrap_up, "the wrap-up turn dropped the tool definitions -> 400"
+    assert wrap_up["tool_choice"] == {"type": "none"}  # defined, but may not be used
+
+
+def test_compaction_never_cuts_a_tool_use_away_from_its_result():
+    from teacup_agent import context as ctx
+
+    history = [
+        {"role": "user", "content": "goal"},
+        {"role": "assistant", "content": [{"type": "tool_use", "id": "tu_1", "name": "c", "input": {}}]},
+        {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "tu_1", "content": "2"}]},
+    ]
+    # index 2 sits between the call and its result and must not be offered
+    assert 2 not in ctx.safe_cut_points(history)
+
+
+def test_the_summarizer_can_see_tool_calls_and_their_results():
+    """render() read only a "text" key, so a Messages-API history flattened to nothing
+    and compaction summarized a blank document while discarding the real entries."""
+    from teacup_agent import context as ctx
+
+    text = ctx.render(
+        [
+            {"role": "assistant", "content": [{"type": "tool_use", "id": "t", "name": "search_web", "input": {"query": "nvidia"}}]},
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": "t", "content": "NVDA up 3%"}]},
+        ]
+    )
+    assert "search_web" in text and "nvidia" in text
+    assert "NVDA up 3%" in text
+
+
+def test_cache_writes_are_counted_not_dropped():
+    """Turn 1 of every cached run uploads the whole system prompt as a cache *write*.
+    input_tokens excludes it, so leaving it out made that turn cost almost nothing and
+    report a context far smaller than the one actually sent."""
+    usage = SimpleNamespace(
+        input_tokens=10, output_tokens=2, cache_read_input_tokens=0, cache_creation_input_tokens=5000
+    )
+    client, _ = _scripted_client([SimpleNamespace(content=[{"type": "text", "text": "hi"}], usage=usage)])
+    reply = AnthropicModel(client=client, prices=(3.0, 0.3, 15.0)).complete([], [])
+    assert reply.input_tokens == 5010
+    assert reply.cost == pytest.approx((5010 * 3.0 + 2 * 15.0) / 1_000_000)

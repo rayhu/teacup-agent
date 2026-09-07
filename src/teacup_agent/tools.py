@@ -225,14 +225,42 @@ def _search_web_backend(query: str, max_results: int) -> str:
 # silently starts spending is a worse surprise than a mediocre result.
 _HOSTED_MODEL_ENV = "TEACUP_AGENT_SEARCH_MODEL"
 _HOSTED_DEFAULT_MODEL = "gpt-5-mini"
+# Published as $10 per 1000 calls; goes stale like everything else in a price constant.
+# Charged per call on top of the tokens, so the budget brake sees this tool at all.
+_HOSTED_CALL_FEE = 0.01
+
+
+class _SearchNotConfigured(RuntimeError):
+    """The hosted backend cannot run until a human changes something — as opposed to
+    the network being unhappy, which is worth retrying. The two must not read alike."""
+
+# The loop's per-tool default is 30s and it cannot cancel a thread already inside an
+# HTTP call: on overrun the request still completes and still bills, while the model
+# gets an error and retries. A shorter client timeout is what actually stops that.
+_HOSTED_TIMEOUT = 20.0
+
+# What the hosted backend has spent since the loop last collected it. A tool function
+# has no access to `state`, and threading one in would put run state into every tool
+# signature for the sake of a single tool — so the spend is accumulated here and the
+# loop drains it after each step (loop.py). Without this the only tool in the repo that
+# costs money is invisible to `remaining_budget`, and a run can spend many times its
+# stated ceiling while `state.snapshot()` reports the ceiling untouched.
+_hosted_spend = 0.0
+
+
+def take_hosted_spend() -> float:
+    """Hand the accumulated hosted-search spend to the caller and reset it."""
+    global _hosted_spend
+    spent, _hosted_spend = _hosted_spend, 0.0
+    return spent
 
 
 def _search_hosted_backend(query: str, max_results: int) -> str:
     """The model provider's own hosted web search, via the Responses API.
 
-    Returns the same title/url/snippet shape the ddgs backend does, so nothing
-    downstream can tell which backend answered — plus the synthesis the hosted tool
-    produces, which ddgs has no equivalent for. Sources come from the response's
+    Same tool, same arguments, same numbered list of sources — but not byte-identical
+    output: this backend has no per-source snippet, and carries a summary the scraper
+    has no equivalent for. Sources come from the response's
     `url_citation` annotations rather than from parsing the prose: a citation the API
     attached is a link it actually used, where a URL scraped out of the text is a
     string the model may have written from memory.
@@ -243,35 +271,73 @@ def _search_hosted_backend(query: str, max_results: int) -> str:
     from openai import OpenAI  # lazy, same as the ddgs import above
 
     if not os.getenv("OPENAI_API_KEY"):
-        raise RuntimeError(
+        raise _SearchNotConfigured(
             "hosted search needs OPENAI_API_KEY. Set it, or use "
-            "TEACUP_AGENT_SEARCH=auto for the key-less backend."
+            "TEACUP_AGENT_SEARCH=auto for the key-less backend"
         )
+    global _hosted_spend
     model = os.getenv(_HOSTED_MODEL_ENV, _HOSTED_DEFAULT_MODEL)
-    resp = OpenAI().responses.create(
+    resp = OpenAI(timeout=_HOSTED_TIMEOUT).responses.create(
         model=model,
         tools=[{"type": "web_search"}],
+        # Forced, not offered. "Like any other tool, the model can choose to search the
+        # web or not" — and a model that chooses not to has answered from memory, which
+        # is precisely the thing this tool exists to replace. Left optional, the caller
+        # cannot tell a searched answer from a recalled one.
+        tool_choice="required",
         input=(
             f"Search the web for: {query}\n\n"
             f"Summarise what you find in a few sentences, citing your sources. "
             f"Prefer the {max_results} most relevant and most recent results."
         ),
     )
+    _hosted_spend += _HOSTED_CALL_FEE + _hosted_token_cost(resp, model)
 
-    summary = (getattr(resp, "output_text", "") or "").strip()
+    if not _search_actually_ran(resp):
+        # A successful API call in which no search happened. Saying "no results" here
+        # would tell the model the information does not exist, which is the single
+        # distinction this repo has been bitten by before.
+        return (
+            "ERROR: the hosted search did not run a query (the model answered without "
+            "searching). This does **not** mean the information does not exist. Retry, "
+            "or reword the query."
+        )
+
     sources = _url_citations(resp)[:max_results]
-    if not summary and not sources:
+    if not sources:
+        # A search ran and produced nothing citable. Deliberately *not* returning the
+        # summary: without a citation there is no way to tell text the search grounded
+        # from text the model wrote from memory, and an uncited paragraph presented as a
+        # search result is exactly the failure this backend was built to remove.
         return f"No web results for {query!r}."
 
-    lines = []
-    for i, (title, url) in enumerate(sources, 1):
-        lines.append(f"{i}. {title}\n   {url}")
-    parts = []
-    if lines:
-        parts.append("\n".join(lines))
+    summary = (getattr(resp, "output_text", "") or "").strip()
+    lines = [f"{i}. {title}\n   {url}" for i, (title, url) in enumerate(sources, 1)]
+    parts = ["\n".join(lines)]
     if summary:
-        parts.append(f"Summary (hosted search, {model}):\n{summary}")
+        parts.append(f"Summary:\n{summary}")
     return "\n\n".join(parts)
+
+
+def _search_actually_ran(resp: Any) -> bool:
+    """Whether the response contains a real web_search_call item."""
+    return any(
+        getattr(item, "type", None) == "web_search_call"
+        for item in (getattr(resp, "output", None) or [])
+    )
+
+
+def _hosted_token_cost(resp: Any, model: str) -> float:
+    from teacup_agent.model import estimate_cost
+
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return 0.0
+    return estimate_cost(
+        model,
+        getattr(usage, "input_tokens", 0) or 0,
+        getattr(usage, "output_tokens", 0) or 0,
+    )
 
 
 def _url_citations(resp: Any) -> list[tuple[str, str]]:
@@ -293,7 +359,8 @@ def _url_citations(resp: Any) -> list[tuple[str, str]]:
 
 @tool(
     description=(
-        "Search the web. Returns a list of results with title, link and snippet. "
+        "Search the web. Returns a numbered list of sources — title and link, "
+        "with a snippet on the key-less backend and a summary on the hosted one. "
         "Cite the returned links when you use them; two or three differently worded "
         "searches per question is usually enough."
     ),
@@ -312,7 +379,7 @@ def _url_citations(resp: Any) -> list[tuple[str, str]]:
     },
 )
 def search_web(query: str, max_results: int = 5) -> str:
-    """Three modes, selected by the TEACUP_AGENT_SEARCH environment variable:
+    """Four modes, selected by the TEACUP_AGENT_SEARCH environment variable:
 
     auto (default): the key-less scraper; on failure fall back to the offline
                     corpus and say why.
@@ -337,6 +404,15 @@ def search_web(query: str, max_results: int = 5) -> str:
     if mode == "hosted":
         try:
             return _search_hosted_backend(query, max_results)
+        except _SearchNotConfigured as e:
+            # A missing key is permanent. Telling the model to "retry later" would send
+            # it back to a mode that cannot work until a human changes something, and
+            # it would keep going until the step ceiling.
+            return (
+                f"ERROR: hosted search is not configured ({e}). This is a setup "
+                "problem, not a temporary one — retrying will not help. Answer from "
+                "what you already have and mark anything unverified as unverified."
+            )
         except Exception as e:
             return (
                 f"ERROR: hosted search failed ({type(e).__name__}: {e}). This does "

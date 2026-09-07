@@ -32,6 +32,7 @@ inside the group is a cut that orphans part of it.
 
 from __future__ import annotations
 
+import json
 import pathlib
 import re
 from typing import Any
@@ -132,6 +133,13 @@ def _readable_pointer(path: pathlib.Path) -> pathlib.Path | None:
 # --- compact: find a safe cut point, replace early context with one summary ---
 
 
+def _blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """A message's content as a list of blocks. Empty for the string-bodied shapes,
+    so a caller can ask any message without checking which backend wrote it."""
+    content = msg.get("content")
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
 def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
     """Every position where no tool call is left dangling — the only places where
     cutting cannot break the message protocol.
@@ -139,6 +147,14 @@ def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
     Same scan as the ordering invariant in evals: an announced id goes into the set,
     a filled id comes out, and any moment the set is empty is a safe point. Both API
     shapes are recognised.
+
+    Three, now. The Messages API (`AnthropicModel`) is neither: its call is a
+    `tool_use` block inside an assistant turn's content list and its result is a
+    `tool_result` block inside a **user** turn. A scanner that knows only the other two
+    never adds anything to `open_ids`, so every index looks safe — and `compact()` then
+    cuts at a fixed offset from the end, which lands between a `tool_use` and its
+    `tool_result` a large fraction of the time. The API rejects that with "tool_use ids
+    were found without tool_result blocks immediately after".
 
     Plus one rule for the Responses shape: **only cut on a turn boundary.** A turn
     arrives as a group (reasoning, then an optional message, then that turn's
@@ -157,8 +173,18 @@ def safe_cut_points(messages: list[dict[str, Any]]) -> list[int]:
         if msg.get("role") == "assistant":
             for tc in msg.get("tool_calls") or []:
                 open_ids.add(tc["id"])
+            # Messages-API shape: the call is a block *inside* the assistant turn's
+            # content list, not a sibling `tool_calls` field.
+            for block in _blocks(msg):
+                if block.get("type") == "tool_use":
+                    open_ids.add(block["id"])
         elif msg.get("role") == "tool":
             open_ids.discard(msg.get("tool_call_id"))
+        elif msg.get("role") == "user":
+            # ...and the result comes back as a *user* turn, not a role of its own.
+            for block in _blocks(msg):
+                if block.get("type") == "tool_result":
+                    open_ids.discard(block.get("tool_use_id"))
         elif msg.get("type") == "function_call":
             open_ids.add(msg["call_id"])
         elif msg.get("type") == "function_call_output":
@@ -185,14 +211,34 @@ have superseded.
 Output the note itself, with no preamble like "Sure, here is the summary"."""
 
 
+def _block_text(block: dict[str, Any]) -> str:
+    """Readable text for one content block, whichever backend produced it.
+
+    A `tool_use`/`tool_result` block carries no "text" key, so reading only that field
+    flattened an entire Messages-API history to the empty string: every tool call and
+    every retrieved fact vanished, and the summarizer was handed a blank document while
+    the entries it claimed to have compacted were discarded. Silent, which is the worst
+    version of it — the run continued on a handover note built from nothing.
+    """
+    kind = block.get("type")
+    if kind == "tool_use":
+        return f"[called {block.get('name', '?')} {json.dumps(block.get('input') or {}, ensure_ascii=False)}]"
+    if kind == "tool_result":
+        content = block.get("content")
+        if isinstance(content, list):
+            content = " ".join(_block_text(c) for c in content if isinstance(c, dict))
+        return f"[result: {content}]"
+    return str(block.get("text", ""))
+
+
 def render(messages: list[dict[str, Any]]) -> str:
     """Flatten a slice of messages into plain text for the summarizer."""
     lines = []
     for m in messages:
         kind = m.get("type") or m.get("role")
         body = m.get("content") or m.get("output") or m.get("arguments") or ""
-        if isinstance(body, list):  # rich content from the Responses API
-            body = " ".join(str(x.get("text", "")) for x in body if isinstance(x, dict))
+        if isinstance(body, list):  # rich content: Responses items, or Messages blocks
+            body = " ".join(_block_text(x) for x in body if isinstance(x, dict)).strip()
         lines.append(f"[{kind}] {str(body)[:1500]}")
     return "\n".join(lines)
 

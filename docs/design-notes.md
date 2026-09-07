@@ -8,7 +8,7 @@ Start with [the README](../README.md) if you want to know what the project is. S
 
 ---
 
-## The three search_web modes
+## The four search_web modes
 
 Web search goes through [`ddgs`](https://pypi.org/project/ddgs/) (DuckDuckGo) and
 needs **no API key**; `uv sync` installs it. Switch with the `TEACUP_AGENT_SEARCH`
@@ -18,6 +18,7 @@ environment variable:
 | --- | --- | --- |
 | `auto` (default) | search the web; on failure fall back to the local corpus and say why | everyday use |
 | `web` | web only; on failure return `ERROR:` | when offline material must not stand in |
+| `hosted` | the model provider's own web search (OpenAI Responses `web_search`), forced with `tool_choice: required`; costs money per call, needs `--live` | when result quality matters more than the per-call fee |
 | `offline` | the three local corpus entries only, zero network calls | evals, unit tests, demos |
 
 `--search` overrides it on the command line. The default follows the run mode:

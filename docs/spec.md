@@ -30,6 +30,7 @@ Environment variables:
 | `OPENAI_API_KEY` | `model.py`, via `.env` | required only for `--live` |
 | `TEACUP_AGENT_SEARCH` | `tools.py` | `auto` \| `web` \| `hosted` \| `offline`; set by `cli.py` from `--search` |
 | `TEACUP_AGENT_SEARCH_MODEL` | `tools.py` | model behind `hosted` search, default `gpt-5-mini` |
+| `ANTHROPIC_API_KEY` | `model.py` | read directly by `AnthropicModel` when a profile names no `api_key_env` |
 | any name in `api_key_env` | `agent_config.py` | per-profile key when running `--config agent.yaml` |
 
 ## 2. CLI surface

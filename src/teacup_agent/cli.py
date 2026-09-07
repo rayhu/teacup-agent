@@ -421,7 +421,8 @@ def _main(args, project_root: pathlib.Path) -> int:
 
     # Search mode is decoupled from model mode: the offline demo also searches
     # offline, so it stays network-free and instant.
-    os.environ["TEACUP_AGENT_SEARCH"] = args.search or ("auto" if args.live else "offline")
+    search_mode = _resolve_search(args.search, live=args.live)
+    os.environ["TEACUP_AGENT_SEARCH"] = search_mode
 
     resumed = persist.load(args.resume) if args.resume else None
     if resumed is not None:
@@ -512,6 +513,25 @@ def _finish(state, run_dir, args) -> int:
         print(f"State: {json.dumps(state.snapshot(), ensure_ascii=False)}")
     return exit_code
 
+def _resolve_search(requested: str | None, *, live: bool) -> str:
+    """The search mode for this run, refusing the one combination that spends money
+    from a path advertised as free.
+
+    `--live` is this repo's money gate, and the offline demo really does call
+    search_web — so `--search hosted` without `--live` would bill a real API call from
+    the run README and --help describe as key-less and instant. Every other mode is
+    free, so only this pairing is refused, and it is refused rather than downgraded:
+    silently running a different backend than the one asked for is how a measurement
+    ends up describing something that never happened.
+    """
+    if requested == "hosted" and not live:
+        raise SystemExit(
+            "ERROR: --search hosted costs money per call and needs --live. "
+            "Use --search auto for the key-less backend, or add --live."
+        )
+    return requested or ("auto" if live else "offline")
+
+
 
 def _main_config(args) -> int:
     """The --config path: everything comes from the YAML file, nothing from the other
@@ -519,7 +539,13 @@ def _main_config(args) -> int:
     from teacup_agent import agent_config
 
     cfg = agent_config.load(args.config)
-    os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
+    # Same money gate as the flag path: agent.yaml asking for hosted search does not
+    # make it free. runtime.search always names a mode (it defaults to "auto" and is
+    # validated at load), so it is passed through as an explicit request rather than
+    # as "unset".
+    os.environ["TEACUP_AGENT_SEARCH"] = _resolve_search(
+        cfg.runtime.search, live=getattr(args, "live", False)
+    )
 
     resumed = persist.load(args.resume) if args.resume else None
     if resumed is not None:

@@ -173,7 +173,9 @@ defensive programming. It is the reason the loop exists.
 The core is not dated. An agent in 2026 is still this loop. The engineering around it has
 come a long way: Responses API, prompt caching, context management, parallel execution,
 persistence and resume, an approval gate, trajectory scoring and MCP are all in place.
-A serious search backend is the one thing left.
+Search has two backends now: a key-less DuckDuckGo scraper (`auto`, the default) and
+the provider's own hosted search (`--search hosted`), which costs money per call and
+is refused without `--live`.
 
 See [docs/roadmap.md](docs/roadmap.md) for what is missing, why it matters, and what order
 to add it in.

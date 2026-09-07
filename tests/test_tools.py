@@ -253,11 +253,19 @@ class _Ann(SimpleNamespace):
     pass
 
 
-def _hosted_response(summary, citations):
-    """A Responses object shaped the way the hosted web_search tool returns one."""
+def _hosted_response(summary, citations, *, searched=True, usage=None):
+    """A Responses object shaped the way the hosted web_search tool returns one.
+
+    `searched=False` models the case the docs are explicit about — "the model can
+    choose to search the web or not" — where no web_search_call item is produced and
+    the prose is recall, not retrieval.
+    """
     anns = [_Ann(type="url_citation", url=u, title=t) for t, u in citations]
-    block = SimpleNamespace(annotations=anns)
-    return SimpleNamespace(output_text=summary, output=[SimpleNamespace(content=[block])])
+    items = []
+    if searched:
+        items.append(SimpleNamespace(type="web_search_call"))
+    items.append(SimpleNamespace(type="message", content=[SimpleNamespace(annotations=anns)]))
+    return SimpleNamespace(output_text=summary, output=items, usage=usage)
 
 
 def _fake_openai(resp, monkeypatch):
@@ -270,12 +278,15 @@ def _fake_openai(resp, monkeypatch):
 
     class FakeOpenAI:
         def __init__(self, *a, **k):
+            sent["_client_kwargs"] = k
             self.responses = Responses()
 
     import openai
 
     monkeypatch.setattr(openai, "OpenAI", FakeOpenAI)
     monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+    tools.take_hosted_spend()  # zero the accumulator between tests
     return sent
 
 
@@ -284,30 +295,45 @@ def test_hosted_search_returns_sources_and_a_summary(monkeypatch):
         "NVIDIA sells GPUs.", [("NVIDIA Q3", "https://a.example"), ("Analysis", "https://b.example")]
     )
     sent = _fake_openai(resp, monkeypatch)
-    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
 
     out = tools.search_web("nvidia strategy")
     assert "https://a.example" in out and "https://b.example" in out
     assert "NVIDIA sells GPUs." in out
-    assert sent["tools"] == [{"type": "web_search"}]  # the hosted tool, not ours
+    assert sent["tools"] == [{"type": "web_search"}]
+    assert sent["tool_choice"] == "required"  # forced, not offered
 
 
-def test_hosted_search_uses_citations_not_urls_scraped_from_the_prose(monkeypatch):
-    """A citation the API attached is a link it actually used; a URL parsed out of
-    the text is a string the model may have written from memory."""
-    resp = _hosted_response("See https://hallucinated.example for details.", [])
+def test_prose_is_withheld_when_the_model_never_actually_searched(monkeypatch):
+    """The whole point of this backend. A model that chose not to search answered from
+    memory, and returning that as a search result is the failure #11 exists to remove.
+
+    The earlier version of this test asserted only that no numbered source list
+    appeared, which the un-cited prose passes — so the hallucinated URL went out to the
+    model and the test stayed green. Assert on the URL itself.
+    """
+    resp = _hosted_response("See https://hallucinated.example for details.", [], searched=False)
     _fake_openai(resp, monkeypatch)
-    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
 
     out = tools.search_web("q")
-    assert "1. " not in out  # no source list, because there were no citations
-    assert "Summary" in out
+    assert "hallucinated.example" not in out
+    assert out.startswith("ERROR: the hosted search did not run a query")
+    assert "does **not** mean the information does not exist" in out
+
+
+def test_a_search_that_returns_nothing_citable_withholds_the_summary(monkeypatch):
+    """A search ran but produced no citation: there is no way to tell grounded text
+    from recalled text, so the paragraph does not go out as a result."""
+    resp = _hosted_response("Acme raised $2B, see https://made-up.example", [], searched=True)
+    _fake_openai(resp, monkeypatch)
+
+    out = tools.search_web("acme funding")
+    assert "made-up.example" not in out
+    assert out == "No web results for 'acme funding'."
 
 
 def test_hosted_search_respects_max_results(monkeypatch):
     cites = [(f"t{i}", f"https://{i}.example") for i in range(10)]
     _fake_openai(_hosted_response("s", cites), monkeypatch)
-    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
 
     out = tools.search_web("q", max_results=3)
     assert out.count("https://") == 3
@@ -331,12 +357,14 @@ def test_hosted_search_failure_is_an_error_never_the_offline_corpus(monkeypatch)
     assert "does **not** mean the information does not exist" in out
 
 
-def test_hosted_search_without_a_key_says_so(monkeypatch):
+def test_hosted_search_without_a_key_says_it_is_configuration_not_weather(monkeypatch):
     monkeypatch.delenv("OPENAI_API_KEY", raising=False)
     monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
     out = tools.search_web("q")
-    assert out.startswith("ERROR: hosted search failed")
     assert "OPENAI_API_KEY" in out
+    # a permanent config error must not be dressed up as a transient one, or the model
+    # keeps retrying a mode that can never work
+    assert "Retry later" not in out
 
 
 def test_auto_never_reaches_for_the_paid_backend(monkeypatch):
@@ -345,8 +373,35 @@ def test_auto_never_reaches_for_the_paid_backend(monkeypatch):
     called = []
     monkeypatch.setattr(tools, "_search_hosted_backend", lambda *a: called.append(a) or "hosted")
     monkeypatch.setattr(tools, "_search_web_backend", lambda *a: "scraped")
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")  # a key IS present
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
     monkeypatch.delenv("TEACUP_AGENT_SEARCH", raising=False)
 
     assert tools.search_web("q") == "scraped"
     assert called == []
+
+
+def test_the_hosted_call_is_charged_so_the_budget_brake_can_see_it(monkeypatch):
+    """This is the only tool in the repo that spends money. Left uncharged, a run can
+    burn many times its stated ceiling while state.snapshot() reports it untouched."""
+    usage = SimpleNamespace(input_tokens=1000, output_tokens=500)
+    _fake_openai(_hosted_response("s", [("t", "https://a.example")], usage=usage), monkeypatch)
+
+    tools.search_web("q")
+    spent = tools.take_hosted_spend()
+    assert spent >= tools._HOSTED_CALL_FEE  # the per-call fee, plus tokens
+    assert tools.take_hosted_spend() == 0.0  # draining resets it
+
+
+def test_the_search_model_is_configurable(monkeypatch):
+    sent = _fake_openai(_hosted_response("s", [("t", "https://a.example")]), monkeypatch)
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH_MODEL", "gpt-5")
+    tools.search_web("q")
+    assert sent["model"] == "gpt-5"
+
+
+def test_the_client_carries_a_timeout(monkeypatch):
+    """The loop's 30s per-tool timeout cannot cancel a thread already inside an HTTP
+    call: the request still completes and still bills while the model retries."""
+    sent = _fake_openai(_hosted_response("s", [("t", "https://a.example")]), monkeypatch)
+    tools.search_web("q")
+    assert sent["_client_kwargs"]["timeout"] == tools._HOSTED_TIMEOUT

@@ -178,6 +178,21 @@ def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
         **prices,
     )
 
+def _search_mode(value: Any) -> str:
+    """runtime.search, checked at load rather than accepted as a free string.
+
+    A typo here used to be silent: `search: ofline` fell through to the scraper and the
+    run quietly hit the network from a config that meant to forbid it. Now that one of
+    the modes bills per call, an unchecked spelling is a money question too.
+    """
+    mode = str(value).lower()
+    if mode not in ("auto", "web", "hosted", "offline"):
+        raise ValueError(
+            f"runtime.search must be 'auto', 'web', 'hosted' or 'offline', got {value!r}"
+        )
+    return mode
+
+
 
 def _model_roles(raw: dict[str, Any] | None, profiles: dict[str, ModelProfile]) -> dict[str, str]:
     """Validate models.roles at load time.
@@ -263,7 +278,7 @@ def load(path: str | pathlib.Path) -> AgentConfig:
         approve=runtime_raw.get("approve", "auto"),
         plan=_normalize_off_on(runtime_raw.get("plan", "auto")),
         reflect=_normalize_off_on(runtime_raw.get("reflect", "auto")),
-        search=runtime_raw.get("search", "auto"),
+        search=_search_mode(runtime_raw.get("search", "auto")),
         memory=runtime_raw.get("memory", "memory.json"),
         run_dir=_normalize_off_on(runtime_raw.get("run_dir", "runs")),
     )
@@ -329,6 +344,15 @@ def build_model(profile: ModelProfile) -> "model_mod.Model":
     """
     from teacup_agent import model as model_mod
 
+    if profile.provider == "anthropic":
+        # Before the OpenAI client below, not after it: that branch would otherwise
+        # build one from this profile's api_key_env — an Anthropic key handed to an
+        # OpenAI client — and then discard it, raising on a profile that names a key
+        # variable the OpenAI path has no business reading.
+        return model_mod.AnthropicModel(
+            profile.model, client=_anthropic_client(profile), prices=profile.prices()
+        )
+
     client = None
     if profile.base_url is not None or profile.api_key_env is not None:
         from openai import OpenAI
@@ -342,13 +366,6 @@ def build_model(profile: ModelProfile) -> "model_mod.Model":
         # A local/self-hosted endpoint may need no key at all; the SDK still requires
         # a non-empty string.
         client = OpenAI(base_url=profile.base_url, api_key=api_key or "not-needed")
-
-    if profile.provider == "anthropic":
-        # `api` is not consulted: the Messages API is the only shape this provider has,
-        # so honouring api: chat here would silently build an OpenAI client instead.
-        return model_mod.AnthropicModel(
-            profile.model, client=_anthropic_client(profile), prices=profile.prices()
-        )
 
     if profile.api == "responses":
         return model_mod.ResponsesModel(

@@ -467,17 +467,38 @@ per-turn cap applies), and passing curated context down instead of a blank slate
 **Was**: `search_web` scraped DuckDuckGo through ddgs — free and key-less, but average
 in both quality and stability.
 
-**Built**: the model's own hosted web search, via the Responses API's `web_search` tool,
-as a fourth mode on the existing switch: `TEACUP_AGENT_SEARCH=hosted`
-(`TEACUP_AGENT_SEARCH_MODEL` picks the model, default `gpt-5-mini`). The tool's
-interface is unchanged — same name, same arguments, same title/url/snippet shape out —
-so nothing downstream can tell which backend answered. What the hosted path adds on top
-is a synthesis, which the scraper has no equivalent for.
+**Built**: OpenAI's hosted web search, via the Responses API's `web_search` tool, as a
+fourth mode on the existing switch: `TEACUP_AGENT_SEARCH=hosted` / `--search hosted`
+(`TEACUP_AGENT_SEARCH_MODEL` picks the model, default `gpt-5-mini`). Same tool, same
+arguments, same numbered list of sources — but the output is *not* byte-identical: this
+backend has no per-source snippet, and carries a summary the scraper has no equivalent
+for. It is OpenAI's specifically, not "whatever provider the run is using": it builds
+its own client and reads `OPENAI_API_KEY`, so a run whose model profile points at
+Anthropic or a local endpoint still searches through OpenAI, or fails if there is no
+OpenAI key. Worth knowing before turning it on.
 
 Sources come from the response's `url_citation` annotations, not from parsing URLs out
 of the prose: a citation the API attached is a link it actually used, where a URL
-scraped from generated text is a string the model may have written from memory. That
-distinction is the same one #11 existed to fix, one level down.
+scraped from generated text is a string the model may have written from memory.
+
+That distinction is load-bearing rather than decorative, and getting it *right* took a
+second pass. The search is forced (`tool_choice: "required"`), because the docs are
+explicit that "the model can choose to search the web or not" — and a model that chose
+not to has answered from memory, which is the exact thing this backend replaces. A
+response with no `web_search_call` is reported as "the search did not run", never as
+"no results". And a search that ran but produced no citation returns no summary at all:
+without a citation there is no way to tell grounded text from recalled text, and an
+uncited paragraph presented as a search result is the failure this item existed to
+remove. The first version of this shipped none of those three checks, and its test
+asserted only that no numbered list appeared — which un-cited prose passes.
+
+**The money.** This is the only tool in the repo that spends, and it now reaches the
+same brake the model calls do: the backend accumulates its per-call fee plus token cost,
+and the loop drains it into `state.charge()` after each step. Left uncharged, a run with
+the defaults could make 24 hosted searches against a $0.05 ceiling that
+`state.snapshot()` reported as untouched. `--search hosted` is also refused without
+`--live` — `--live` is this repo's money gate, and the offline demo really does call
+`search_web`.
 
 **Two decisions worth keeping.** `auto` does **not** reach for the hosted backend even
 when `OPENAI_API_KEY` is set. Choosing the backend that costs money per call should be a

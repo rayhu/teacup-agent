@@ -722,6 +722,16 @@ def _loop(
         # ---- 4. run every tool call in parallel, refill in order (trap 2) ---
         execute_calls(state, reply.tool_calls, model, emit, tool_timeout, run_dir, approve)
 
+        # A tool that spends money has to reach the same brake the model calls do.
+        # search_web's hosted backend is the only one, and it has no access to `state`
+        # — so it accumulates and the loop collects. Charged unnamed: it is not any
+        # model profile's spend, and putting it in the per-profile breakdown would
+        # misattribute it to whichever profile happened to run the turn.
+        hosted = tools_mod.take_hosted_spend()
+        if hosted:
+            state.charge(hosted)
+            emit("tool_spend", tool="search_web", cost=hosted, step=state.step)
+
         # ---- 5. persist: save every step, or there is nothing to resume from -
         # elapsed uses the value measured at the top of this turn, so we do not ask
         # the clock twice (one less source of non-determinism).
