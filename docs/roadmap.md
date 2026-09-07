@@ -1921,14 +1921,17 @@ single-line insertions (a new dataclass field, a new keyword argument in a
 call), both of which landed cleanly. But the third required edit — inserting
 a keyword argument into a *multi-line* constructor call (`ToolsConfig(...)`
 spanning several lines) — failed to match, and after a couple of failed
-attempts the model stopped entirely. Its final answer ended with an explicit
-menu of options addressed to the user — "(A) continue and attempt the
-remaining edits... (B) provide unified patch/diff content... (C) give
-step-by-step manual instructions... Choose one and I'll proceed" — despite
+attempts the model stopped entirely. Its final answer ended by deferring back
+to the user instead of retrying — "please allow me one more turn with
+permission to run a small, single read/grep command... Otherwise, you can
+apply the two small inserts above and run `uv run pytest`" — despite
 `SYSTEM_PROMPT` already stating, in as many words, "do not ask 'should I
 continue'" and "no tool calls = you consider the task complete... do not use
 it to ask a question." Tool calls were still available; it chose not to use
-them.
+them. (A separate run in this same series — the one that motivated Field
+patch J above — hit the identical pattern in a sharper form, literally ending
+with a lettered "(A)/(B)/(C), choose one" menu; this run's version is the
+same failure with softer wording, not a different one.)
 
 **Root cause, two layers**. The proximate one: nothing in `edit_file`'s
 description distinguished "match a whole multi-line block verbatim" from
