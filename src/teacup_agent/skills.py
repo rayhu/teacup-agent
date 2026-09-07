@@ -35,6 +35,7 @@ from __future__ import annotations
 
 import pathlib
 import re
+import sys
 from dataclasses import dataclass, field
 from typing import Any
 
@@ -45,14 +46,18 @@ from teacup_agent import tools as tools_mod
 NAME = "load_skill"
 DEFAULT_DIR = "skills"
 
-# Agent Skills spec: name is lowercase letters, digits and hyphens, max 64 chars, and
-# must equal the folder name — the folder is how discover() finds it, so a name that
-# disagreed would make the skill answer to two different identities depending on who's
-# asking. description has no charset constraint but is capped at 1024 chars, meant to
-# read as one catalog line, not a paragraph.
+# Agent Skills spec (platform.claude.com/docs/en/agents-and-tools/agent-skills): name
+# is lowercase letters, digits and hyphens, max 64 chars, must not contain the reserved
+# words "claude"/"anthropic", and (this repo's own added rule, matched by teacup-run's
+# manifest.py so a skill validates the same way in either) must equal the folder name —
+# the folder is how discover() finds it, so a name that disagreed would make the skill
+# answer to two different identities depending on who's asking. description has no
+# charset constraint but is capped at 1024 chars, meant to read as one catalog line,
+# not a paragraph.
 _NAME_RE = re.compile(r"^[a-z0-9]+(-[a-z0-9]+)*$")
 _MAX_NAME_LEN = 64
 _MAX_DESCRIPTION_LEN = 1024
+_RESERVED_NAME_WORDS = ("claude", "anthropic")
 
 
 @dataclass
@@ -91,28 +96,51 @@ def _frontmatter(text: str) -> tuple[dict[str, Any], str]:
 
 
 def discover(root: str | pathlib.Path = DEFAULT_DIR) -> list[Skill]:
-    """Find every `<root>/*/SKILL.md`. A malformed skill is skipped, not fatal."""
+    """Find every `<root>/*/SKILL.md`. A malformed skill is skipped, not fatal — but
+    "skipped" prints why, on stderr, rather than the skill just quietly not being
+    there. AGENTS.md's own rule for tools ("never let a broken tool read as 'this does
+    not exist'") applies just as much to a skill an author expected to see loaded."""
     base = pathlib.Path(root)
     found = []
     for path in sorted(base.glob("*/SKILL.md")):
         try:
             meta, body = _frontmatter(path.read_text(encoding="utf-8"))
-        except (OSError, yaml.YAMLError):
+        except OSError as exc:
+            print(f"[skills] {path}: could not read ({exc}), skipping", file=sys.stderr)
+            continue
+        except yaml.YAMLError as exc:
+            print(f"[skills] {path}: malformed YAML frontmatter ({exc}), skipping", file=sys.stderr)
             continue
         folder_name = path.parent.name
         name = str(meta.get("name") or folder_name)
         description = str(meta.get("description", "")).strip()
         if not description or not body:
-            continue  # without a description the model cannot know when to load it
-        # A name that isn't spec-shaped, or disagrees with the folder discover() found
-        # it under, is exactly the kind of thing that silently works today and quietly
-        # breaks the moment this same folder is read by a different, spec-strict tool.
-        if name != folder_name or not _NAME_RE.match(name) or len(name) > _MAX_NAME_LEN:
+            print(f"[skills] {path}: needs both a description and a body, skipping", file=sys.stderr)
+            continue
+        # A name that isn't spec-shaped, disagrees with the folder discover() found it
+        # under, or uses a reserved word is exactly the kind of thing that silently
+        # works today and quietly breaks the moment this same folder is read by a
+        # different, spec-strict tool.
+        if (
+            name != folder_name
+            or not _NAME_RE.match(name)
+            or len(name) > _MAX_NAME_LEN
+            or any(word in name for word in _RESERVED_NAME_WORDS)
+        ):
+            print(f"[skills] {path}: name {name!r} is not Agent Skills-conformant, skipping", file=sys.stderr)
             continue
         if len(description) > _MAX_DESCRIPTION_LEN:
             description = description[:_MAX_DESCRIPTION_LEN]
         allowed_tools_raw = meta.get("allowed-tools", "")
-        allowed_tools = tuple(str(allowed_tools_raw).split()) if allowed_tools_raw else ()
+        if isinstance(allowed_tools_raw, (list, tuple)):
+            # The spec defines this as a space-delimited string, but it lives inside a
+            # YAML block, and writing it as a YAML list is an easy, plausible mistake.
+            # str(list).split() on that would silently produce garbage tool names
+            # ("['read_file',", "'run_command']") with no error — accept the list
+            # shape directly instead of letting that happen.
+            allowed_tools = tuple(str(t) for t in allowed_tools_raw)
+        else:
+            allowed_tools = tuple(str(allowed_tools_raw).split()) if allowed_tools_raw else ()
         metadata = meta.get("metadata") or {}
         found.append(Skill(
             name=name,
