@@ -66,5 +66,10 @@ def test_the_refusal_honours_the_json_contract(capsys):
     code = cli.main(["x", "--search", "hosted", "--json"])
     out = capsys.readouterr().out.strip()
     payload = json.loads(out)  # one object, parseable
-    assert code == 2 and payload["exit_code"] == 2
+    # integration.md: exit_code is 0 when status is "done" and 1 otherwise, and every
+    # field through `throttled` is snapshot() unchanged — a caller reading
+    # remaining_budget must not KeyError on a refusal.
+    assert code == 1 and payload["exit_code"] == 1
     assert payload["status"] == "error" and "needs --live" in payload["answer"]
+    for field in ("remaining_budget", "spend", "step", "max_steps", "throttled"):
+        assert field in payload, f"the refusal payload dropped {field}"

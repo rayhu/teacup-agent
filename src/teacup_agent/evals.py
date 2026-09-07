@@ -504,15 +504,19 @@ CASES: list[Case] = [
 
 def run_case(case: Case) -> tuple[bool, AgentState]:
     # Evals must be deterministic: force offline search, no network calls.
-    os.environ.setdefault("TEACUP_AGENT_SEARCH", "offline")
+    # Assigned, not setdefault: AGENTS.md advertises this command as free, and one of
+    # the cases really does call search_web. setdefault leaves an exported
+    # TEACUP_AGENT_SEARCH=hosted in place, so the "free" health check would bill for
+    # anyone who has a key exported — which is everyone doing live work here.
+    os.environ["TEACUP_AGENT_SEARCH"] = "offline"
     main_model = ScriptedWithSummarizer(list(case.script), plan_items=case.plan_items)
-    model = case.model_factory() if case.model_factory else main_model
     if case.roles and case.model_factory:
         # Refused rather than silently resolved: `roles` builds a router over scripted
         # models and would discard the factory's model entirely, so the case would run
         # on ScriptedModel while claiming to exercise another backend — the precise
         # "proof by construction" failure `roles` exists to provide.
         raise ValueError(f"case {case.name!r} sets both model_factory and roles; pick one")
+    model = case.model_factory() if case.model_factory else main_model
     if case.roles:
         # A separate scripted model per other profile: proof by construction that a
         # routed role did not quietly run on the main one.

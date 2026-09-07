@@ -433,14 +433,30 @@ def test_a_response_that_never_searched_is_not_billed_a_search_fee(monkeypatch):
     assert tools.take_hosted_spend() == 0.0
 
 
-def test_spend_does_not_leak_from_one_run_into_the_next(monkeypatch):
-    """The accumulator is module state and a process runs many agents (bench.py's
-    matrix, an A2A server). A charge stranded by one run must not land on another."""
-    _fake_openai(_hosted_response("s", [("t", "https://a.example")]), monkeypatch)
-    tools.search_web("q")
-    assert tools._hosted_spend > 0
-    tools.reset_hosted_spend()
-    assert tools.take_hosted_spend() == 0.0
+def test_a_nested_run_neither_steals_nor_discards_its_parents_spend(monkeypatch):
+    """Runs nest — subagent.py calls loop.run inside a parent run — and the accumulator
+    is module state. The earlier "reset at run start" made the child either discard the
+    parent's pending spend or absorb it and trip its own budget brake on money it never
+    spent. This drives the real loop.run, because a test that called the helper directly
+    survived the bug it was named for.
+    """
+    from teacup_agent import loop, tools as tools_mod
+    from teacup_agent.memory import NullMemory
+    from teacup_agent.model import ScriptedModel, assistant_says
+
+    tools_mod.take_hosted_spend()  # start clean
+    tools_mod.add_hosted_spend(0.02)  # a parent search, not yet drained
+
+    inner = loop.run(  # stands in for a subagent's nested run
+        "child task",
+        ScriptedModel([assistant_says("done")]),
+        memory=NullMemory(),
+        budget=0.05,
+        run_dir=None,
+        plan=False,
+    )
+    assert inner.remaining_budget == pytest.approx(0.05, abs=0.01)  # child paid nothing
+    assert tools_mod.take_hosted_spend() == pytest.approx(0.02)  # parent's, intact
 
 
 def test_hosted_spend_reaches_the_budget_brake_through_the_loop(monkeypatch):
@@ -453,6 +469,7 @@ def test_hosted_spend_reaches_the_budget_brake_through_the_loop(monkeypatch):
     _fake_openai(_hosted_response("s", [("t", "https://a.example")]), monkeypatch)
     monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
 
+    events = []
     state = loop.run(
         "search for something",
         ScriptedModel([assistant_calls([("search_web", {"query": "q"})]), assistant_says("done")]),
@@ -460,7 +477,89 @@ def test_hosted_spend_reaches_the_budget_brake_through_the_loop(monkeypatch):
         budget=0.05,
         run_dir=None,
         plan=False,
+        on_event=lambda name, data: events.append((name, data)),
     )
     # the per-call fee landed against the budget, not just in the module global
     assert state.remaining_budget < 0.05 - tools_mod._HOSTED_CALL_FEE / 2
     assert tools_mod.take_hosted_spend() == 0.0  # fully drained by the loop
+    assert any(e[0] == "tool_spend" for e in events)
+
+
+def test_hosted_spend_can_stop_a_run_mid_flight(monkeypatch):
+    """The in-loop drain is the only one that lets can_continue() see hosted spend while
+    the run is still going. Asserting the final budget cannot tell the two drains apart —
+    both charge, and the post-loop one emits the same event — so this asserts the brake
+    itself: a budget smaller than two searches must stop the run before the step ceiling.
+    """
+    from teacup_agent import loop, tools as tools_mod
+    from teacup_agent.memory import NullMemory
+    from teacup_agent.model import ScriptedModel, assistant_calls
+
+    _fake_openai(_hosted_response("s", [("t", "https://a.example")]), monkeypatch)
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    search = assistant_calls([("search_web", {"query": "q"})])
+    state = loop.run(
+        "search repeatedly",
+        ScriptedModel([search] * 6),
+        memory=NullMemory(),
+        budget=tools_mod._HOSTED_CALL_FEE * 1.5,  # affords one search, not two
+        max_steps=6,
+        run_dir=None,
+        plan=False,
+    )
+    assert state.status == "out_of_budget"
+    assert state.step < 6  # stopped by the money, not by the step ceiling
+
+
+def test_a_search_on_the_final_step_is_still_charged(monkeypatch):
+    """The other drain. A run whose last step searches has no further loop iteration to
+    collect it, so without the post-loop drain the fee is silently never charged."""
+    from teacup_agent import loop, tools as tools_mod
+    from teacup_agent.memory import NullMemory
+    from teacup_agent.model import ScriptedModel, assistant_calls
+
+    _fake_openai(_hosted_response("s", [("t", "https://a.example")]), monkeypatch)
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    state = loop.run(
+        "search",
+        ScriptedModel([assistant_calls([("search_web", {"query": "q"})])]),
+        memory=NullMemory(),
+        budget=0.05,
+        max_steps=1,  # the search happens on the last step there is
+        run_dir=None,
+        plan=False,
+    )
+    assert state.remaining_budget < 0.05 - tools_mod._HOSTED_CALL_FEE / 2
+    assert tools_mod.take_hosted_spend() == 0.0
+
+
+def test_cached_input_tokens_are_billed_at_the_cached_rate(monkeypatch):
+    """A cache hit charged at fresh rates overstates the cost of every repeated query."""
+    from teacup_agent import tools as tools_mod
+
+    details = SimpleNamespace(cached_tokens=1_000_000)
+    usage = SimpleNamespace(input_tokens=1_000_000, output_tokens=0, input_tokens_details=details)
+    _fake_openai(_hosted_response("s", [("t", "https://a.example")], usage=usage), monkeypatch)
+
+    tools.search_web("q")
+    spent = tools_mod.take_hosted_spend() - tools_mod._HOSTED_CALL_FEE
+    # gpt-5-mini: 0.25 fresh vs 0.025 cached per 1M. Billing this as fresh would be 10x.
+    assert spent == pytest.approx(0.025, rel=0.05)
+
+
+def test_a_truncated_response_is_not_reported_as_nothing_found(monkeypatch):
+    """The response itself can be cut short (status "incomplete", reason
+    max_output_tokens) after the search completed but before the citations landed.
+    Checking only the search item's status made that read as an absence — and the
+    zero-citation wording explicitly tells the model to trust it."""
+    resp = _hosted_response("partial", [], status="completed")
+    resp.status = "incomplete"
+    resp.incomplete_details = SimpleNamespace(reason="max_output_tokens")
+    _fake_openai(resp, monkeypatch)
+
+    out = tools.search_web("does acme have a 2026 filing")
+    assert out.startswith("ERROR: the hosted search did not complete")
+    assert "max_output_tokens" in out
+    assert "nothing found" not in out

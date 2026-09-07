@@ -491,11 +491,6 @@ def run(
         state = resume
         started_at = clock() - state.elapsed  # splice the already-spent time back on
     else:
-        # Anything a previous run in this process left uncollected is not this run's
-        # to pay for. Threads outlive their run here (execute_calls abandons a
-        # timed-out tool), and bench.py and the A2A server both run many agents in one
-        # process, so without this a stranded charge lands on whoever drains next.
-        tools_mod.reset_hosted_spend()
         state = AgentState(
             goal=goal,
             max_steps=max_steps,
@@ -563,12 +558,20 @@ def run(
     hidden = set(exclude_tools or [])
     specs = [s for s in tools_mod.specs() if s["function"]["name"] not in hidden]
 
+    # Runs nest — subagent.py calls run() inside a parent run, and a single turn can
+    # issue search_web and delegate in parallel — while the hosted-search accumulator is
+    # module state. Take whatever is pending on entry and hold it, so this run starts
+    # from zero and charges only its own searches; hand it back on the way out. A plain
+    # "reset at run start" instead either discarded the parent's pending spend or let
+    # the child absorb it and trip its own budget brake on money it never spent.
+    outer_spend = tools_mod.take_hosted_spend()
     try:
         return _loop(
             state, router, specs, emit, clock, started_at, context_limit,
             tool_timeout, run_dir, approve, memory, reflect,
         )
     finally:
+        tools_mod.add_hosted_spend(outer_spend)
         if subagents:
             subagent_mod.disable()
         if coding_tools:
@@ -758,7 +761,13 @@ def _loop(
         # is the difference between an agent and a single function call.
 
     state.elapsed = clock() - started_at
-    _collect_tool_spend(state, emit)  # a search on the last step must not go uncharged
+    # Belt and braces, and deliberately not pinned by a test: every ordinary exit path
+    # has already run the in-loop drain above (the guards break at the *top* of an
+    # iteration, after the previous one collected). What is left is a tool thread the
+    # loop abandoned on timeout and that finishes before the run returns — a race, so a
+    # test asserting it would be asserting a scheduling accident. Removing this line
+    # leaves the suite green; that is a known gap, not an untested claim.
+    _collect_tool_spend(state, emit)
     if state.status != "done" and not state.answer:
         state.answer = f"(no final answer; stopped because: {state.status})"
     if reflect:

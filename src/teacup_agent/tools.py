@@ -255,17 +255,17 @@ def take_hosted_spend() -> float:
     return spent
 
 
-def reset_hosted_spend() -> None:
-    """Drop anything not yet collected. Called at the start of a run.
+def add_hosted_spend(amount: float) -> None:
+    """Put spend back into the accumulator — the other half of `take_hosted_spend`.
 
-    The accumulator is module state and a process runs many agents — bench.py's whole
-    matrix, an A2A server answering task after task. A search whose thread finished
-    after its own run ended (execute_calls abandons a timed-out tool rather than
-    killing it) would otherwise be charged to whichever run happened to drain next,
-    which is both a wrong number and a wrong run.
+    Runs nest: subagent.py calls loop.run inside a parent run, and one turn can issue
+    `search_web` and `delegate` in parallel. A plain "reset at run start" therefore
+    either discards the parent's pending spend or lets the child absorb it and trip its
+    own budget brake on money it never spent. So a run *takes* what is pending on entry,
+    holds it, and gives it back on exit: each run charges only its own searches.
     """
     global _hosted_spend
-    _hosted_spend = 0.0
+    _hosted_spend = round(_hosted_spend + amount, 8)
 
 
 def _search_hosted_backend(query: str, max_results: int) -> str:
@@ -310,6 +310,15 @@ def _search_hosted_backend(query: str, max_results: int) -> str:
         ),
     )
     done, broken = _search_actions(resp)
+    # The *response* can be truncated too (status "incomplete", with a reason like
+    # max_output_tokens), which cuts off the message block carrying the citations while
+    # the search item itself still says completed. Checking only the item's status made
+    # that read as "nothing found" — the same failure one level up from where the last
+    # round found it, and this time with wording that explicitly tells the model to
+    # trust the absence.
+    if not broken and getattr(resp, "status", "completed") not in (None, "completed"):
+        reason = getattr(getattr(resp, "incomplete_details", None), "reason", "") or ""
+        broken = f"response {resp.status}" + (f": {reason}" if reason else "")
     # Billed per search action, not per API call: a reasoning model routinely issues
     # several in one response, and a response that searched none should cost none. The
     # fee is charged after counting, so the "it never searched" branch below no longer
@@ -369,10 +378,15 @@ def _search_actions(resp: Any) -> tuple[int, str]:
     for item in getattr(resp, "output", None) or []:
         if getattr(item, "type", None) != "web_search_call":
             continue
-        status = getattr(item, "status", None) or "completed"
+        status = getattr(item, "status", None)
         if status == "completed":
             done += 1
-        elif status in ("failed", "incomplete"):
+        elif status in (None, "in_progress", "searching"):
+            # Not finished, so not billable and not a result. Defaulting a missing
+            # status to "completed" billed for a search nobody can show completed;
+            # on a money path the safe default is the one that does not charge.
+            bad.append(status or "no status")
+        else:  # failed, incomplete, anything the API adds later
             bad.append(status)
     return done, ", ".join(sorted(set(bad)))
 
@@ -383,12 +397,13 @@ def _hosted_token_cost(resp: Any, model: str) -> float:
     usage = getattr(resp, "usage", None)
     if usage is None:
         return 0.0
-    details = getattr(usage, "input_tokens_details", None)
+    from teacup_agent.model import cached_from
+
     return estimate_cost(
         model,
         getattr(usage, "input_tokens", 0) or 0,
         getattr(usage, "output_tokens", 0) or 0,
-        getattr(details, "cached_tokens", 0) or 0 if details else 0,
+        cached_from(usage, "input_tokens_details"),
     )
 
 

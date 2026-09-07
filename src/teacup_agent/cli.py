@@ -20,6 +20,7 @@ from teacup_agent import hooks as hooks_mod
 from teacup_agent import loop, model as model_mod, persist
 from teacup_agent import tools as tools_mod
 from teacup_agent.memory import Memory
+from teacup_agent.state import AgentState
 
 DEFAULT_GOAL = "Look up NVIDIA's GPU strategy, and compute 1200 * 0.85 / 3"
 
@@ -269,7 +270,7 @@ def main(argv: list[str] | None = None) -> int:
         choices=["auto", "web", "hosted", "offline"],
         default=None,
         help="search mode; defaults to auto (key-less scraper) with --live and "
-        "offline (zero network calls) for the offline demo. hosted uses the "
+        "offline (zero network calls) for the offline demo. hosted uses "
         "OpenAI's web search (always OpenAI, whatever the model profile says): "
         "better results, costs money per call, needs --live",
     )
@@ -424,14 +425,20 @@ def _main(args, project_root: pathlib.Path) -> int:
     # offline, so it stays network-free and instant.
     refusal = _search_refusal(args.search, live=args.live)
     if refusal:
-        # --json promises exactly one JSON object on stdout and an exit_code field
-        # (docs/integration.md). A bare SystemExit would hand an external caller empty
-        # stdout and a exit 1 to guess at.
+        # docs/integration.md is a contract, not a suggestion: every field through
+        # `throttled` is snapshot() unchanged, and exit_code is 0 when status is "done"
+        # and 1 otherwise. An earlier version of this emitted a three-key object with
+        # exit_code 2, which would KeyError any caller reading remaining_budget — and
+        # contradicted the doc it cited as its reason for existing.
         if args.json:
-            print(json.dumps({"status": "error", "answer": refusal, "exit_code": 2}))
+            refused = AgentState(goal=args.goal, status="error", answer=refusal)
+            payload = refused.snapshot()
+            payload["answer"] = refusal
+            payload["exit_code"] = 1
+            print(json.dumps(payload, ensure_ascii=False))
         else:
             print(refusal, file=sys.stderr)
-        return 2
+        return 1
     os.environ["TEACUP_AGENT_SEARCH"] = args.search or ("auto" if args.live else "offline")
 
     resumed = persist.load(args.resume) if args.resume else None
