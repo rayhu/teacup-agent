@@ -14,7 +14,7 @@ import json
 import os
 from types import SimpleNamespace
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from teacup_agent import loop
 from teacup_agent import routing

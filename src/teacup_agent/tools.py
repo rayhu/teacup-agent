@@ -253,9 +253,6 @@ def _is_config_error(exc: Exception) -> bool:
         "AuthenticationError",  # key rejected
         "PermissionDeniedError",  # key valid, not entitled to this
         "NotFoundError",  # TEACUP_AGENT_SEARCH_MODEL names a model that does not exist
-        "BadRequestError",  # ...or one that does not support the web_search tool
-        "ImportError",  # the openai package is not installed
-        "ModuleNotFoundError",
     )
 
 # The loop's per-tool default is 30s and it cannot cancel a thread already inside an
@@ -469,8 +466,8 @@ def search_web(query: str, max_results: int = 5) -> str:
                     corpus and say why.
     web           : scraper only; on failure return an error (so the model never
                     reads a broken search as "this does not exist").
-    hosted        : OpenAI's hosted web search, whatever provider the model
-                    profile names (better results, costs
+    hosted        : OpenAI's hosted web search — always OpenAI, no matter which
+                    provider the model profile names (better results, costs
                     money per call, needs OPENAI_API_KEY). Errors are reported,
                     never degraded into the corpus — a paid backend quietly
                     answering from a local corpus is worse than saying it failed.
@@ -501,7 +498,8 @@ def search_web(query: str, max_results: int = 5) -> str:
             # mode that cannot work until a human changes something, and it would keep
             # going until the step ceiling.
             return (
-                f"ERROR: hosted search is not configured ({e}). This is a setup "
+                f"ERROR: hosted search is not configured ({type(e).__name__}: {e}). "
+                "This is a setup "
                 "problem, not a temporary one — retrying will not help. Answer from "
                 "what you already have and mark anything unverified as unverified."
             )

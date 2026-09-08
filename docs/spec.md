@@ -166,6 +166,10 @@ any status >= 500, and any error carrying no status code at all; a 4xx is not re
 `spend_by_profile` only when a profile is named. The breakdown is a **diagnostic** for
 routing decisions, not a second ledger: a subagent charges its parent one rounded delta
 and merges the child's own breakdown in, so the two can disagree in the last decimal.
+They can also disagree by far more: a **tool** that spends — today only `search_web`'s
+hosted backend — is charged against `remaining_budget` without a profile name, because
+it is not any model's spend, so it is absent from this breakdown entirely. Reconcile
+against `remaining_budget`.
 
 `snapshot()` returns the 17 human-readable keys printed at the end of a run; it omits
 `messages` content, reports `todo_done` as `"n/a"` when there is no checklist, and
@@ -566,6 +570,7 @@ half-written state. `persist.load()` rebuilds `trace` and `todo` into dataclasse
 | `vetoed` | a project-local `hooks.py`'s `before_tool_call` blocked a call |
 | `hooks_loaded` | a project-local `hooks.py` was loaded |
 | `externalized` | a result went to disk |
+| `tool_spend` | a tool charged money against the budget (`tool`, `cost`, `step`) |
 | `completion_check` | a completion push-back fired (checklist, no edits, unverified, or failing command) |
 | `answer` | the model finished |
 | `stopped` | a ceiling was hit |

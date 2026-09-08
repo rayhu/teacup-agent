@@ -111,8 +111,9 @@ grep -ril 'teacup[-_]agent' . --exclude-dir=.git --exclude=uv.lock
    `[tool.hatch.build.targets.wheel] packages`.
 3. Sweep both spellings across everything that grep listed — `src/`, `tests/`,
    `examples/`, `main.py`, `.env.example` and the docs.
-4. `TEACUP_AGENT_SEARCH` — the one environment variable, in `tools.py`, `cli.py`,
-   `evals.py`, the tests and the docs. Rename it or you will read someone else's prefix in
+4. `TEACUP_AGENT_SEARCH` and `TEACUP_AGENT_SEARCH_MODEL` — the two environment
+   variables, in `tools.py`, `cli.py`,
+   `evals.py`, the tests and the docs. Rename them or you will read someone else's prefix in
    your own error messages.
 5. The prompt-cache key prefix — the `set_cache_key` call in `run()`. Cosmetic, but it
    groups cache entries; sharing a prefix with a project you have diverged from is a lie

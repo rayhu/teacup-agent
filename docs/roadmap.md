@@ -463,7 +463,7 @@ per-turn cap applies), and passing curated context down instead of a blank slate
 
 ---
 
-### 11. A better search backend — DONE (2026-09-06)
+### 11. A better search backend — DONE (2026-09-07)
 
 **Was**: `search_web` scraped DuckDuckGo through ddgs — free and key-less, but average
 in both quality and stability.
@@ -511,7 +511,7 @@ answering from a local fixture is worse than one that says it failed, because th
 cannot tell the difference. That is the same rule the scraper path already followed —
 "the search failed" and "there is nothing to find" are completely different statements.
 
-**Verified**: `uv run pytest` (383 passed; `main` is 322), `uv run python -m teacup_agent.evals`
+**Verified**: `uv run pytest` (386 passed; `main` is 322), `uv run python -m teacup_agent.evals`
 (27/27, was 26), `uv run teacup-agent` (0.06s, offline demo unaffected). The hosted
 backend itself is exercised only against a fake client — a live call costs money and
 needs a key, so "does OpenAI's web search return good results" stays an unverified
@@ -829,7 +829,7 @@ uv run teacup-agent                    # offline demo unaffected, still instant
 
 ---
 
-### 16. Multi-provider models: price overrides and a native second protocol — DONE (2026-09-06)
+### 16. Multi-provider models: price overrides and a native second protocol — DONE (2026-09-07)
 
 **Now**: `#15` already reaches any OpenAI-compatible endpoint (vLLM, Ollama, OpenRouter)
 via `base_url`, for free. What is left is smaller than originally scoped:
@@ -872,16 +872,24 @@ Anthropic models are deliberately **not** added to `PRICES`. Inventing rates tha
 stale is worse than the honest fallback plus the override this same item just built —
 give the profile its three prices and the accounting is exact.
 
-**What this cost in size**, stated because AGENTS.md rule 7 asks: `model.py` went 362 →
-645 lines and `tools.py` 526 → 781, both past the ~500 guideline and `tools.py` past the
-~700 "consider splitting" line. `model.py` now carries three backends plus two helpers
-(`content_blocks`, `_tools_for_history`) that `context.py` and `evals.py` import; the
-hosted backend and its accumulator are ~150 separable lines of `tools.py`. Neither split
-was done here — doing it in the same round as the feature would have made an already
-five-round review unreviewable — but both are real and neither should be discovered by
-the next person as a surprise.
+**What this cost in size**, stated because AGENTS.md rule 7 asks, with every number
+measured at this commit rather than remembered from an earlier one:
 
-**Verified**: `uv run pytest` (383 passed; `main` is 322), `uv run python -m teacup_agent.evals`
+| file | main | here | |
+| --- | --- | --- | --- |
+| `tools.py` | 526 | 779 | past the ~700 "consider splitting" line |
+| `model.py` | 362 | 648 | three backends in one module |
+| `loop.py` | 747 | 783 | was already past ~700 before this branch |
+| `cli.py` | 637 | 693 |  |
+
+`model.py` now carries three backends plus `content_blocks`, which `context.py` and
+`evals.py` both import (`_tools_for_history` is used only inside `model.py`). The hosted
+backend and its accumulator are ~220 separable lines of `tools.py`. No split was done
+here — doing it in the same round as the feature would have made an already six-round
+review unreviewable — but all four are real, `loop.py` is the one REVIEW.md singles out
+by name, and none of it should reach the next person as a surprise.
+
+**Verified**: `uv run pytest` (386 passed; `main` is 322), `uv run python -m teacup_agent.evals`
 (27/27, was 26 — the new case runs a whole loop over the Messages shape, which
 `ScriptedModel` cannot emit), `uv run teacup-agent` (0.06s). No live Anthropic call was
 made: the SDK is an optional extra and is deliberately not installed, so the translation

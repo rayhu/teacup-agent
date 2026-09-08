@@ -172,10 +172,12 @@ def test_serving_pins_the_search_mode_instead_of_inheriting_it(tmp_path, monkeyp
     path = tmp_path / "agent.yaml"
     path.write_text(MINIMAL.replace("  plan: off", "  search: offline\n  plan: off"), encoding="utf-8")
 
-    # stop before it actually serves; the env assignment happens before this point
-    monkeypatch.setattr(server_mod, "build_app", lambda cfg, url: (_ for _ in ()).throw(SystemExit(0)))
-    with pytest.raises(SystemExit):
-        server_mod.main(["--config", str(path)])
+    from teacup_agent import agent_config
+
+    # build_app, not main(): an embedder mounting it in their own ASGI app is still
+    # starting a server, and pinning only in main() left that path inheriting whatever
+    # the process exported.
+    server_mod.build_app(agent_config.load(path), "http://localhost:9999")
     assert os.environ["TEACUP_AGENT_SEARCH"] == "offline"
 
 

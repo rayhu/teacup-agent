@@ -437,7 +437,6 @@ def _main(args, project_root: pathlib.Path) -> int:
             refused = AgentState(
                 goal=args.goal,
                 status="error",
-                answer=refusal,
                 max_steps=args.max_steps,
                 remaining_budget=args.budget,
             )

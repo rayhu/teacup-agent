@@ -625,7 +625,6 @@ def test_permanent_hosted_failures_are_not_dressed_up_as_transient(monkeypatch):
         openai.AuthenticationError,  # key rejected
         openai.PermissionDeniedError,  # not entitled
         openai.NotFoundError,  # TEACUP_AGENT_SEARCH_MODEL names a missing model
-        openai.BadRequestError,  # ...or one that cannot use web_search
     ]
     for exc_type in permanent:
         def boom(*a, _t=exc_type, **k):
@@ -638,3 +637,91 @@ def test_permanent_hosted_failures_are_not_dressed_up_as_transient(monkeypatch):
         out = tools.search_web("q")
         assert "not configured" in out, f"{exc_type.__name__} read as transient"
         assert "Retry later" not in out, f"{exc_type.__name__} told the model to retry"
+
+
+def test_an_ambiguous_400_stays_retryable(monkeypatch):
+    """BadRequestError can mean "this model cannot use web_search" — permanent — or it
+    can mean the model wrote a query the API rejected, which rewording fixes. Every HTTP
+    400 becomes this one class, so the two are indistinguishable by type. Calling it
+    permanent would disable search for the rest of the run over one bad phrasing, and
+    would drop the "reword the query" advice that is the actionable half."""
+    import openai
+
+    def boom(*a, **k):
+        raise openai.BadRequestError.__new__(openai.BadRequestError)
+
+    monkeypatch.setattr(openai, "OpenAI", boom)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    out = tools.search_web("q")
+    assert "reword the query" in out
+    assert "not configured" not in out
+
+
+def test_a_broken_import_inside_the_backend_is_not_read_as_misconfiguration(monkeypatch):
+    """openai is a hard dependency, so "not installed" is near-unreachable — but an
+    ImportError raised by our own code inside this backend would then reach the model as
+    "this is a setup problem" instead of as the bug it is."""
+    import openai
+
+    def boom(*a, **k):
+        raise ImportError("cannot import name 'estimate_cost' from teacup_agent.model")
+
+    monkeypatch.setattr(openai, "OpenAI", boom)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    out = tools.search_web("q")
+    assert "not configured" not in out
+    assert "ImportError" in out  # the real failure reaches the model, named
+
+
+def test_spend_is_attributed_to_the_tool_that_incurred_it(monkeypatch):
+    """Reverting `tool=calls[i].name` to a hardcoded "search_web" left the whole suite
+    green, because search_web is the only tool that spends — so this registers a second
+    one. The index matters too: `to_run` holds `(i, call)` pairs and skipped calls never
+    enter it, so a denied call ahead of a spending one must not shift the attribution.
+    """
+    from teacup_agent import loop, tools as tools_mod
+    from teacup_agent.memory import NullMemory
+    from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
+
+    def bill_something(amount: float = 0.02) -> str:
+        tools_mod._add_hosted_spend(amount)
+        return "billed"
+
+    tools_mod.REGISTRY["bill_something"] = tools_mod.Tool(
+        "bill_something", "spends money", {"type": "object", "properties": {}},
+        bill_something, False, None, True,
+    )
+    try:
+        events = []
+        loop.run(
+            "spend after a denied call",
+            ScriptedModel(
+                [
+                    # send_email is gated and denied unattended, so index 0 never runs;
+                    # the spending tool at index 1 is the one to attribute
+                    assistant_calls(
+                        [
+                            ("send_email", {"to": "a@b.c", "subject": "s", "body": "b"}),
+                            ("bill_something", {}),
+                        ]
+                    ),
+                    assistant_says("done"),
+                ]
+            ),
+            memory=NullMemory(),
+            budget=0.5,
+            run_dir=None,
+            plan=False,
+            on_event=lambda name, data: events.append((name, data)),
+        )
+    finally:
+        tools_mod.REGISTRY.pop("bill_something", None)
+
+    spend = [d for n, d in events if n == "tool_spend"]
+    assert spend, "the tool's spend was never charged"
+    assert all(d["tool"] == "bill_something" for d in spend), spend
+    assert sum(d["cost"] for d in spend) == pytest.approx(0.02)

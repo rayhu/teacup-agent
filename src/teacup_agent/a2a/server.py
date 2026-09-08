@@ -97,6 +97,20 @@ class TeacupAgentExecutor(AgentExecutor):
 
 
 def build_app(cfg: agent_config.AgentConfig, url: str) -> Starlette:
+    # Pinned here rather than in main(): build_app is public, and an embedder mounting
+    # it in their own ASGI app is still starting a server. Doing it in main() only
+    # covered the console-script path and left that one inheriting whatever the process
+    # exported — narrower than the constructor version it replaced, which is the wrong
+    # direction. Not in the executor's __init__ either: constructing an object must not
+    # mutate process-global state, and doing so switched tests that built one to the
+    # live scraper for the rest of the test.
+    #
+    # Set rather than inherited because this is the entry point that runs with nobody
+    # watching: an exported TEACUP_AGENT_SEARCH=hosted otherwise let remote peers drive
+    # billed searches on a process with no TTY and no --live, and a config saying
+    # `search: offline` could not stop them.
+    os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
+
     skills = discover_skills(cfg.skills_dir) if cfg.skills_dir else []
     card = build_agent_card(cfg.a2a.card, skills, url)
     handler = DefaultRequestHandler(

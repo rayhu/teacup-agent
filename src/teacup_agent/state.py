@@ -81,7 +81,10 @@ class AgentState:
     # profile name -> dollars, when a run routes roles to different models (routing.py).
     # A **diagnostic** for routing decisions, not a second ledger: `remaining_budget` is
     # the ledger, and a subagent charges its parent one rounded delta rather than a
-    # per-turn breakdown, so the two can disagree in the last decimal.
+    # per-turn breakdown, so the two can disagree in the last decimal — and by much
+    # more than that since a *tool* can spend: search_web's hosted backend is charged
+    # against remaining_budget with no profile name (it is not any model's spend), so
+    # it never appears here. remaining_budget is the ledger; this is a diagnostic.
     spend_by_profile: dict[str, float] = field(default_factory=dict)
 
     # ---- the loop's guards ----------------------------------------------
