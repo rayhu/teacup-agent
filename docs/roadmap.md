@@ -3,7 +3,10 @@
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
 **Progress**: #1-#21 are done except the fine-grained permissions part of #6 and #21's
-Stage C. Twelve items that were never on the roadmap were added after reviewing real runs
+Stage C. #22 and #23 are new and not started: both are about the seam with teacup-run
+rather than about this agent, which is the shape most remaining work here should have —
+the ecosystem belongs in the other repo, and this one's value is that the loop still fits
+in one head. Twelve items that were never on the roadmap were added after reviewing real runs
 (see "Field patches" at the end). #11 (hosted search backend) and #16 (per-profile price
 overrides, a native Anthropic path) landed 2026-09-08 after seven independent review
 rounds — the numbers, and what is still not verified, are in each item's own Verified
@@ -1661,6 +1664,55 @@ feature it was meant to justify.
   a failing classifier falls back with no exception escaping; a test pins that no
   foreign reasoning items survive an escalation; a cross-`api` route pair fails at
   config load.
+
+---
+
+### 22. Conformance with teacup-run's package format
+
+**Now**: teacup-run mirrors this repo's Agent Skills validation deliberately — both
+`skills.py` here and `manifest.py` there enforce the same rules, each with a comment
+saying a skill that validates in one must validate in the other. There is **no test that
+they agree**. Two implementations of one format, kept in step by hand.
+
+There is a second, sharper version of the same problem: `agent.yaml` means different
+things in the two repos. Here it is a runtime config (`models`, `mcp`, `tools`, `skills`,
+`runtime`); there it is a package manifest (`name`, `version`, `framework`, `entrypoint`,
+`environment.required`, `lineage`). Same filename, incompatible schemas. Today that is
+recorded only as a comment inside `examples/teacup-agent-bridge/agent.yaml` in the other
+repo, which is not where someone hits it.
+
+**What to change**: teacup-run owns the package format — this repo is one instance of it,
+not its author — and publishes a fixture suite of valid and invalid packages. This repo
+runs that suite against its own `skills.py`, so a divergence fails a test here instead of
+surfacing as "the skill worked in one tool and not the other".
+
+**Definition of done**: a test in this repo loads teacup-run's format fixtures and
+asserts the same accept/reject decision for each; the `agent.yaml` name collision is
+stated in `docs/integration.md` rather than in a comment in a sibling repo's example.
+
+---
+
+### 23. Version the `--json` contract
+
+**Now**: `docs/integration.md` is a real contract with a named external consumer —
+teacup-run's `external_cli.run_external` parses the last stdout line and reads
+`remaining_budget` from it. The document says "this is the contract an external caller
+parses", and it carries no version. A field that changes shape breaks that caller with no
+signal beyond a stack trace on their side.
+
+This branch already showed the failure mode from the other direction: adding a paid tool
+made `spend` and `remaining_budget` diverge by far more than integration.md's "last
+decimal", and nothing in either repo would have caught it — the doc was corrected by
+hand, twice, in two different rounds.
+
+**What to change**: a version on the payload, and a rule for what may change without
+bumping it (adding a key) versus what may not (changing a key's meaning, as the `spend`
+divergence did). teacup-run's side of this is its backend-conformance item; this side is
+the producer, and the producer is where the version belongs.
+
+**Definition of done**: the `--json` object carries a contract version; `docs/integration.md`
+states the compatibility rule; a test asserts the documented key set, so removing or
+renaming one fails here rather than in a consumer.
 
 ---
 
