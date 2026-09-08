@@ -154,19 +154,41 @@ def test_cancel_is_honestly_unsupported(tmp_path, monkeypatch):
         asyncio.run(executor.cancel(None, None))
 
 
-def test_the_server_pins_its_search_mode_instead_of_inheriting_it(tmp_path, monkeypatch):
+def test_serving_pins_the_search_mode_instead_of_inheriting_it(tmp_path, monkeypatch):
     """The one entry point that runs unattended was the one that let an exported
-    TEACUP_AGENT_SEARCH through — so a remote peer could drive billed hosted searches
-    on a process with no TTY, and `search: offline` in the config could not stop it."""
+    TEACUP_AGENT_SEARCH through — so a remote peer could drive billed hosted searches on
+    a process with no TTY, and `search: offline` in the config could not stop it.
+
+    Asserted on main(), not on the executor's constructor: doing it in a constructor
+    means building an app mutates process-global state, and a test that builds one
+    silently switches itself to the live scraper for the rest of its run.
+    """
     import os
 
-    from teacup_agent import agent_config
     from teacup_agent.a2a import server as server_mod
 
     monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
     monkeypatch.setenv("FAKE_KEY", "sk-test")
     path = tmp_path / "agent.yaml"
     path.write_text(MINIMAL.replace("  plan: off", "  search: offline\n  plan: off"), encoding="utf-8")
-    cfg = agent_config.load(path)
-    server_mod.TeacupAgentExecutor(cfg)
-    assert os.environ["TEACUP_AGENT_SEARCH"] == cfg.runtime.search == "offline"
+
+    # stop before it actually serves; the env assignment happens before this point
+    monkeypatch.setattr(server_mod, "build_app", lambda cfg, url: (_ for _ in ()).throw(SystemExit(0)))
+    with pytest.raises(SystemExit):
+        server_mod.main(["--config", str(path)])
+    assert os.environ["TEACUP_AGENT_SEARCH"] == "offline"
+
+
+def test_building_an_executor_does_not_touch_the_environment(tmp_path, monkeypatch):
+    """The regression the line above was moved to avoid."""
+    import os
+
+    from teacup_agent import agent_config
+    from teacup_agent.a2a import server as server_mod
+
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "offline")
+    monkeypatch.setenv("FAKE_KEY", "sk-test")
+    path = tmp_path / "agent.yaml"
+    path.write_text(MINIMAL, encoding="utf-8")  # no `search:` key, so it would default to auto
+    server_mod.TeacupAgentExecutor(agent_config.load(path))
+    assert os.environ["TEACUP_AGENT_SEARCH"] == "offline"

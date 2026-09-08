@@ -4,6 +4,9 @@ The model is behind one interface, `complete(messages, tools) -> Reply`, so ther
 can be several implementations:
 
 * OpenAIModel / ResponsesModel  real API calls (need OPENAI_API_KEY)
+* AnthropicModel                the Messages API (needs ANTHROPIC_API_KEY and the
+                                `anthropic` extra; a different request/response shape,
+                                sealed in that class so the loop does not change)
 * ScriptedModel                 replies from a script, for offline demos and evals
                                 (no dependencies, no cost)
 

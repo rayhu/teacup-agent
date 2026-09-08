@@ -473,8 +473,9 @@ def test_spend_from_one_thread_is_invisible_to_another(monkeypatch):
 
 
 def test_hosted_spend_reaches_the_budget_brake_through_the_loop(monkeypatch):
-    """The accumulator only means something if the loop drains it. Without the hook in
-    loop.py a run could spend many times its ceiling while remaining_budget sat still."""
+    """The accumulator only means something if the run charges it. Without the
+    state.charge() in execute_calls a run could spend many times its ceiling while
+    remaining_budget sat still."""
     from teacup_agent import loop, tools as tools_mod
     from teacup_agent.memory import NullMemory
     from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
@@ -499,11 +500,10 @@ def test_hosted_spend_reaches_the_budget_brake_through_the_loop(monkeypatch):
 
 
 def test_hosted_spend_can_stop_a_run_mid_flight(monkeypatch):
-    """The in-loop drain is the only one that lets can_continue() see hosted spend while
-    the run is still going. Asserting the final budget cannot tell the two drains apart —
-    both charge, and the post-loop one emits the same event — so this asserts the brake
-    itself: a budget smaller than two searches must stop the run before the step ceiling.
-    """
+    """Asserts the brake itself, not just the arithmetic: a budget that affords one
+    search and not two must stop the run before the step ceiling. Asserting only the
+    final `remaining_budget` cannot tell "charged" from "charged in time to stop
+    anything", and the brake is the reason the charge exists."""
     from teacup_agent import loop, tools as tools_mod
     from teacup_agent.memory import NullMemory
     from teacup_agent.model import ScriptedModel, assistant_calls
@@ -609,24 +609,32 @@ def test_a_mixed_response_bills_its_completed_searches_and_still_reports_the_fai
     assert "failed" in broken  # and the failure is not masked by it
 
 
-def test_a_rejected_key_is_permanent_not_transient(monkeypatch):
-    """A *missing* key raises _SearchNotConfigured; a *rejected* one surfaces as the
-    SDK's AuthenticationError and was taking the "retry later" branch — the same
-    failure _SearchNotConfigured exists to prevent, reached another way. The model
-    would keep retrying a mode that cannot work until a human intervenes."""
-    class AuthenticationError(Exception):
-        pass
+def test_permanent_hosted_failures_are_not_dressed_up_as_transient(monkeypatch):
+    """A missing key raises _SearchNotConfigured; several other permanent failures do
+    not, and were taking the "retry later" branch — which sends the model back to a mode
+    that cannot work until a human edits something, until the step ceiling.
 
-    class Boom:
-        def __init__(self, *a, **k):
-            raise AuthenticationError("invalid api key")
-
+    These are the SDK's own classes, imported, not stand-ins: the fix matches on type
+    *name*, so a test defining its own `class AuthenticationError` would only prove that
+    string comparison works against a string the test chose. Importing them means a
+    rename upstream fails here instead of silently reopening the retry loop.
+    """
     import openai
 
-    monkeypatch.setattr(openai, "OpenAI", Boom)
-    monkeypatch.setenv("OPENAI_API_KEY", "sk-revoked")
-    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+    permanent = [
+        openai.AuthenticationError,  # key rejected
+        openai.PermissionDeniedError,  # not entitled
+        openai.NotFoundError,  # TEACUP_AGENT_SEARCH_MODEL names a missing model
+        openai.BadRequestError,  # ...or one that cannot use web_search
+    ]
+    for exc_type in permanent:
+        def boom(*a, _t=exc_type, **k):
+            raise _t.__new__(_t)  # these take a response kwarg; the type is the point
 
-    out = tools.search_web("q")
-    assert "not configured" in out
-    assert "Retry later" not in out
+        monkeypatch.setattr(openai, "OpenAI", boom)
+        monkeypatch.setenv("OPENAI_API_KEY", "sk-test")
+        monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+        out = tools.search_web("q")
+        assert "not configured" in out, f"{exc_type.__name__} read as transient"
+        assert "Retry later" not in out, f"{exc_type.__name__} told the model to retry"

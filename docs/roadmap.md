@@ -2,11 +2,12 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #13, #14, #15, #17, #18, #19, #20 and #21's Stages A and B
-are done (except the fine-grained permissions part of #6). Five items that were never on
-the roadmap were added after reviewing real runs (see "Field patches" at the end).
-Next up: #11 (a better search backend) and #16 (multi-provider price overrides, a
-native Anthropic path), both scoped but not started. #21's Stages A (role routing) and B
+**Progress**: #1-#21 are done except the fine-grained permissions part of #6 and #21's
+Stage C. Five items that were never on the roadmap were added after reviewing real runs
+(see "Field patches" at the end). #11 (hosted search backend) and #16 (per-profile price
+overrides, a native Anthropic path) landed 2026-09-07 after five independent review
+rounds — the numbers, and what is still not verified, are in each item's own Verified
+block. #21's Stages A (role routing) and B
 (the bench, and the live table that says where the small model breaks) both landed on
 2026-09-03; whether its Stage C — routing by classified task rather than by call site —
 is worth the complexity is now a question the table can be argued from, and the honest
@@ -494,7 +495,8 @@ asserted only that no numbered list appeared — which un-cited prose passes.
 
 **The money.** This is the only tool in the repo that spends, and it now reaches the
 same brake the model calls do: the backend accumulates its per-call fee plus token cost,
-and the loop drains it into `state.charge()` after each step. Left uncharged, a run with
+and `execute_calls` charges it in the worker thread that made the call. Left
+uncharged, a run with
 the defaults could make 24 hosted searches against a $0.05 ceiling that
 `state.snapshot()` reported as untouched. `--search hosted` is also refused without
 `--live` — `--live` is this repo's money gate, and the offline demo really does call
@@ -509,13 +511,16 @@ answering from a local fixture is worse than one that says it failed, because th
 cannot tell the difference. That is the same rule the scraper path already followed —
 "the search failed" and "there is nothing to find" are completely different statements.
 
-**Verified**: `uv run pytest` (377 passed, was 345), `uv run python -m teacup_agent.evals`
+**Verified**: `uv run pytest` (383 passed; `main` is 322), `uv run python -m teacup_agent.evals`
 (27/27, was 26), `uv run teacup-agent` (0.06s, offline demo unaffected). The hosted
 backend itself is exercised only against a fake client — a live call costs money and
 needs a key, so "does OpenAI's web search return good results" stays an unverified
 claim. What *is* pinned is everything the harness controls: the forced search, the
 status-aware failure path, the withheld uncited summary, per-action billing, the
-per-thread accumulator, and the `--live` refusal.
+accumulator's thread isolation, and the `--live` refusal. What is *not* pinned is the
+end-to-end interleaving that made the accumulator wrong twice — a parent's search
+finishing during a child run — because that ordering could not be made deterministic;
+the primitive is tested, the race is reasoned about.
 
 ---
 
@@ -867,7 +872,16 @@ Anthropic models are deliberately **not** added to `PRICES`. Inventing rates tha
 stale is worse than the honest fallback plus the override this same item just built —
 give the profile its three prices and the accounting is exact.
 
-**Verified**: `uv run pytest` (377 passed, was 345), `uv run python -m teacup_agent.evals`
+**What this cost in size**, stated because AGENTS.md rule 7 asks: `model.py` went 362 →
+645 lines and `tools.py` 526 → 781, both past the ~500 guideline and `tools.py` past the
+~700 "consider splitting" line. `model.py` now carries three backends plus two helpers
+(`content_blocks`, `_tools_for_history`) that `context.py` and `evals.py` import; the
+hosted backend and its accumulator are ~150 separable lines of `tools.py`. Neither split
+was done here — doing it in the same round as the feature would have made an already
+five-round review unreviewable — but both are real and neither should be discovered by
+the next person as a surprise.
+
+**Verified**: `uv run pytest` (383 passed; `main` is 322), `uv run python -m teacup_agent.evals`
 (27/27, was 26 — the new case runs a whole loop over the Messages shape, which
 `ScriptedModel` cannot emit), `uv run teacup-agent` (0.06s). No live Anthropic call was
 made: the SDK is an optional extra and is deliberately not installed, so the translation

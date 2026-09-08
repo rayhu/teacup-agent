@@ -153,6 +153,18 @@ def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
         )
     if "model" not in spec:
         raise ValueError(f"models.profiles.{name} is missing 'model'")
+    if provider == "anthropic":
+        # `api` and `reasoning_effort` are OpenAI-shaped knobs with no Messages-API
+        # equivalent. Checked here rather than at build time because `spec` is the only
+        # place that knows whether the file *said* it, as opposed to the dataclass
+        # holding a default — and silently dropping a key someone wrote is how a config
+        # ends up lying about what it does.
+        ignored = [k for k in ("api", "reasoning_effort") if k in spec]
+        if ignored:
+            raise ValueError(
+                f"models.profiles.{name} is provider: anthropic and cannot use "
+                f"{', '.join(ignored)} — the Messages API has no equivalent; remove it"
+            )
     price_keys = ("price_input", "price_cached", "price_output")
     given = [k for k in price_keys if spec.get(k) is not None]
     if given and len(given) != len(price_keys):

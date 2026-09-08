@@ -238,12 +238,24 @@ class _SearchNotConfigured(RuntimeError):
 def _is_config_error(exc: Exception) -> bool:
     """Whether a failure is permanent. A missing key raises _SearchNotConfigured, but a
     *rejected* one surfaces as the SDK's AuthenticationError and was taking the "retry
-    later" branch — which is the same failure _SearchNotConfigured exists to prevent,
-    reached by a different route. Matched by name so the SDK stays an optional import.
+    later" branch — the same failure _SearchNotConfigured exists to prevent, reached by
+    a different route. There are more routes than that one: TEACUP_AGENT_SEARCH_MODEL is
+    a live knob, so naming a model that does not exist, or one that cannot use the
+    web_search tool, raises NotFoundError/BadRequestError — equally permanent, equally
+    useless to retry. Telling the model "retry later" for any of these sends it back to
+    a mode that cannot work until a human edits something, until the step ceiling.
+
+    Matched by type name so the SDK stays an optional import. The names are pinned by a
+    test that imports the real openai classes, so a rename upstream fails loudly rather
+    than silently reopening the retry loop.
     """
     return isinstance(exc, _SearchNotConfigured) or type(exc).__name__ in (
-        "AuthenticationError",
-        "PermissionDeniedError",
+        "AuthenticationError",  # key rejected
+        "PermissionDeniedError",  # key valid, not entitled to this
+        "NotFoundError",  # TEACUP_AGENT_SEARCH_MODEL names a model that does not exist
+        "BadRequestError",  # ...or one that does not support the web_search tool
+        "ImportError",  # the openai package is not installed
+        "ModuleNotFoundError",
     )
 
 # The loop's per-tool default is 30s and it cannot cancel a thread already inside an

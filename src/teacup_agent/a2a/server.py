@@ -46,13 +46,6 @@ class TeacupAgentExecutor(AgentExecutor):
 
     def __init__(self, cfg: agent_config.AgentConfig) -> None:
         self._cfg = cfg
-        # Set it, rather than inheriting whatever the operator happened to export. Every
-        # other entry point assigns this (cli._main, cli._main_config, bench); this one
-        # did not, so an exported TEACUP_AGENT_SEARCH=hosted let remote peers drive
-        # billed searches on a process with no TTY and no --live, and a config saying
-        # `search: offline` could not stop them. "Deny by default when nobody is
-        # watching" applies most to the one path where nobody is, by construction.
-        os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
         self._model = agent_config.build_model(cfg.models[cfg.default_model])
         self._memory = Memory(cfg.runtime.memory)
         self._lock = asyncio.Lock()
@@ -131,6 +124,17 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     cfg = agent_config.load(args.config)
+    # In main(), where cli._main, cli._main_config and bench.py all do it — not in the
+    # executor's constructor, which would make importing or building the app mutate
+    # process-global state. Building one in a test then silently switched the rest of
+    # that test to the live scraper, which is exactly the invariant AGENTS.md's
+    # verification standard pins ("unit tests make no network calls").
+    #
+    # Set rather than inherited, because this is the one entry point that runs with
+    # nobody watching: an exported TEACUP_AGENT_SEARCH=hosted otherwise let remote peers
+    # drive billed searches on a process with no TTY and no --live, and a config saying
+    # `search: offline` could not stop them.
+    os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
     url = f"http://{args.host}:{args.port}"
     app = build_app(cfg, url)
 

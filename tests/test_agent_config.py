@@ -440,3 +440,71 @@ def test_every_real_search_mode_is_accepted(tmp_path):
     for mode in ("auto", "web", "hosted", "offline"):
         text = MINIMAL.replace("  plan: off", f"  search: {mode}\n  plan: off")
         assert agent_config.load(_write(tmp_path, text)).runtime.search == mode
+
+
+def test_an_anthropic_profile_builds_an_anthropic_model(monkeypatch, tmp_path):
+    """Without this the branch could be deleted with the whole suite green, and a
+    `provider: anthropic` profile would silently build an OpenAI client — handing it an
+    ANTHROPIC_API_KEY and producing a 401 nobody can trace. agent.example.yaml
+    documents this path to users.
+
+    The SDK is an optional extra and deliberately absent, so it is stubbed the same way
+    the rest of the Anthropic tests reach it.
+    """
+    import sys
+    from types import SimpleNamespace
+
+    built = {}
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            built.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=FakeAnthropic))
+    monkeypatch.setenv("ANTHROPIC_API_KEY", "sk-ant-test")
+
+    cfg = agent_config.load(_write(tmp_path, _ANTHROPIC))
+    model = agent_config.build_model(cfg.models["claude"])
+
+    from teacup_agent.model import AnthropicModel
+
+    assert isinstance(model, AnthropicModel)
+    assert model.model == "claude-sonnet-5"
+    assert model.prices == (3.0, 0.3, 15.0)  # the profile's rates reached the model
+
+
+def test_an_anthropic_profile_with_its_own_key_var_does_not_build_an_openai_client(
+    monkeypatch, tmp_path
+):
+    """The ordering that made this a real bug: build_model used to construct an OpenAI
+    client from api_key_env *before* the provider branch, so an Anthropic key was handed
+    to the wrong SDK and then discarded."""
+    import sys
+    from types import SimpleNamespace
+
+    seen = {}
+
+    class FakeAnthropic:
+        def __init__(self, **kwargs):
+            seen.update(kwargs)
+
+    monkeypatch.setitem(sys.modules, "anthropic", SimpleNamespace(Anthropic=FakeAnthropic))
+    monkeypatch.setenv("MY_ANTHROPIC_KEY", "sk-ant-xyz")
+    import openai
+
+    monkeypatch.setattr(
+        openai, "OpenAI", lambda **k: pytest.fail("an OpenAI client was built for an anthropic profile")
+    )
+
+    text = _ANTHROPIC.replace("      model: claude-sonnet-5", "      model: claude-sonnet-5\n      api_key_env: MY_ANTHROPIC_KEY")
+    cfg = agent_config.load(_write(tmp_path, text))
+    agent_config.build_model(cfg.models["claude"])
+    assert seen["api_key"] == "sk-ant-xyz"
+
+
+def test_an_anthropic_profile_refuses_openai_only_keys(tmp_path):
+    """Silently dropping a key someone wrote is how a config lies about what it does."""
+    for key, value in (("api", "chat"), ("reasoning_effort", "high")):
+        text = _ANTHROPIC.replace("      model: claude-sonnet-5", f"      model: claude-sonnet-5\n      {key}: {value}")
+        with pytest.raises(ValueError, match="has no equivalent"):
+            agent_config.load(_write(tmp_path, text))

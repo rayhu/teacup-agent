@@ -308,7 +308,12 @@ def _execute_and_bill(index: int, call: ToolCall, spend: dict[int, float]) -> st
     The accumulator in tools.py is thread-local, so reading it here reads exactly this
     call's spend — not a sibling call's, and not a nested run's.
     """
-    tools_mod.take_hosted_spend()  # start from zero in this thread
+    # Belt and braces: today it can never find anything, because pool threads run
+    # nothing but this function and its own `finally` zeroes them. It is here because
+    # that is only true while `execute_calls` is the sole executor of `tools.execute` —
+    # a fork adding a second call site would make it load-bearing, and a silent
+    # mis-charge is a worse way to find that out than a redundant line.
+    tools_mod.take_hosted_spend()
     try:
         return tools_mod.execute(call.name, call.arguments)
     finally:
@@ -410,10 +415,15 @@ def execute_calls(
         # from a module global later: `delegate` starts a nested run in a sibling
         # worker thread, and a global could not say which run a concurrent search
         # belonged to.
-        billed = round(sum(tool_spend.values()), 8)
-        if billed:
-            state.charge(billed)
-            emit("tool_spend", tool="search_web", cost=billed, step=state.step)
+        for i, cost in sorted(tool_spend.items()):
+            if not cost:
+                continue
+            # Named by the call that incurred it, not hardcoded: `_execute_and_bill` is
+            # tool-agnostic, and emitting one summed event under "search_web" would be a
+            # wrong attribution the moment a second spending tool exists — or the moment
+            # two of them run in the same turn.
+            state.charge(round(cost, 8))
+            emit("tool_spend", tool=calls[i].name, cost=round(cost, 8), step=state.step)
 
     for i, call in enumerate(calls):  # strictly in the original order
         result = results[i]
@@ -747,11 +757,6 @@ def _loop(
         # ---- 4. run every tool call in parallel, refill in order (trap 2) ---
         execute_calls(state, reply.tool_calls, model, emit, tool_timeout, run_dir, approve)
 
-        # A tool that spends money has to reach the same brake the model calls do.
-        # search_web's hosted backend is the only one, and it has no access to `state`
-        # — so it accumulates and the loop collects. Charged unnamed: it is not any
-        # model profile's spend, and putting it in the per-profile breakdown would
-        # misattribute it to whichever profile happened to run the turn.
 
         # ---- 5. persist: save every step, or there is nothing to resume from -
         # elapsed uses the value measured at the top of this turn, so we do not ask

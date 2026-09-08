@@ -300,7 +300,7 @@ to the corpus **only when the corpus has something** — a broken search over an
 corpus returns an ERROR, never "no results".
 
 The real backend is DuckDuckGo via `ddgs`, no API key. `_RETRIES = 3` attempts with 1s
-then 2s backoff; `_MIN_INTERVAL = 0.5`s between real searches, enforced under a lock because
+then 2s backoff; `_MIN_INTERVAL = 0.5`s between real scraped searches, enforced under a lock because
 tools run in parallel. **A failed search says it failed** — it must never read as "there
 is nothing to find".
 
@@ -642,11 +642,13 @@ Every one of these was set by a measurement; the reasoning is in
 | Constant | Value | Where |
 | --- | --- | --- |
 | `EXTERNALIZE_OVER` | 2000 chars | `loop.py` |
+| `_HOSTED_CALL_FEE` | $0.01 per search action | `tools.py` |
+| `_HOSTED_TIMEOUT` | 20s on the hosted client | `tools.py` |
 | `EXCERPT` | 600 chars | `context.py` |
 | `compact(keep_recent=)` | 8 entries | `context.py` |
 | `head` kept by `compact` | 2 entries | `context.py` |
 | retry `attempts` | 3, sleeps 1s then 2s | `loop.py` |
-| `_MIN_INTERVAL` | 0.5s between searches | `tools.py` |
+| `_MIN_INTERVAL` | 0.5s between *scraped* searches; the hosted backend is deliberately unthrottled (a metered API, not a page being polled) | `tools.py` |
 | `_RETRIES` (search) | 3, sleeps 1s then 2s | `tools.py` |
 | `CALL_TIMEOUT` (MCP) | 60.0s | `mcp_tools.py` |
 | `Memory(limit=)` | 20 facts | `memory.py` |
