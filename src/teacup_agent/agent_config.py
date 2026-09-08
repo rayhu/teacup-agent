@@ -67,12 +67,24 @@ def _expand_env(value: Any) -> Any:
 
 @dataclass
 class ModelProfile:
-    provider: str = "openai"  # "openai" | "openai-compatible"
+    provider: str = "openai"  # "openai" | "openai-compatible" | "anthropic"
     api: str = "responses"  # "responses" | "chat"
     model: str = "gpt-5"
     api_key_env: str | None = None
     base_url: str | None = None  # any OpenAI-compatible endpoint: vLLM, Ollama, OpenRouter...
     reasoning_effort: str | None = None
+    # USD per million tokens. All three or none: a half-stated rate would silently mix
+    # this model's input price with gpt-5's output price, which is worse than the
+    # honest table guess it was meant to replace. `load()` enforces that.
+    price_input: float | None = None
+    price_cached: float | None = None
+    price_output: float | None = None
+
+    def prices(self) -> tuple[float, float, float] | None:
+        """The profile's own rate, or None to fall back to `model.PRICES`."""
+        if self.price_input is None:
+            return None
+        return (self.price_input, self.price_cached, self.price_output)
 
 
 @dataclass
@@ -129,10 +141,10 @@ class AgentConfig:
 
 def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
     provider = spec.get("provider", "openai")
-    if provider not in ("openai", "openai-compatible"):
+    if provider not in ("openai", "openai-compatible", "anthropic"):
         raise ValueError(
-            f"models.profiles.{name}.provider is {provider!r}; only 'openai' and "
-            "'openai-compatible' are supported today"
+            f"models.profiles.{name}.provider must be 'openai', 'openai-compatible' "
+            f"or 'anthropic', got {provider!r}"
         )
     api = spec.get("api", "responses")
     if api not in ("responses", "chat"):
@@ -141,6 +153,33 @@ def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
         )
     if "model" not in spec:
         raise ValueError(f"models.profiles.{name} is missing 'model'")
+    if provider == "anthropic":
+        # `api` and `reasoning_effort` are OpenAI-shaped knobs with no Messages-API
+        # equivalent. Checked here rather than at build time because `spec` is the only
+        # place that knows whether the file *said* it, as opposed to the dataclass
+        # holding a default — and silently dropping a key someone wrote is how a config
+        # ends up lying about what it does.
+        ignored = [k for k in ("api", "reasoning_effort") if k in spec]
+        if ignored:
+            raise ValueError(
+                f"models.profiles.{name} is provider: anthropic and cannot use "
+                f"{', '.join(ignored)} — the Messages API has no equivalent; remove it"
+            )
+    price_keys = ("price_input", "price_cached", "price_output")
+    given = [k for k in price_keys if spec.get(k) is not None]
+    if given and len(given) != len(price_keys):
+        # Refused at load time rather than half-applied at runtime: a profile that
+        # states only price_input would otherwise be charged this model's input rate
+        # and gpt-5's output rate, and the resulting number looks entirely plausible.
+        missing = ", ".join(k for k in price_keys if k not in given)
+        raise ValueError(
+            f"models.profiles.{name} sets {', '.join(given)} but not {missing} — "
+            "give all three prices or none"
+        )
+    prices = {k: float(spec[k]) for k in price_keys} if given else {}
+    for key, value in prices.items():
+        if value < 0:
+            raise ValueError(f"models.profiles.{name}.{key} must not be negative, got {value}")
     return ModelProfile(
         provider=provider,
         api=api,
@@ -148,7 +187,23 @@ def _model_profile(name: str, spec: dict[str, Any]) -> ModelProfile:
         api_key_env=spec.get("api_key_env"),
         base_url=spec.get("base_url"),
         reasoning_effort=spec.get("reasoning_effort"),
+        **prices,
     )
+
+def _search_mode(value: Any) -> str:
+    """runtime.search, checked at load rather than accepted as a free string.
+
+    A typo here used to be silent: `search: ofline` fell through to the scraper and the
+    run quietly hit the network from a config that meant to forbid it. Now that one of
+    the modes bills per call, an unchecked spelling is a money question too.
+    """
+    mode = str(value).lower()
+    if mode not in ("auto", "web", "hosted", "offline"):
+        raise ValueError(
+            f"runtime.search must be 'auto', 'web', 'hosted' or 'offline', got {value!r}"
+        )
+    return mode
+
 
 
 def _model_roles(raw: dict[str, Any] | None, profiles: dict[str, ModelProfile]) -> dict[str, str]:
@@ -235,7 +290,7 @@ def load(path: str | pathlib.Path) -> AgentConfig:
         approve=runtime_raw.get("approve", "auto"),
         plan=_normalize_off_on(runtime_raw.get("plan", "auto")),
         reflect=_normalize_off_on(runtime_raw.get("reflect", "auto")),
-        search=runtime_raw.get("search", "auto"),
+        search=_search_mode(runtime_raw.get("search", "auto")),
         memory=runtime_raw.get("memory", "memory.json"),
         run_dir=_normalize_off_on(runtime_raw.get("run_dir", "runs")),
     )
@@ -264,6 +319,32 @@ def _normalize_off_on(value: Any) -> Any:
     return value
 
 
+
+def _anthropic_client(profile: ModelProfile) -> Any:
+    """A pre-built Anthropic client, or None to let the class read ANTHROPIC_API_KEY.
+
+    Same seam as the OpenAI path above: only built here when the profile names a
+    non-default key or endpoint, so the common case stays dependency-free until the
+    class itself imports the SDK.
+    """
+    if profile.base_url is None and profile.api_key_env is None:
+        return None
+    from anthropic import Anthropic
+
+    api_key = os.getenv(profile.api_key_env) if profile.api_key_env else None
+    if profile.api_key_env and not api_key:
+        raise RuntimeError(
+            f"model profile references api_key_env {profile.api_key_env!r}, but "
+            "that variable is not set (check .env)"
+        )
+    kwargs: dict[str, Any] = {}
+    if api_key:
+        kwargs["api_key"] = api_key
+    if profile.base_url:
+        kwargs["base_url"] = profile.base_url
+    return Anthropic(**kwargs)
+
+
 def build_model(profile: ModelProfile) -> "model_mod.Model":
     """Construct the right `Model` for one profile.
 
@@ -274,6 +355,15 @@ def build_model(profile: ModelProfile) -> "model_mod.Model":
     left to their own `OPENAI_API_KEY`-from-env default.
     """
     from teacup_agent import model as model_mod
+
+    if profile.provider == "anthropic":
+        # Before the OpenAI client below, not after it: that branch would otherwise
+        # build one from this profile's api_key_env — an Anthropic key handed to an
+        # OpenAI client — and then discard it, raising on a profile that names a key
+        # variable the OpenAI path has no business reading.
+        return model_mod.AnthropicModel(
+            profile.model, client=_anthropic_client(profile), prices=profile.prices()
+        )
 
     client = None
     if profile.base_url is not None or profile.api_key_env is not None:
@@ -291,9 +381,12 @@ def build_model(profile: ModelProfile) -> "model_mod.Model":
 
     if profile.api == "responses":
         return model_mod.ResponsesModel(
-            profile.model, client=client, reasoning_effort=profile.reasoning_effort
+            profile.model,
+            client=client,
+            reasoning_effort=profile.reasoning_effort,
+            prices=profile.prices(),
         )
-    return model_mod.OpenAIModel(profile.model, client=client)
+    return model_mod.OpenAIModel(profile.model, client=client, prices=profile.prices())
 
 
 def build_router(cfg: AgentConfig) -> routing.Router:

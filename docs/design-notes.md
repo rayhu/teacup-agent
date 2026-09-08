@@ -8,16 +8,18 @@ Start with [the README](../README.md) if you want to know what the project is. S
 
 ---
 
-## The three search_web modes
+## The four search_web modes
 
-Web search goes through [`ddgs`](https://pypi.org/project/ddgs/) (DuckDuckGo) and
-needs **no API key**; `uv sync` installs it. Switch with the `TEACUP_AGENT_SEARCH`
+Three of the four go through [`ddgs`](https://pypi.org/project/ddgs/) (DuckDuckGo)
+or a local corpus and need **no API key**; `uv sync` installs it. The fourth,
+`hosted`, calls OpenAI and bills per search. Switch with the `TEACUP_AGENT_SEARCH`
 environment variable:
 
 | Value | Behaviour | Use for |
 | --- | --- | --- |
 | `auto` (default) | search the web; on failure fall back to the local corpus and say why | everyday use |
 | `web` | web only; on failure return `ERROR:` | when offline material must not stand in |
+| `hosted` | **OpenAI's** web search (Responses `web_search`), forced with `tool_choice: required`; costs money per call, needs `--live` on the flag path. Always OpenAI, whatever provider the run's model profile names — it builds its own client and reads `OPENAI_API_KEY` | when result quality matters more than the per-call fee |
 | `offline` | the three local corpus entries only, zero network calls | evals, unit tests, demos |
 
 `--search` overrides it on the command line. The default follows the run mode:
@@ -61,6 +63,42 @@ equivalent. OpenAI's migration guide reports roughly +3% on SWE-bench with the s
 prompt.
 
 ---
+
+## A third backend: Anthropic's Messages API
+
+`OpenAIModel` and `ResponsesModel` above are two shapes of one protocol; `AnthropicModel`
+is a different protocol behind the same `Model` Protocol, and the loop does not change.
+Five differences are sealed inside it, and the last two are the ones that would have
+leaked:
+
+1. The system prompt is a **parameter**, not a message.
+2. Tools are flat and carry `input_schema`, not a nested `function` with `parameters`.
+3. Output is a list of content blocks (`text`, `tool_use`), not one message plus a
+   separate `tool_calls` field.
+4. A tool result is a **`user` message** containing a `tool_result` block keyed by
+   `tool_use_id` — not a role of its own.
+5. **Consecutive same-role turns must be merged.** The loop writes several
+   `role: "system"` entries mid-run (status notes, completion push-backs) and can
+   produce a tool result immediately followed by one; this API accepts neither a system
+   role nor two user turns in a row.
+
+Only the *first* system entry becomes `system=`. The later ones stay where they are, as
+user turns, because they are feedback about the turn that just happened and hoisting
+them to the top moves them away from it.
+
+The wrap-up turn needed its own answer. The loop deliberately passes an empty tool list
+on the final turn ("wording can be ignored, an empty tool list cannot"), but this API
+rejects a request whose history contains `tool_use`/`tool_result` blocks and no `tools`
+array — so a run that called a tool and then hit any ceiling would have died on the turn
+meant to rescue its answer. The definitions are rebuilt **from the history** and sent
+with `tool_choice: none`. From the history, not from what the model object remembers: a
+resumed run constructs a fresh model over a history full of tool blocks, which is
+exactly the path a run that hit its ceiling takes next.
+
+Cost: Anthropic models are deliberately absent from `PRICES`. An invented rate that goes
+stale is worse than the honest table fallback plus a profile that states its own
+`price_input`/`price_cached`/`price_output` (#16) — with those three set, the accounting
+is exact.
 
 ## Model routing: one agent, several models
 

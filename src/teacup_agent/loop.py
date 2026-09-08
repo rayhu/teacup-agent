@@ -302,6 +302,24 @@ def deny_all(call: ToolCall, tool: Any) -> bool:
 EXTERNALIZE_OVER = 2000  # tool results longer than this go to disk, excerpt inline
 
 
+def _execute_and_bill(index: int, call: ToolCall, spend: dict[int, float]) -> str:
+    """Run one tool and record what it spent, in the worker thread that ran it.
+
+    The accumulator in tools.py is thread-local, so reading it here reads exactly this
+    call's spend — not a sibling call's, and not a nested run's.
+    """
+    # Belt and braces: today it can never find anything, because pool threads run
+    # nothing but this function and its own `finally` zeroes them. It is here because
+    # that is only true while `execute_calls` is the sole executor of `tools.execute` —
+    # a fork adding a second call site would make it load-bearing, and a silent
+    # mis-charge is a worse way to find that out than a redundant line.
+    tools_mod.take_hosted_spend()
+    try:
+        return tools_mod.execute(call.name, call.arguments)
+    finally:
+        spend[index] = tools_mod.take_hosted_spend()
+
+
 def execute_calls(
     state: AgentState,
     calls: list[ToolCall],
@@ -361,6 +379,9 @@ def execute_calls(
         # timeout, the remaining time wins. A tool may also declare its own limit —
         # a subagent legitimately runs longer than a page fetch.
         left = state.time_left()
+        # Filled by each worker thread under its own key, read after the pool has shut
+        # down — so a call that timed out still contributes what it spent.
+        tool_spend: dict[int, float] = {}
         with ThreadPoolExecutor(max_workers=len(to_run)) as pool:
             futures = {}
             limits = {}
@@ -370,7 +391,7 @@ def execute_calls(
                 if left is not None:
                     limit = min(limit, max(1.0, left))
                 emit("tool_call", name=call.name, arguments=call.arguments, step=state.step)
-                future = pool.submit(tools_mod.execute, call.name, call.arguments)
+                future = pool.submit(_execute_and_bill, i, call, tool_spend)
                 futures[future] = i
                 # An absolute deadline, so waiting on them one after another does not
                 # add the timeouts together.
@@ -389,6 +410,20 @@ def execute_calls(
                     future.cancel()
                 except Exception as e:  # execute() already catches; this is the net
                     results[i] = f"ERROR: {type(e).__name__}: {e}"
+
+        # Charged here, to the run that owns this execute_calls, rather than drained
+        # from a module global later: `delegate` starts a nested run in a sibling
+        # worker thread, and a global could not say which run a concurrent search
+        # belonged to.
+        for i, cost in sorted(tool_spend.items()):
+            if not cost:
+                continue
+            # Named by the call that incurred it, not hardcoded: `_execute_and_bill` is
+            # tool-agnostic, and emitting one summed event under "search_web" would be a
+            # wrong attribution the moment a second spending tool exists — or the moment
+            # two of them run in the same turn.
+            state.charge(round(cost, 8))
+            emit("tool_spend", tool=calls[i].name, cost=round(cost, 8), step=state.step)
 
     for i, call in enumerate(calls):  # strictly in the original order
         result = results[i]
@@ -721,6 +756,7 @@ def _loop(
 
         # ---- 4. run every tool call in parallel, refill in order (trap 2) ---
         execute_calls(state, reply.tool_calls, model, emit, tool_timeout, run_dir, approve)
+
 
         # ---- 5. persist: save every step, or there is nothing to resume from -
         # elapsed uses the value measured at the top of this turn, so we do not ask

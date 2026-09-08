@@ -23,6 +23,23 @@ models:
     #   model: llama-3.1-70b
     #   base_url: http://localhost:11434/v1
     #   api_key_env: OLLAMA_API_KEY
+    #   # Cost tracking only knows OpenAI's own models by name; anything else is billed
+    #   # at gpt-5's rate, which looks plausible and is wrong. State the real rates and
+    #   # they win over the table. USD per million tokens, all three or none.
+    #   price_input: 0.10
+    #   price_cached: 0.01
+    #   price_output: 0.30
+
+    # Anthropic's Messages API — a different request/response shape, not just a
+    # different base_url, so it is its own class behind the same Model protocol.
+    # Needs the install extra: `uv sync --extra anthropic`.
+    # claude:
+    #   provider: anthropic
+    #   model: claude-sonnet-5
+    #   api_key_env: ANTHROPIC_API_KEY
+    #   price_input: 3.0
+    #   price_cached: 0.30
+    #   price_output: 15.0
 
     # The cheap half of a split, referenced by the roles block below. Both have to be
     # uncommented together: models.roles is validated at load, and naming a profile that
@@ -90,6 +107,6 @@ runtime:
   approve: auto        # auto (ask when there's a terminal) | deny | allow
   plan: auto
   reflect: auto        # write an experience/lesson note after a qualifying run
-  search: auto         # auto | web | offline
+  search: auto         # auto | web | hosted (costs money per call) | offline
   memory: memory.json
   run_dir: runs        # a fresh runs/<timestamp> each run; "off" disables persistence

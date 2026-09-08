@@ -41,7 +41,7 @@ These can. Measure them; if one goes red, the change is what moved, not the crit
    answerable from `loop.py` and `tools.py` alone — `execute()` returns the error as the
    tool result, the loop hands it back to the model. If that answer starts requiring a
    third file, the error path has been spread too thin.
-3. **Evaluation stays free.** `uv run python -m teacup_agent.evals` runs 21 protocol
+3. **Evaluation stays free.** `uv run python -m teacup_agent.evals` runs 27 protocol
    cases with a scripted model: no API key, no network, nothing written into the repo
    (`run_dir=None`, `TEACUP_AGENT_SEARCH=offline`). CI runs it, plus the tests and the
    demo, on every pull request. The moment checking the loop costs money, people stop
@@ -111,8 +111,9 @@ grep -ril 'teacup[-_]agent' . --exclude-dir=.git --exclude=uv.lock
    `[tool.hatch.build.targets.wheel] packages`.
 3. Sweep both spellings across everything that grep listed — `src/`, `tests/`,
    `examples/`, `main.py`, `.env.example` and the docs.
-4. `TEACUP_AGENT_SEARCH` — the one environment variable, in `tools.py`, `cli.py`,
-   `evals.py`, the tests and the docs. Rename it or you will read someone else's prefix in
+4. `TEACUP_AGENT_SEARCH` and `TEACUP_AGENT_SEARCH_MODEL` — the two environment
+   variables, in `tools.py`, `cli.py`,
+   `evals.py`, the tests and the docs. Rename them or you will read someone else's prefix in
    your own error messages.
 5. The prompt-cache key prefix — the `set_cache_key` call in `run()`. Cosmetic, but it
    groups cache entries; sharing a prefix with a project you have diverged from is a lie

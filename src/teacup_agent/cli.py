@@ -20,6 +20,7 @@ from teacup_agent import hooks as hooks_mod
 from teacup_agent import loop, model as model_mod, persist
 from teacup_agent import tools as tools_mod
 from teacup_agent.memory import Memory
+from teacup_agent.state import AgentState
 
 DEFAULT_GOAL = "Look up NVIDIA's GPU strategy, and compute 1200 * 0.85 / 3"
 
@@ -266,10 +267,12 @@ def main(argv: list[str] | None = None) -> int:
     )
     p.add_argument(
         "--search",
-        choices=["auto", "web", "offline"],
+        choices=["auto", "web", "hosted", "offline"],
         default=None,
-        help="search mode; defaults to auto (real network) with --live and offline "
-        "(zero network calls) for the offline demo",
+        help="search mode; defaults to auto (key-less scraper) with --live and "
+        "offline (zero network calls) for the offline demo. hosted uses "
+        "OpenAI's web search (always OpenAI, whatever the model profile says): "
+        "better results, costs money per call, needs --live",
     )
     p.add_argument(
         "--tool-timeout",
@@ -420,6 +423,30 @@ def _main(args, project_root: pathlib.Path) -> int:
 
     # Search mode is decoupled from model mode: the offline demo also searches
     # offline, so it stays network-free and instant.
+    refusal = _search_refusal(args.search, live=args.live)
+    if refusal:
+        # docs/integration.md is a contract, not a suggestion: every field through
+        # `throttled` is snapshot() unchanged, and exit_code is 0 when status is "done"
+        # and 1 otherwise. An earlier version of this emitted a three-key object with
+        # exit_code 2, which would KeyError any caller reading remaining_budget — and
+        # contradicted the doc it cited as its reason for existing.
+        if args.json:
+            # the run's real ceilings, not AgentState's defaults: integration.md calls
+            # remaining_budget "the ledger", and reporting 0.05 under --budget 1.5
+            # would be a wrong number in the field a caller trusts most.
+            refused = AgentState(
+                goal=args.goal,
+                status="error",
+                max_steps=args.max_steps,
+                remaining_budget=args.budget,
+            )
+            payload = refused.snapshot()
+            payload["answer"] = refusal
+            payload["exit_code"] = 1
+            print(json.dumps(payload, ensure_ascii=False))
+        else:
+            print(refusal, file=sys.stderr)
+        return 1
     os.environ["TEACUP_AGENT_SEARCH"] = args.search or ("auto" if args.live else "offline")
 
     resumed = persist.load(args.resume) if args.resume else None
@@ -511,6 +538,27 @@ def _finish(state, run_dir, args) -> int:
         print(f"State: {json.dumps(state.snapshot(), ensure_ascii=False)}")
     return exit_code
 
+def _search_refusal(requested: str | None, *, live: bool) -> str:
+    """The message refusing this flag combination, or "" if it is allowed.
+
+    One combination is refused: `--search hosted` without `--live`. `--live` is this
+    repo's money gate, and the offline demo really does call search_web, so this would
+    bill a real API call from the path README and --help describe as key-less and
+    instant. It is refused rather than downgraded — silently running a different
+    backend than the one asked for is how a measurement ends up describing something
+    that never happened.
+
+    Returns rather than raises so the caller can honour --json; a SystemExit here would
+    hand an external caller empty stdout against a contract that promises one object.
+    """
+    if requested == "hosted" and not live:
+        return (
+            "ERROR: --search hosted costs money per call, so it needs --live. "
+            "Add --live, or drop the flag for the key-less backend."
+        )
+    return ""
+
+
 
 def _main_config(args) -> int:
     """The --config path: everything comes from the YAML file, nothing from the other
@@ -518,6 +566,13 @@ def _main_config(args) -> int:
     from teacup_agent import agent_config
 
     cfg = agent_config.load(args.config)
+    # No --live gate here, deliberately, and this is the difference between the two
+    # entry points rather than an oversight. A config run is always "real" (see
+    # `plan=_resolve_plan(..., live=True)` below) and --config's own help says every
+    # other flag is ignored — so requiring --live would make a flag documented as inert
+    # load-bearing, and hard-fail a config that spelled out its own intent. Writing
+    # `search: hosted` in agent.yaml *is* the deliberate decision the flag gate exists
+    # to demand; runtime.search is validated at load, so it cannot be a typo.
     os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
 
     resumed = persist.load(args.resume) if args.resume else None

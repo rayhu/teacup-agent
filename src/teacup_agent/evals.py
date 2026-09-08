@@ -12,13 +12,14 @@ from __future__ import annotations
 
 import json
 import os
+from types import SimpleNamespace
 from dataclasses import dataclass
-from typing import Callable
+from typing import Any, Callable
 
 from teacup_agent import loop
 from teacup_agent import routing
 from teacup_agent.memory import NullMemory
-from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says
+from teacup_agent.model import ScriptedModel, assistant_calls, assistant_says, content_blocks
 from teacup_agent.state import AgentState
 
 
@@ -47,18 +48,33 @@ class Case:
     # elsewhere provably ran somewhere else.
     roles: dict[str, str] | None = None
     clock_values: list[float] | None = None  # fake clock, makes the time brake repeatable
+    # A case that needs a model this harness cannot script — a different *backend*,
+    # whose message shape ScriptedModel cannot emit. Returns the model to run.
+    model_factory: Callable[[], Any] | None = None
 
 
 def tool_results_follow_their_call(state: AgentState) -> bool:
     """Every tool result's id must appear in an entry **before** it that announced
-    the call, and every announced id must be filled exactly once. Both API shapes
-    are recognised."""
+    the call, and every announced id must be filled exactly once. All three API shapes
+    are recognised — a scanner that knows only two returns True vacuously on the third,
+    which is the one way this guard can fail without anyone noticing."""
     announced: set[str] = set()
     for msg in state.messages:
         # Chat Completions shape
         if msg.get("role") == "assistant":
             for tc in msg.get("tool_calls") or []:
                 announced.add(tc["id"])
+            # Messages API shape: a tool_use block inside the assistant turn
+            for block in content_blocks(msg):
+                if block.get("type") == "tool_use":
+                    announced.add(block["id"])
+        elif msg.get("role") == "user":
+            # ...whose result arrives as a tool_result block in a *user* turn
+            for block in content_blocks(msg):
+                if block.get("type") == "tool_result":
+                    if block.get("tool_use_id") not in announced:
+                        return False
+                    announced.discard(block["tool_use_id"])
         elif msg.get("role") == "tool":
             if msg.get("tool_call_id") not in announced:
                 return False
@@ -71,6 +87,28 @@ def tool_results_follow_their_call(state: AgentState) -> bool:
                 return False
             announced.discard(msg["call_id"])
     return not announced  # every announced call must have a result
+
+
+def _anthropic_case_model():
+    """AnthropicModel over a scripted fake client: one tool call, then an answer."""
+    from teacup_agent.model import AnthropicModel
+
+    turns = [
+        [{"type": "tool_use", "id": "tu_1", "name": "calculate", "input": {"expression": "2+2"}}],
+        [{"type": "text", "text": "2+2 is 4"}],
+    ]
+    state = {"i": 0}
+
+    class _Messages:
+        def create(self, **kwargs):
+            blocks = turns[min(state["i"], len(turns) - 1)]
+            state["i"] += 1
+            return SimpleNamespace(
+                content=blocks,
+                usage=SimpleNamespace(input_tokens=10, output_tokens=5),
+            )
+
+    return AnthropicModel(client=SimpleNamespace(messages=_Messages()))
 
 
 CASES: list[Case] = [
@@ -318,6 +356,24 @@ CASES: list[Case] = [
         ),
     ),
     Case(
+        name="anthropic: a whole run through the Messages shape keeps the protocol intact",
+        # The one shape ScriptedModel cannot produce, and the reason this hook exists.
+        # A tool call here is a `tool_use` block inside an assistant turn and its result
+        # is a `tool_result` block inside a *user* turn — neither of the two shapes the
+        # protocol scanners were written for. A scanner that does not recognise it
+        # returns True vacuously, so this case is checking the checker as much as the
+        # backend: before context.py and evals.py learned the third shape, compaction
+        # would happily cut between a tool_use and its result and the guard said fine.
+        model_factory=_anthropic_case_model,
+        script=[],
+        max_steps=4,
+        check=lambda s: (
+            tool_results_follow_their_call(s)
+            and any(t.name == "calculate" for t in s.trace)
+            and s.status == "done"
+        ),
+    ),
+    Case(
         name="completion: finishing without having written anything gets pushed back",
         # The checklist branch cannot cover this: a run that never called update_todo has
         # an empty todo, so nothing is outstanding and it could stop whenever it liked.
@@ -448,9 +504,19 @@ CASES: list[Case] = [
 
 def run_case(case: Case) -> tuple[bool, AgentState]:
     # Evals must be deterministic: force offline search, no network calls.
-    os.environ.setdefault("TEACUP_AGENT_SEARCH", "offline")
+    # Assigned, not setdefault: AGENTS.md advertises this command as free, and one of
+    # the cases really does call search_web. setdefault leaves an exported
+    # TEACUP_AGENT_SEARCH=hosted in place, so the "free" health check would bill for
+    # anyone who has a key exported — which is everyone doing live work here.
+    os.environ["TEACUP_AGENT_SEARCH"] = "offline"
     main_model = ScriptedWithSummarizer(list(case.script), plan_items=case.plan_items)
-    model = main_model
+    if case.roles and case.model_factory:
+        # Refused rather than silently resolved: `roles` builds a router over scripted
+        # models and would discard the factory's model entirely, so the case would run
+        # on ScriptedModel while claiming to exercise another backend — the precise
+        # "proof by construction" failure `roles` exists to provide.
+        raise ValueError(f"case {case.name!r} sets both model_factory and roles; pick one")
+    model = case.model_factory() if case.model_factory else main_model
     if case.roles:
         # A separate scripted model per other profile: proof by construction that a
         # routed role did not quietly run on the main one.

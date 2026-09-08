@@ -170,6 +170,40 @@ read-only and filtered through the same deny-list as `read_file`.
   `--approve allow` or no `hooks.py` at all — see "The approval gate is the real
   boundary, not a sandbox" above, which still applies in full to this tool.
 
+
+## What #11 and #16 added: a tool that spends, and a second provider
+
+`search_web`'s `hosted` mode (#11) is the first tool in this repo that **costs money and
+is not gated**. That combination is deliberate but it moves two rows of the table above,
+so it is written down rather than left to be discovered.
+
+- **It is ungated on purpose, and the reason is the same one the gate has.** `search_web`
+  is `requires_approval=False` because it is read-only, and approval fatigue on a
+  read-only tool is its own hazard ("numb people click approve with their eyes closed").
+  What is new is that a read-only tool can now bill. The control is not the approval gate
+  but the budget: the fee plus token cost is charged against `remaining_budget` inside
+  `execute_calls`, so `out_of_budget` stops a run that spends too much, and `--search
+  hosted` is refused outright without `--live`. If you fork this and add a second
+  spending tool, that ledger is what you are relying on — not the gate.
+- **It ships the query to OpenAI regardless of which provider the run uses.** The hosted
+  backend builds its own client and reads `OPENAI_API_KEY`, so a run whose model profile
+  points at Anthropic or a local endpoint still sends search text to OpenAI. The query is
+  model-composed and can therefore contain anything the model has read — including
+  content from the "not trusted, ever" list above (web results, MCP output, an inbound
+  A2A task). That is an egress path to a *third* party, and it is the credential-and-
+  egress row this document says is the row it actually defends. Runs that must not send
+  their working text to OpenAI should leave the mode at `auto`.
+- **Served agents can be driven into it by remote peers.** `a2a/server.py` pins the mode
+  from `runtime.search` at `build_app`, so an exported `TEACUP_AGENT_SEARCH=hosted` can
+  no longer reach a served run by accident. But an operator who *writes* `search: hosted`
+  in the served config has given every peer that can submit a task the ability to spend,
+  bounded only by the per-run budget times the number of tasks accepted. There is no
+  `--live` gate on that path and no per-peer accounting.
+- **#16's Anthropic backend adds a second credential and a second egress destination.**
+  `ANTHROPIC_API_KEY`, read directly by `AnthropicModel` when a profile names no
+  `api_key_env`. Everything the "Credential and egress scope" row says about
+  `OPENAI_API_KEY` applies to it unchanged.
+
 ## What this repo does not defend against
 
 Stated plainly rather than silently assumed:
@@ -177,7 +211,7 @@ Stated plainly rather than silently assumed:
 - **Compromise of the model provider itself.** If the API you call is compromised or
   malicious, nothing here helps.
 - **Supply-chain compromise of this repo's own dependencies** (`openai`, `mcp`, `a2a-sdk`,
-  `pyyaml`, and everything they pull in). Pinned versions and a lockfile slow this down;
+  `pyyaml`, the optional `anthropic`, and everything they pull in). Pinned versions and a lockfile slow this down;
   they do not stop it.
 - **Network-level attacks** against the machine this runs on — this is an application
   boundary, not a network one.

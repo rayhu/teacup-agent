@@ -216,9 +216,250 @@ def _search_web_backend(query: str, max_results: int) -> str:
     return "\n".join(lines)
 
 
+
+# The hosted backend, and why it is opt-in rather than the default. ddgs scrapes a
+# search page: free, key-less, no account, and average at both quality and stability
+# — which is exactly right for `auto`, because `auto` is what runs when nobody has
+# configured anything. A hosted search is better on both counts and costs real money
+# per call, so it is selected explicitly and never fallen back *into*: a mode that
+# silently starts spending is a worse surprise than a mediocre result.
+_HOSTED_MODEL_ENV = "TEACUP_AGENT_SEARCH_MODEL"
+_HOSTED_DEFAULT_MODEL = "gpt-5-mini"
+# Published as $10 per 1000 calls; goes stale like everything else in a price constant.
+# Charged per call on top of the tokens, so the budget brake sees this tool at all.
+_HOSTED_CALL_FEE = 0.01
+
+
+class _SearchNotConfigured(RuntimeError):
+    """The hosted backend cannot run until a human changes something — as opposed to
+    the network being unhappy, which is worth retrying. The two must not read alike."""
+
+
+def _is_config_error(exc: Exception) -> bool:
+    """Whether a failure is permanent. A missing key raises _SearchNotConfigured, but a
+    *rejected* one surfaces as the SDK's AuthenticationError and was taking the "retry
+    later" branch — the same failure _SearchNotConfigured exists to prevent, reached by
+    a different route. There is more than that one: TEACUP_AGENT_SEARCH_MODEL is a live
+    knob, so naming a model that does not exist raises NotFoundError — equally
+    permanent, equally useless to retry. Telling the model "retry later" for those sends
+    it back to a mode that cannot work until a human edits something, until the step
+    ceiling.
+
+    **The list is deliberately short, and two entries were tried and removed.** Adding a
+    class here is not free: this branch tells the model retrying cannot help *and* drops
+    the "reword the query" advice, so a wrong entry disables search for the rest of the
+    run.
+
+    - `BadRequestError` was here for one round and is not a permanence signal. Every
+      HTTP 400 becomes that one class — whether a given 400 is permanent lives in
+      `.code`, which a name match flattens away — and `query` is written by the model
+      and interpolated into the request, so a 400 provoked by the query text is
+      indistinguishable from a model that cannot use the web_search tool. Ambiguous
+      failures belong in the retryable branch.
+    - `ImportError`/`ModuleNotFoundError` were here too. `openai` is a hard dependency
+      (`pyproject.toml`), so "not installed" is near-unreachable — while a broken import
+      of *our own* code inside this backend would have reached the model as "this is a
+      setup problem" rather than as the bug it is.
+
+    Matched by type name rather than `isinstance` so this module never imports the SDK
+    at module scope — it is imported lazily inside the backend, and the offline paths
+    must not pay for it. The names are pinned by a test that imports the real openai
+    classes, so a rename upstream fails loudly rather than silently reopening the retry
+    loop.
+    """
+    return isinstance(exc, _SearchNotConfigured) or type(exc).__name__ in (
+        "AuthenticationError",  # key rejected
+        "PermissionDeniedError",  # key valid, not entitled to this
+        "NotFoundError",  # TEACUP_AGENT_SEARCH_MODEL names a model that does not exist
+    )
+
+# The loop's per-tool default is 30s and it cannot cancel a thread already inside an
+# HTTP call: on overrun the request still completes and still bills, while the model
+# gets an error and retries. A shorter client timeout is what actually stops that.
+_HOSTED_TIMEOUT = 20.0
+
+# What the hosted backend has spent, per thread. Thread-local, not a module global,
+# and that is the whole design: `execute_calls` runs each tool in its own worker
+# thread, so a search credits the thread that made it and the run that owns that
+# thread collects it there. A plain global could not tell two concurrent runs apart —
+# a turn issuing `search_web` and `delegate` together has the parent's search
+# finishing while the child's nested `loop.run` is live, and the child charged the
+# parent's fee against its own budget. Two attempts at fixing that with a global (a
+# reset at run start, then a take-and-give-back bracket) both failed on the same
+# interleaving; the accumulator simply has to be per-thread.
+_hosted = threading.local()
+
+
+def _add_hosted_spend(amount: float) -> None:
+    _hosted.spend = round(getattr(_hosted, "spend", 0.0) + amount, 8)
+
+
+def take_hosted_spend() -> float:
+    """Hand this thread's accumulated hosted-search spend to the caller and reset it."""
+    spent = getattr(_hosted, "spend", 0.0)
+    _hosted.spend = 0.0
+    return spent
+
+
+def _search_hosted_backend(query: str, max_results: int) -> str:
+    """OpenAI's hosted web search, via the Responses API.
+
+    OpenAI's specifically, not "whatever provider this run is using": it builds its own
+    client and reads OPENAI_API_KEY, so a run whose model profile points at Anthropic or
+    a local endpoint still searches through OpenAI — or fails here for want of a key it
+    was never told it needed.
+
+    Same tool, same arguments, same numbered list of sources — but not byte-identical
+    output: this backend has no per-source snippet, and carries a summary the scraper
+    has no equivalent for. Sources come from the response's
+    `url_citation` annotations rather than from parsing the prose: a citation the API
+    attached is a link it actually used, where a URL scraped out of the text is a
+    string the model may have written from memory.
+
+    No throttling here, unlike the scraper: this is a metered API being called
+    normally, not a public page being polled faster than it likes.
+    """
+    from openai import OpenAI  # lazy, same as the ddgs import above
+
+    if not os.getenv("OPENAI_API_KEY"):
+        raise _SearchNotConfigured(
+            "hosted search needs OPENAI_API_KEY. Set it, or use "
+            "TEACUP_AGENT_SEARCH=auto for the key-less backend"
+        )
+    model = os.getenv(_HOSTED_MODEL_ENV, _HOSTED_DEFAULT_MODEL)
+    resp = OpenAI(timeout=_HOSTED_TIMEOUT).responses.create(
+        model=model,
+        tools=[{"type": "web_search"}],
+        # Forced, not offered. "Like any other tool, the model can choose to search the
+        # web or not" — and a model that chooses not to has answered from memory, which
+        # is precisely the thing this tool exists to replace. Left optional, the caller
+        # cannot tell a searched answer from a recalled one.
+        tool_choice="required",
+        input=(
+            f"Search the web for: {query}\n\n"
+            f"Summarise what you find in a few sentences, citing your sources. "
+            f"Prefer the {max_results} most relevant and most recent results."
+        ),
+    )
+    done, broken = _search_actions(resp)
+    # The *response* can be truncated too (status "incomplete", with a reason like
+    # max_output_tokens), which cuts off the message block carrying the citations while
+    # the search item itself still says completed. Checking only the item's status made
+    # that read as "nothing found" — the same failure one level up from where the last
+    # round found it, and this time with wording that explicitly tells the model to
+    # trust the absence.
+    if not broken and getattr(resp, "status", "completed") not in (None, "completed"):
+        reason = getattr(getattr(resp, "incomplete_details", None), "reason", "") or ""
+        broken = f"response {resp.status}" + (f": {reason}" if reason else "")
+    # Billed per search action, not per API call: a reasoning model routinely issues
+    # several in one response, and a response that searched none should cost none. The
+    # fee is charged after counting, so the "it never searched" branch below no longer
+    # bills for a search that did not happen.
+    _add_hosted_spend(_HOSTED_CALL_FEE * done + _hosted_token_cost(resp, model))
+
+    if broken:
+        # The API says the search itself failed or was cut short. This is the
+        # distinction that has caused real wrong answers here, and the first version of
+        # this backend reintroduced it one layer down by only asking *whether* a search
+        # item existed and never what it said.
+        return (
+            f"ERROR: the hosted search did not complete ({broken}). This does **not** "
+            "mean the information does not exist, only that the search channel is "
+            "unhealthy. Retry later, or reword the query."
+        )
+
+    if not done:
+        # A successful API call in which no search happened at all — the model answered
+        # from memory. Saying "no results" here would tell it the information does not
+        # exist, which is the same failure in a different coat.
+        return (
+            "ERROR: the hosted search did not run a query (the model answered without "
+            "searching). This does **not** mean the information does not exist. Retry, "
+            "or reword the query."
+        )
+
+    sources = _url_citations(resp)[:max_results]
+    if not sources:
+        # A search ran, completed, and produced nothing citable. Deliberately *not*
+        # returning the summary: without a citation there is no way to tell text the
+        # search grounded from text the model wrote from memory, and an uncited
+        # paragraph presented as a search result is the failure this backend removes.
+        return (
+            f"The hosted search ran and returned no citable sources for {query!r}. "
+            "(The search itself worked; treat this as 'nothing found', not as an error.)"
+        )
+
+    summary = (getattr(resp, "output_text", "") or "").strip()
+    lines = [f"{i}. {title}\n   {url}" for i, (title, url) in enumerate(sources, 1)]
+    parts = ["\n".join(lines)]
+    if summary:
+        parts.append(f"Summary:\n{summary}")
+    return "\n\n".join(parts)
+
+
+def _search_actions(resp: Any) -> tuple[int, str]:
+    """(completed searches, why-it-is-broken) from the response's web_search_call items.
+
+    The status field is the point. It is documented as one of in_progress, searching,
+    completed, failed or incomplete — so "a web_search_call item exists" and "a search
+    happened" are different claims, and treating the first as the second turns a failed
+    search into "there is nothing to find".
+    """
+    done = 0
+    bad: list[str] = []
+    for item in getattr(resp, "output", None) or []:
+        if getattr(item, "type", None) != "web_search_call":
+            continue
+        status = getattr(item, "status", None)
+        if status == "completed":
+            done += 1
+        elif status in (None, "in_progress", "searching"):
+            # Not finished, so not billable and not a result. Defaulting a missing
+            # status to "completed" billed for a search nobody can show completed;
+            # on a money path the safe default is the one that does not charge.
+            bad.append(status or "no status")
+        else:  # failed, incomplete, anything the API adds later
+            bad.append(status)
+    return done, ", ".join(sorted(set(bad)))
+
+
+def _hosted_token_cost(resp: Any, model: str) -> float:
+    from teacup_agent.model import estimate_cost
+
+    usage = getattr(resp, "usage", None)
+    if usage is None:
+        return 0.0
+    from teacup_agent.model import cached_from
+
+    return estimate_cost(
+        model,
+        getattr(usage, "input_tokens", 0) or 0,
+        getattr(usage, "output_tokens", 0) or 0,
+        cached_from(usage, "input_tokens_details"),
+    )
+
+
+def _url_citations(resp: Any) -> list[tuple[str, str]]:
+    """(title, url) pairs from the response's annotations, de-duplicated in order."""
+    seen: set[str] = set()
+    out: list[tuple[str, str]] = []
+    for item in getattr(resp, "output", None) or []:
+        for block in getattr(item, "content", None) or []:
+            for ann in getattr(block, "annotations", None) or []:
+                if getattr(ann, "type", None) != "url_citation":
+                    continue
+                url = (getattr(ann, "url", "") or "").strip()
+                if not url or url in seen:
+                    continue
+                seen.add(url)
+                out.append(((getattr(ann, "title", "") or url).strip(), url))
+    return out
+
+
 @tool(
     description=(
-        "Search the web. Returns a list of results with title, link and snippet. "
+        "Search the web. Returns a numbered list of sources — title and link, "
+        "with a snippet on the key-less backend and a summary on the hosted one. "
         "Cite the returned links when you use them; two or three differently worded "
         "searches per question is usually enough."
     ),
@@ -237,19 +478,53 @@ def _search_web_backend(query: str, max_results: int) -> str:
     },
 )
 def search_web(query: str, max_results: int = 5) -> str:
-    """Three modes, selected by the TEACUP_AGENT_SEARCH environment variable:
+    """Four modes, selected by the TEACUP_AGENT_SEARCH environment variable:
 
-    auto (default): use the network; on failure fall back to the offline corpus
-                    and say why.
-    web           : network only; on failure return an error (so the model never
+    auto (default): the key-less scraper; on failure fall back to the offline
+                    corpus and say why.
+    web           : scraper only; on failure return an error (so the model never
                     reads a broken search as "this does not exist").
+    hosted        : OpenAI's hosted web search — always OpenAI, no matter which
+                    provider the model profile names (better results, costs
+                    money per call, needs OPENAI_API_KEY). Errors are reported,
+                    never degraded into the corpus — a paid backend quietly
+                    answering from a local corpus is worse than saying it failed.
     offline       : local corpus only, zero network calls (evals and unit tests).
+
+    `auto` deliberately does not reach for `hosted` even when a key is present:
+    picking the backend that costs money should be a decision someone made, not
+    one an unset environment variable made for them.
     """
     mode = os.getenv("TEACUP_AGENT_SEARCH", "auto").lower()
     max_results = max(1, min(int(max_results), 10))
 
     if mode == "offline":
         return _search_corpus(query)
+
+    if mode == "hosted":
+        try:
+            return _search_hosted_backend(query, max_results)
+        except Exception as e:
+            if not _is_config_error(e):
+                return (
+                    f"ERROR: hosted search failed ({type(e).__name__}: {e}). This does "
+                    "**not** mean the information does not exist, only that the search "
+                    "channel is temporarily unavailable. Retry later, reword the query, "
+                    "or answer from what you already have and mark this item unverified."
+                )
+            # Permanent. Telling the model to "retry later" would send it back to a
+            # mode that cannot work until a human changes something, and it would keep
+            # going until the step ceiling.
+            # `_SearchNotConfigured` carries a written-for-humans message and is the
+            # commonest case here; prefixing it with our own class name is noise in
+            # model-facing prose. The SDK's classes say something the message does not.
+            detail = str(e) if isinstance(e, _SearchNotConfigured) else f"{type(e).__name__}: {e}"
+            return (
+                f"ERROR: hosted search is not configured ({detail}). "
+                "This is a setup "
+                "problem, not a temporary one — retrying will not help. Answer from "
+                "what you already have and mark anything unverified as unverified."
+            )
 
     try:
         return _search_web_backend(query, max_results)

@@ -2,11 +2,12 @@
 
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
-**Progress**: #1-#10, #12, #13, #14, #15, #17, #18, #19, #20 and #21's Stages A and B
-are done (except the fine-grained permissions part of #6). Five items that were never on
-the roadmap were added after reviewing real runs (see "Field patches" at the end).
-Next up: #11 (a better search backend) and #16 (multi-provider price overrides, a
-native Anthropic path), both scoped but not started. #21's Stages A (role routing) and B
+**Progress**: #1-#21 are done except the fine-grained permissions part of #6 and #21's
+Stage C. Twelve items that were never on the roadmap were added after reviewing real runs
+(see "Field patches" at the end). #11 (hosted search backend) and #16 (per-profile price
+overrides, a native Anthropic path) landed 2026-09-08 after seven independent review
+rounds — the numbers, and what is still not verified, are in each item's own Verified
+block. #21's Stages A (role routing) and B
 (the bench, and the live table that says where the small model breaks) both landed on
 2026-09-03; whether its Stage C — routing by classified task rather than by call site —
 is worth the complexity is now a question the table can be argued from, and the honest
@@ -462,14 +463,64 @@ per-turn cap applies), and passing curated context down instead of a blank slate
 
 ---
 
-### 11. A better search backend
+### 11. A better search backend — DONE (2026-09-08)
 
-**Now**: `search_web` scrapes DuckDuckGo through ddgs — free and key-less, but average
+**Was**: `search_web` scraped DuckDuckGo through ddgs — free and key-less, but average
 in both quality and stability.
 
-**Options**: the model's own hosted web search (via the Responses API, see #1), or a
-dedicated agentic search API. The interface does not change; only the inside of
-`search_web` does — the three-mode structure (auto/web/offline) is already there.
+**Built**: OpenAI's hosted web search, via the Responses API's `web_search` tool, as a
+fourth mode on the existing switch: `TEACUP_AGENT_SEARCH=hosted` / `--search hosted`
+(`TEACUP_AGENT_SEARCH_MODEL` picks the model, default `gpt-5-mini`). Same tool, same
+arguments, same numbered list of sources — but the output is *not* byte-identical: this
+backend has no per-source snippet, and carries a summary the scraper has no equivalent
+for. It is OpenAI's specifically, not "whatever provider the run is using": it builds
+its own client and reads `OPENAI_API_KEY`, so a run whose model profile points at
+Anthropic or a local endpoint still searches through OpenAI, or fails if there is no
+OpenAI key. Worth knowing before turning it on.
+
+Sources come from the response's `url_citation` annotations, not from parsing URLs out
+of the prose: a citation the API attached is a link it actually used, where a URL
+scraped from generated text is a string the model may have written from memory.
+
+That distinction is load-bearing rather than decorative, and getting it *right* took a
+second pass. The search is forced (`tool_choice: "required"`), because the docs are
+explicit that "the model can choose to search the web or not" — and a model that chose
+not to has answered from memory, which is the exact thing this backend replaces. A
+response with no `web_search_call` is reported as "the search did not run", never as
+"no results". And a search that ran but produced no citation returns no summary at all:
+without a citation there is no way to tell grounded text from recalled text, and an
+uncited paragraph presented as a search result is the failure this item existed to
+remove. The first version of this shipped none of those three checks, and its test
+asserted only that no numbered list appeared — which un-cited prose passes.
+
+**The money.** This is the only tool in the repo that spends, and it now reaches the
+same brake the model calls do: the backend accumulates its per-call fee plus token cost,
+and `execute_calls` charges it in the worker thread that made the call. Left
+uncharged, a run with
+the defaults could make 24 hosted searches against a $0.05 ceiling that
+`state.snapshot()` reported as untouched. `--search hosted` is also refused without
+`--live` — `--live` is this repo's money gate, and the offline demo really does call
+`search_web`.
+
+**Two decisions worth keeping.** `auto` does **not** reach for the hosted backend even
+when `OPENAI_API_KEY` is set. Choosing the backend that costs money per call should be a
+decision someone made, not one an unset environment variable made for them, and `auto`
+is by definition what runs when nobody configured anything. And `hosted` failures are
+reported as errors, never degraded into the offline corpus: a paid backend quietly
+answering from a local fixture is worse than one that says it failed, because the model
+cannot tell the difference. That is the same rule the scraper path already followed —
+"the search failed" and "there is nothing to find" are completely different statements.
+
+**Verified**: `uv run pytest` (386 passed; `main` is 322), `uv run python -m teacup_agent.evals`
+(27/27, was 26), `uv run teacup-agent` (0.06s, offline demo unaffected). The hosted
+backend itself is exercised only against a fake client — a live call costs money and
+needs a key, so "does OpenAI's web search return good results" stays an unverified
+claim. What *is* pinned is everything the harness controls: the forced search, the
+status-aware failure path, the withheld uncited summary, per-action billing, the
+accumulator's thread isolation, and the `--live` refusal. What is *not* pinned is the
+end-to-end interleaving that made the accumulator wrong twice — a parent's search
+finishing during a child run — because that ordering could not be made deterministic;
+the primitive is tested, the race is reasoned about.
 
 ---
 
@@ -778,7 +829,7 @@ uv run teacup-agent                    # offline demo unaffected, still instant
 
 ---
 
-### 16. Multi-provider models: price overrides and a native second protocol
+### 16. Multi-provider models: price overrides and a native second protocol — DONE (2026-09-08)
 
 **Now**: `#15` already reaches any OpenAI-compatible endpoint (vLLM, Ollama, OpenRouter)
 via `base_url`, for free. What is left is smaller than originally scoped:
@@ -795,6 +846,56 @@ via `base_url`, for free. What is left is smaller than originally scoped:
 **Definition of done**: a model profile with `price_input`/`price_cached`/`price_output`
 changes `state.snapshot()`'s cost accounting; an `AnthropicModel` class round-trips a
 tool call through the Messages API shape with a test pinning its `tool_result_item()`.
+
+**Built**, both halves.
+
+*Prices*: `ModelProfile` takes the three rates and `estimate_cost()` takes an optional
+override that wins over the name-keyed table. All three or none, enforced at load time —
+a profile stating only `price_input` would otherwise be charged its own input rate and
+gpt-5's output rate, and the resulting number looks entirely plausible. That was the
+whole point: `_DEFAULT_PRICE` silently attaches gpt-5's price to whatever a `base_url`
+happens to be pointing at.
+
+*Anthropic*: `AnthropicModel` behind the unchanged `Model` Protocol, no loop change,
+behind an `anthropic` install extra that nothing else imports. Five shape differences are
+sealed inside it — the system prompt is a parameter rather than a message, tools carry
+`input_schema` rather than a nested `function`, output is a block list, a tool result is
+a `user` message keyed by `tool_use_id`, and consecutive same-role turns must be merged
+before sending. The last two are the ones that would have leaked: the loop writes several
+`role: "system"` entries mid-run (status notes, completion push-backs), and this API
+takes neither a system role nor two user turns in a row. Only the *first* system entry
+becomes `system=`; the later ones stay where they are as user turns, because they are
+feedback about the turn that just happened and hoisting them to the top moves them away
+from it.
+
+Anthropic models are deliberately **not** added to `PRICES`. Inventing rates that go
+stale is worse than the honest fallback plus the override this same item just built —
+give the profile its three prices and the accounting is exact.
+
+**What this cost in size**, stated because AGENTS.md rule 7 asks, with every number
+measured at this commit rather than remembered from an earlier one:
+
+| file | main | here | |
+| --- | --- | --- | --- |
+| `tools.py` | 526 | 801 | past the ~700 "consider splitting" line |
+| `model.py` | 362 | 648 | three backends in one module |
+| `loop.py` | 747 | 783 | was already past ~700 before this branch |
+| `evals.py` | 499 | 565 |  |
+| `cli.py` | 637 | 692 |  |
+
+`model.py` now carries three backends plus `content_blocks`, which `context.py` and
+`evals.py` both import (`_tools_for_history` is used only inside `model.py`). The hosted
+backend and its accumulator are ~231 separable lines of `tools.py`. No split was done
+here — doing it in the same round as the feature would have made an already six-round
+review unreviewable — but all four are real, `loop.py` is the one REVIEW.md singles out
+by name, and none of it should reach the next person as a surprise.
+
+**Verified**: `uv run pytest` (386 passed; `main` is 322), `uv run python -m teacup_agent.evals`
+(27/27, was 26 — the new case runs a whole loop over the Messages shape, which
+`ScriptedModel` cannot emit), `uv run teacup-agent` (0.06s). No live Anthropic call was
+made: the SDK is an optional extra and is deliberately not installed, so the translation
+is verified by shape against the published API contract, not against a real response.
+That is the honest limit of this item.
 
 ---
 

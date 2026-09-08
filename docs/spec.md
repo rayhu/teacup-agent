@@ -28,7 +28,9 @@ Environment variables:
 | Variable | Read by | Meaning |
 | --- | --- | --- |
 | `OPENAI_API_KEY` | `model.py`, via `.env` | required only for `--live` |
-| `TEACUP_AGENT_SEARCH` | `tools.py` | `auto` \| `web` \| `offline`; set by `cli.py` from `--search` |
+| `TEACUP_AGENT_SEARCH` | `tools.py` | `auto` \| `web` \| `hosted` \| `offline`; set by `cli.py` from `--search` |
+| `TEACUP_AGENT_SEARCH_MODEL` | `tools.py` | model behind `hosted` search, default `gpt-5-mini` |
+| `ANTHROPIC_API_KEY` | `model.py` | read directly by `AnthropicModel` when a profile names no `api_key_env` |
 | any name in `api_key_env` | `agent_config.py` | per-profile key when running `--config agent.yaml` |
 
 ## 2. CLI surface
@@ -45,7 +47,7 @@ Environment variables:
 | `--max-tool-calls` | int | `3` | tool calls executed per turn; `0` = unlimited |
 | `--budget` | float | `0.05` | spending ceiling in USD |
 | `--deadline` | float | `600.0` | wall-clock ceiling in seconds; `0` = unlimited |
-| `--search` | `auto` \| `web` \| `offline` | `auto` with `--live`, else `offline` | search backend mode |
+| `--search` | `auto` \| `web` \| `hosted` \| `offline` | `auto` with `--live`, else `offline` | search backend mode. `hosted` costs money per call and is refused without `--live` (exit 1, with a normal `--json` object); the `--config` path takes it from `runtime.search` and needs no flag, since a config run is real by construction |
 | `--tool-timeout` | float | `30.0` | per-tool-call timeout in seconds |
 | `--context-limit` | int | `30000` | compact once the context exceeds this estimate |
 | `--run-dir` | str | `runs/<timestamp>` | state + externalized results; `off` disables both |
@@ -164,6 +166,10 @@ any status >= 500, and any error carrying no status code at all; a 4xx is not re
 `spend_by_profile` only when a profile is named. The breakdown is a **diagnostic** for
 routing decisions, not a second ledger: a subagent charges its parent one rounded delta
 and merges the child's own breakdown in, so the two can disagree in the last decimal.
+They can also disagree by far more: a **tool** that spends — today only `search_web`'s
+hosted backend — is charged against `remaining_budget` without a profile name, because
+it is not any model's spend, so it is absent from this breakdown entirely. Reconcile
+against `remaining_budget`.
 
 `snapshot()` returns the 17 human-readable keys printed at the end of a run; it omits
 `messages` content, reports `todo_done` as `"n/a"` when there is no checklist, and
@@ -234,6 +240,12 @@ is the **total** input, cache hits included:
 | `gpt-4.1-mini` | 0.40 | 0.10 | 1.60 |
 | anything else (`_DEFAULT_PRICE`) | 1.25 | 0.125 | 10.00 |
 
+A profile may state its own rates instead (`price_input`/`price_cached`/`price_output`,
+all three or none), and they win over this table. The table only knows OpenAI's own
+models, so the fallback row silently attaches gpt-5's price to whatever a `base_url` is
+pointing at — accurate-looking and wrong. Anthropic models are deliberately absent for
+the same reason: an invented rate that goes stale is worse than one the profile states.
+
 An unknown model is priced as `gpt-5` — deliberately pessimistic, so the budget brake
 never under-charges. Prices are a local table and go stale; they bound spending, they do
 not bill.
@@ -264,7 +276,7 @@ runs one call and **never raises** — every failure comes back as an `ERROR: ..
 
 | Tool | Parameters | Approval | Notes |
 | --- | --- | --- | --- |
-| `search_web` | `query`, `max_results=5` | no | three modes, below |
+| `search_web` | `query`, `max_results=5` | no | four modes, below |
 | `calculate` | `expression` | no | AST-walked arithmetic, not `eval` |
 | `read_file` | `path` | no | project-relative, full content (§18's `EXTERNALIZE_OVER` truncates, not this tool), deny-list |
 | `remember` | `fact` | no | writes long-term memory |
@@ -283,13 +295,16 @@ typo — is therefore treated as `done`. The enum is advisory, not enforced.
 
 ### `search_web` modes
 
-Selected by `TEACUP_AGENT_SEARCH`: `web` always hits the network, `offline` always uses a
+Selected by `TEACUP_AGENT_SEARCH`: `web` always hits the key-less scraper, `hosted`
+uses OpenAI's web search — always OpenAI, whatever provider the model profile names
+(costs money per call, needs `OPENAI_API_KEY`, and
+`auto` never falls back *into* it), `offline` always uses a
 built-in corpus and makes zero network calls, `auto` tries the network and falls back
 to the corpus **only when the corpus has something** — a broken search over an empty
 corpus returns an ERROR, never "no results".
 
 The real backend is DuckDuckGo via `ddgs`, no API key. `_RETRIES = 3` attempts with 1s
-then 2s backoff; `_MIN_INTERVAL = 0.5`s between real searches, enforced under a lock because
+then 2s backoff; `_MIN_INTERVAL = 0.5`s between real scraped searches, enforced under a lock because
 tools run in parallel. **A failed search says it failed** — it must never read as "there
 is nothing to find".
 
@@ -500,7 +515,7 @@ Secrets never go in it — name an env var with `api_key_env`, or embed `${VAR}`
 | --- | --- |
 | `models.default` | the profile every unmapped role falls back to |
 | `models.roles` | `main` \| `plan` \| `compact` \| `reflect` \| `judge` \| `subagent` -> a profile name. Omit the block for single-model behaviour |
-| `models.profiles.<name>` | `provider` (`openai` \| `openai-compatible`), `api` (`responses` \| `chat`), `model`, `api_key_env`, optional `base_url`, optional `reasoning_effort` |
+| `models.profiles.<name>` | `provider` (`openai` \| `openai-compatible` \| `anthropic`), `api` (`responses` \| `chat`), `model`, `api_key_env`, optional `base_url`, optional `reasoning_effort`, optional `price_input`/`price_cached`/`price_output` (all three or none) |
 | `mcp` | the same per-server shape as `mcp.json`'s `servers`, nested one level deeper |
 | `tools` | `exclude: [names]`, `subagents.enabled`, `subagents.max_steps` |
 | `skills` | `dir:` a path, or `off` |
@@ -555,6 +570,7 @@ half-written state. `persist.load()` rebuilds `trace` and `todo` into dataclasse
 | `vetoed` | a project-local `hooks.py`'s `before_tool_call` blocked a call |
 | `hooks_loaded` | a project-local `hooks.py` was loaded |
 | `externalized` | a result went to disk |
+| `tool_spend` | a tool charged money against the budget (`tool`, `cost`, `step`) |
 | `completion_check` | a completion push-back fired (checklist, no edits, unverified, or failing command) |
 | `answer` | the model finished |
 | `stopped` | a ceiling was hit |
@@ -569,8 +585,10 @@ This is the observability contract; `cli.py` is one consumer of it.
 
 Two kinds, and conflating them is the mistake this repo names explicitly.
 
-**Protocol evals** — `uv run python -m teacup_agent.evals`. 22 cases against
-`ScriptedModel`: no API key, no network, `run_dir=None`, nothing written into the repo.
+**Protocol evals** — `uv run python -m teacup_agent.evals`. 27 cases, all but one
+against `ScriptedModel`: no API key, no network, `run_dir=None`, nothing written into
+the repo. (A `Case` may supply its own model via `model_factory`; that is how the
+Messages-API shape, which `ScriptedModel` cannot emit, is covered.)
 They pin the message protocol, the brakes, the wrap-up, compaction, the approval gate,
 the checklist, delegation and skills. They must stay green and must stay free.
 
@@ -631,11 +649,13 @@ Every one of these was set by a measurement; the reasoning is in
 | Constant | Value | Where |
 | --- | --- | --- |
 | `EXTERNALIZE_OVER` | 2000 chars | `loop.py` |
+| `_HOSTED_CALL_FEE` | $0.01 per search action | `tools.py` |
+| `_HOSTED_TIMEOUT` | 20s on the hosted client | `tools.py` |
 | `EXCERPT` | 600 chars | `context.py` |
 | `compact(keep_recent=)` | 8 entries | `context.py` |
 | `head` kept by `compact` | 2 entries | `context.py` |
 | retry `attempts` | 3, sleeps 1s then 2s | `loop.py` |
-| `_MIN_INTERVAL` | 0.5s between searches | `tools.py` |
+| `_MIN_INTERVAL` | 0.5s between *scraped* searches; the hosted backend is deliberately unthrottled (a metered API, not a page being polled) | `tools.py` |
 | `_RETRIES` (search) | 3, sleeps 1s then 2s | `tools.py` |
 | `CALL_TIMEOUT` (MCP) | 60.0s | `mcp_tools.py` |
 | `Memory(limit=)` | 20 facts | `memory.py` |

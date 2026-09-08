@@ -15,6 +15,10 @@ import httpx
 from teacup_agent import agent_config, model as model_mod
 from teacup_agent.a2a.server import build_app
 
+# `search: offline` is not decoration: build_app() pins the process's search mode from
+# this config, so a fixture without it would switch every test that builds an app to the
+# live scraper for the rest of that test — the invariant AGENTS.md's verification
+# standard names ("unit tests make no network calls").
 MINIMAL = """
 models:
   default: main
@@ -23,6 +27,7 @@ models:
       model: gpt-5
       api_key_env: FAKE_KEY
 runtime:
+  search: offline
   plan: off
   reflect: off
   run_dir: off
@@ -152,3 +157,47 @@ def test_cancel_is_honestly_unsupported(tmp_path, monkeypatch):
 
     with pytest.raises(NotImplementedError):
         asyncio.run(executor.cancel(None, None))
+
+
+def test_serving_pins_the_search_mode_instead_of_inheriting_it(tmp_path, monkeypatch):
+    """The one entry point that runs unattended was the one that let an exported
+    TEACUP_AGENT_SEARCH through — so a remote peer could drive billed hosted searches on
+    a process with no TTY, and `search: offline` in the config could not stop it.
+
+    Asserted on main(), not on the executor's constructor: doing it in a constructor
+    means building an app mutates process-global state, and a test that builds one
+    silently switches itself to the live scraper for the rest of its run.
+    """
+    import os
+
+    from teacup_agent.a2a import server as server_mod
+
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+    monkeypatch.setenv("FAKE_KEY", "sk-test")
+    path = tmp_path / "agent.yaml"
+    path.write_text(MINIMAL, encoding="utf-8")
+
+    from teacup_agent import agent_config
+
+    # build_app, not main(): an embedder mounting it in their own ASGI app is still
+    # starting a server, and pinning only in main() left that path inheriting whatever
+    # the process exported.
+    server_mod.build_app(agent_config.load(path), "http://localhost:9999")
+    assert os.environ["TEACUP_AGENT_SEARCH"] == "offline"
+
+
+def test_building_an_executor_does_not_touch_the_environment(tmp_path, monkeypatch):
+    """The regression the line above was moved to avoid."""
+    import os
+
+    from teacup_agent import agent_config
+    from teacup_agent.a2a import server as server_mod
+
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "offline")
+    monkeypatch.setenv("FAKE_KEY", "sk-test")
+    path = tmp_path / "agent.yaml"
+    # `search: web` rather than the fixture's offline, so "did not touch it" is
+            # distinguishable from "happened to write the same value"
+    path.write_text(MINIMAL.replace("  search: offline", "  search: web"), encoding="utf-8")
+    server_mod.TeacupAgentExecutor(agent_config.load(path))
+    assert os.environ["TEACUP_AGENT_SEARCH"] == "offline"

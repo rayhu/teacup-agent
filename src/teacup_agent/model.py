@@ -4,6 +4,9 @@ The model is behind one interface, `complete(messages, tools) -> Reply`, so ther
 can be several implementations:
 
 * OpenAIModel / ResponsesModel  real API calls (need OPENAI_API_KEY)
+* AnthropicModel                the Messages API (needs ANTHROPIC_API_KEY and the
+                                `anthropic` extra; a different request/response shape,
+                                sealed in that class so the loop does not change)
 * ScriptedModel                 replies from a script, for offline demos and evals
                                 (no dependencies, no cost)
 
@@ -68,12 +71,27 @@ def chat_tool_result(call: ToolCall, result: str) -> dict[str, Any]:
     }
 
 
+Price = tuple[float, float, float]  # (input, cached input, output), USD per 1M tokens
+
+
 def estimate_cost(
-    model: str, input_tokens: int, output_tokens: int, cached_tokens: int = 0
+    model: str,
+    input_tokens: int,
+    output_tokens: int,
+    cached_tokens: int = 0,
+    prices: Price | None = None,
 ) -> float:
     """input_tokens is the **total** input (cache hits included); cached_tokens is
-    the part of it served from cache."""
-    pin, pcached, pout = PRICES.get(model, _DEFAULT_PRICE)
+    the part of it served from cache.
+
+    `prices` overrides the name-keyed table. PRICES only knows OpenAI's own models,
+    and `_DEFAULT_PRICE` guesses for everything else — which is fine for a demo and
+    actively misleading the moment a run points at a local or third-party endpoint
+    (#15's `base_url` reaches vLLM, Ollama and OpenRouter for free). A profile that
+    states its own rate gets cost tracking that means something instead of gpt-5's
+    price attached to a model that is not gpt-5.
+    """
+    pin, pcached, pout = prices if prices is not None else PRICES.get(model, _DEFAULT_PRICE)
     fresh = max(0, input_tokens - cached_tokens)
     return (fresh * pin + cached_tokens * pcached + output_tokens * pout) / 1_000_000
 
@@ -109,8 +127,9 @@ class OpenAIModel:
     class; the loop does not move.
     """
 
-    def __init__(self, model: str = "gpt-5", client: Any = None):
+    def __init__(self, model: str = "gpt-5", client: Any = None, prices: Price | None = None):
         self.model = model
+        self.prices = prices
         self.cache_key: str | None = None
         if client is None:
             from openai import OpenAI  # lazy import: offline runs need no openai
@@ -151,6 +170,7 @@ class OpenAIModel:
                 prompt_tokens,
                 getattr(usage, "completion_tokens", 0) if usage else 0,
                 cached,
+                self.prices,
             ),
             input_tokens=prompt_tokens,
             cached_tokens=cached,
@@ -196,9 +216,11 @@ class ResponsesModel:
         model: str = "gpt-5",
         client: Any = None,
         reasoning_effort: str | None = None,
+        prices: Price | None = None,
     ):
         self.model = model
         self.reasoning_effort = reasoning_effort
+        self.prices = prices
         self.cache_key: str | None = None
         if client is None:
             from openai import OpenAI  # lazy import: offline runs need no openai
@@ -268,6 +290,7 @@ class ResponsesModel:
                 input_tokens,
                 getattr(usage, "output_tokens", 0) if usage else 0,
                 cached,
+                self.prices,
             ),
             input_tokens=input_tokens,
             cached_tokens=cached,
@@ -360,3 +383,266 @@ class ScriptedModel:
 
     def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
         return chat_tool_result(call, result)
+
+
+
+def content_blocks(msg: dict[str, Any]) -> list[dict[str, Any]]:
+    """A message's content as a list of blocks; empty for the string-bodied shapes.
+
+    One definition, deliberately. Three modules have to agree on what a content block
+    is — this one, `context.safe_cut_points`/`render`, and `evals`'s protocol guard —
+    and three copies drifting apart is the exact failure this backend already caused
+    once: a scanner that did not recognise a shape reported everything fine.
+    """
+    content = msg.get("content")
+    return [b for b in content if isinstance(b, dict)] if isinstance(content, list) else []
+
+
+def _has_tool_blocks(messages: list[dict[str, Any]]) -> bool:
+    """Whether a Messages-API history contains any tool_use or tool_result block."""
+    return any(
+        block.get("type") in ("tool_use", "tool_result")
+        for m in messages
+        for block in content_blocks(m)
+    )
+
+
+
+def _tools_for_history(
+    messages: list[dict[str, Any]], known: list[dict[str, Any]]
+) -> list[dict[str, Any]]:
+    """Definitions covering every tool_use name in `messages`.
+
+    Real definitions where we still have them, a minimal stand-in where we do not. The
+    stand-in exists only to satisfy "requests which include tool_use or tool_result
+    blocks must define tools" on a turn that is sending `tool_choice: none` — nothing
+    can be called, so a placeholder description costs the model nothing and an empty
+    schema is the honest shape for a tool we no longer hold the spec for.
+    """
+    by_name = {t["name"]: t for t in known}
+    used = [
+        block["name"]
+        for m in messages
+        for block in (m.get("content") or [])
+        if isinstance(block, dict) and block.get("type") == "tool_use" and block.get("name")
+    ]
+    out = list(known)
+    for name in dict.fromkeys(used):  # de-duplicated, order preserved
+        if name not in by_name:
+            out.append(
+                {
+                    "name": name,
+                    "description": "(previously available; not callable on this turn)",
+                    "input_schema": {"type": "object", "properties": {}},
+                }
+            )
+    return out
+
+
+class AnthropicModel:
+    """The Anthropic Messages API — a genuinely different request/response shape,
+    added the same way `ResponsesModel` was added beside `OpenAIModel`: a new class
+    behind the unchanged `Model` Protocol, with no change to the loop.
+
+    `base_url` on an OpenAI-compatible endpoint (#15) already reaches a great many
+    providers for free, and that is the right tool when a gateway speaks OpenAI's
+    protocol. This is for when it does not. Five shape differences are sealed in here:
+
+    1. **The system prompt is a parameter, not a message.** Messages carry only
+       `user` and `assistant`. The loop writes several `role: "system"` entries — the
+       persona up front, then run-status notes and completion push-backs mid-run — so
+       the first becomes `system=` and the later ones become user turns. They are
+       positional feedback about what just happened; hoisting them all to the top
+       would move them away from the turn they are about.
+    2. **Tools are flat and the schema key is `input_schema`,** not a nested
+       `function` object with `parameters`.
+    3. **Output is a list of content blocks** (`text`, `tool_use`), not one message
+       with a separate `tool_calls` field.
+    4. **A tool result is a `user` message** containing a `tool_result` block keyed by
+       `tool_use_id` — not a role of its own.
+    5. **Consecutive same-role messages must be merged.** A tool result followed by a
+       run-status note is two user turns in this repo's model and one here.
+
+    Cost: Anthropic models are not in `PRICES`, and inventing numbers that go stale is
+    worse than saying so. Give the profile `price_input`/`price_cached`/`price_output`
+    (#16) and the accounting is exact; leave them out and it falls back to the table's
+    default guess, which will be wrong.
+    """
+
+    # Required by the API, unlike the OpenAI paths where it is optional.
+    DEFAULT_MAX_TOKENS = 8192
+
+    def __init__(
+        self,
+        model: str = "claude-sonnet-5",
+        client: Any = None,
+        prices: Price | None = None,
+        max_tokens: int = DEFAULT_MAX_TOKENS,
+    ):
+        self.model = model
+        self.prices = prices
+        self.max_tokens = max_tokens
+        self.cache_key: str | None = None
+        # The last non-empty tool list this model was given. The loop deliberately
+        # passes [] on the forced wrap-up turn ("no tools on the final turn"), but this
+        # API rejects a request whose history contains tool_use/tool_result blocks and
+        # no tools array — so the wrap-up needs the definitions back, with tool_choice
+        # saying they may not be used. See complete().
+        self._last_tools: list[dict[str, Any]] = []
+        if client is None:
+            from anthropic import Anthropic  # lazy: offline runs need no SDK
+
+            if not os.getenv("ANTHROPIC_API_KEY"):
+                raise RuntimeError(
+                    "ANTHROPIC_API_KEY is missing. Set it in .env, or run offline "
+                    "(no --live), or point the profile at a different provider."
+                )
+            client = Anthropic()
+        self.client = client
+
+    def set_cache_key(self, key: str) -> None:
+        self.cache_key = key
+
+    # -- shape translation --------------------------------------------------
+
+    @staticmethod
+    def _tools(tools: list[dict[str, Any]]) -> list[dict[str, Any]]:
+        out = []
+        for t in tools:
+            fn = t.get("function", t)
+            out.append(
+                {
+                    "name": fn["name"],
+                    "description": fn.get("description", ""),
+                    "input_schema": fn.get("parameters") or {"type": "object", "properties": {}},
+                }
+            )
+        return out
+
+    @staticmethod
+    def _split(messages: list[dict[str, Any]]) -> tuple[str, list[dict[str, Any]]]:
+        """Return (system prompt, messages) in Messages API shape.
+
+        Only the *first* system entry becomes the system prompt; later ones are the
+        loop's mid-run notes and stay where they are, as user turns.
+        """
+        system = ""
+        converted: list[dict[str, Any]] = []
+        for m in messages:
+            role = m.get("role")
+            if role == "system":
+                if not system and not converted:
+                    system = str(m.get("content", ""))
+                    continue
+                role = "user"
+            content = m.get("content")
+            if isinstance(content, str):
+                content = [{"type": "text", "text": content}]
+            elif content is None:
+                content = []
+            converted.append({"role": role or "user", "content": list(content)})
+
+        # Merge consecutive same-role turns; the API rejects them separately.
+        merged: list[dict[str, Any]] = []
+        for m in converted:
+            if merged and merged[-1]["role"] == m["role"]:
+                merged[-1]["content"].extend(m["content"])
+            else:
+                merged.append(m)
+        return system, merged
+
+    def tool_result_item(self, call: ToolCall, result: str) -> dict[str, Any]:
+        return {
+            "role": "user",
+            "content": [
+                {"type": "tool_result", "tool_use_id": call.id, "content": result}
+            ],
+        }
+
+    # -- the call -----------------------------------------------------------
+
+    def complete(
+        self, messages: list[dict[str, Any]], tools: list[dict[str, Any]]
+    ) -> Reply:
+        system, msgs = self._split(messages)
+        kwargs: dict[str, Any] = {
+            "model": self.model,
+            "max_tokens": self.max_tokens,
+            "messages": msgs,
+        }
+        if system:
+            block: dict[str, Any] = {"type": "text", "text": system}
+            if self.cache_key:
+                # Anthropic's prompt cache is explicit, marked on the block rather than
+                # inferred from a stable prefix the way OpenAI's is. The system prompt is
+                # the one part that is identical on every turn of a run, so it is what a
+                # cache key can actually buy anything on.
+                block["cache_control"] = {"type": "ephemeral"}
+            kwargs["system"] = [block]
+        if tools:
+            self._last_tools = self._tools(tools)
+            kwargs["tools"] = self._last_tools
+        elif _has_tool_blocks(msgs):
+            # "An empty tool list cannot be ignored" is the loop's way of ending a run
+            # without letting the model start more work (loop.py's forced wrap-up, and
+            # finalize()). Dropping the array outright is not how to say that here: the
+            # API returns 400 "Requests which include tool_use or tool_result blocks
+            # must define tools", so every run that called a tool and then hit the step,
+            # budget or time ceiling would die on the turn meant to rescue its answer.
+            # Send the definitions the conversation already contains, and forbid their
+            # use explicitly.
+            #
+            # Derived from the history, not from what this instance happens to remember.
+            # `_last_tools` alone was wrong in two reachable ways: a resumed run builds a
+            # *fresh* model over a history full of tool blocks, so the memory is empty and
+            # the key was dropped again — on exactly the path a run that hit its ceiling
+            # takes next — and `routing.Router.child()` shares instances, so a subagent
+            # overwrites the parent's memory with its own restricted list. The history is
+            # the thing the API is actually validating against, so it is what to read.
+            kwargs["tools"] = _tools_for_history(msgs, self._last_tools)
+            kwargs["tool_choice"] = {"type": "none"}
+
+        resp = self.client.messages.create(**kwargs)
+
+        blocks = [
+            b if isinstance(b, dict) else b.model_dump(exclude_none=True)
+            for b in (getattr(resp, "content", None) or [])
+        ]
+        text = "".join(b.get("text", "") for b in blocks if b.get("type") == "text")
+        calls = [
+            ToolCall(
+                id=b["id"],
+                name=b["name"],
+                # The loop hands `arguments` to json.loads; this API already parsed it.
+                arguments=json.dumps(b.get("input") or {}, ensure_ascii=False),
+            )
+            for b in blocks
+            if b.get("type") == "tool_use"
+        ]
+
+        usage = getattr(resp, "usage", None)
+        fresh = getattr(usage, "input_tokens", 0) if usage else 0
+        cached = getattr(usage, "cache_read_input_tokens", 0) or 0 if usage else 0
+        written = getattr(usage, "cache_creation_input_tokens", 0) or 0 if usage else 0
+        output = getattr(usage, "output_tokens", 0) if usage else 0
+        # Three buckets, not two, and `input_tokens` contains none of the other two:
+        # the API's own total is input + cache_read + cache_creation. Leaving the write
+        # bucket out made turn 1 of every cached run — the turn that uploads the whole
+        # system prompt — cost almost nothing and report a context far smaller than the
+        # one actually sent, which also shortens the --context-limit brake.
+        #
+        # Cache writes really bill at 1.25x base input, which a three-rate tuple cannot
+        # express; counting them as ordinary fresh input still under-charges by that
+        # 25%. That is a known, bounded gap, and much smaller than omitting them.
+        total_input = fresh + cached + written
+        return Reply(
+            # An assistant turn with an empty content array is rejected on the next
+            # request, so a reply that produced no blocks contributes nothing to the
+            # history rather than something unsendable.
+            items=[{"role": "assistant", "content": blocks}] if blocks else [],
+            text=text,
+            tool_calls=calls,
+            cost=estimate_cost(self.model, total_input, output, cached, self.prices),
+            input_tokens=total_input,
+            cached_tokens=cached,
+        )

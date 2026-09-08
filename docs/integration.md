@@ -52,8 +52,16 @@ codes are a CLI concept, not agent state).
 (`big`, `small`, whatever `models.profiles` calls them) and by **model name** on the
 flag-driven path, which has no profile names to use — `{"gpt-5": ...}` with `--live`,
 `{"default": ...}` for the offline demo. It is a diagnostic, not a second ledger:
-`remaining_budget` is the ledger, and a subagent charges its parent one rounded delta,
-so the two can disagree in the last decimal. `{}` when nothing named a profile.
+`remaining_budget` is the ledger. The two can disagree, and since `--search hosted`
+landed they can disagree by a lot rather than in the last decimal.
+Two reasons. A subagent charges its parent one rounded delta. And a **tool** that
+spends money — today only `search_web`'s hosted backend, at roughly $0.01 a search —
+is charged against `remaining_budget` without a profile name, because it is not any
+model's spend and filing it under whichever profile happened to run the turn would be
+a wrong attribution rather than a missing one. So a run that made three hosted
+searches can report `remaining_budget` down $0.033 with `spend` showing $0.003.
+Reconcile against `remaining_budget`; treat `spend` as the per-model diagnostic it
+says it is. `{}` when nothing named a profile.
 
 `exit_code` mirrors the process's actual exit code: `0` if `status == "done"`, `1`
 otherwise (`max_steps` / `out_of_budget` / `out_of_time` / `error`). A caller can trust

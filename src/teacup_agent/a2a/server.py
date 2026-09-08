@@ -31,6 +31,8 @@ from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 import a2a.server.routes as routes
 from starlette.applications import Starlette
 
+import os
+
 from teacup_agent import agent_config, loop
 from teacup_agent.a2a.card import build_agent_card
 from teacup_agent.cli import _make_approver, _resolve_plan
@@ -95,6 +97,22 @@ class TeacupAgentExecutor(AgentExecutor):
 
 
 def build_app(cfg: agent_config.AgentConfig, url: str) -> Starlette:
+    # Set rather than inherited: this is the entry point that runs with nobody watching,
+    # and an exported TEACUP_AGENT_SEARCH=hosted otherwise let remote peers drive billed
+    # searches on a process with no TTY and no --live, with `search: offline` in the
+    # config unable to stop them.
+    #
+    # Here rather than in main() because build_app is public — an embedder mounting it
+    # in their own ASGI app is still starting a server, and pinning only in main() left
+    # that path inheriting the environment. Here rather than in the executor's __init__
+    # because constructing an object should not mutate process-global state.
+    #
+    # It is still a global write from a function, so it has the same shape of cost one
+    # level up: a test that calls build_app changes the search mode for the rest of that
+    # test. That is why the tests below pass `search: offline` explicitly instead of
+    # relying on conftest's pin — do the same in any new one.
+    os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
+
     skills = discover_skills(cfg.skills_dir) if cfg.skills_dir else []
     card = build_agent_card(cfg.a2a.card, skills, url)
     handler = DefaultRequestHandler(
