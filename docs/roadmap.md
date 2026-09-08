@@ -3,9 +3,9 @@
 **Baseline assessment (2026-08-25)**: the core is not dated; the engineering layer
 was roughly where the field stood in late 2023 / early 2024.
 **Progress**: #1-#21 are done except the fine-grained permissions part of #6 and #21's
-Stage C. Five items that were never on the roadmap were added after reviewing real runs
+Stage C. Twelve items that were never on the roadmap were added after reviewing real runs
 (see "Field patches" at the end). #11 (hosted search backend) and #16 (per-profile price
-overrides, a native Anthropic path) landed 2026-09-07 after five independent review
+overrides, a native Anthropic path) landed 2026-09-08 after seven independent review
 rounds — the numbers, and what is still not verified, are in each item's own Verified
 block. #21's Stages A (role routing) and B
 (the bench, and the live table that says where the small model breaks) both landed on
@@ -463,7 +463,7 @@ per-turn cap applies), and passing curated context down instead of a blank slate
 
 ---
 
-### 11. A better search backend — DONE (2026-09-07)
+### 11. A better search backend — DONE (2026-09-08)
 
 **Was**: `search_web` scraped DuckDuckGo through ddgs — free and key-less, but average
 in both quality and stability.
@@ -829,7 +829,7 @@ uv run teacup-agent                    # offline demo unaffected, still instant
 
 ---
 
-### 16. Multi-provider models: price overrides and a native second protocol — DONE (2026-09-07)
+### 16. Multi-provider models: price overrides and a native second protocol — DONE (2026-09-08)
 
 **Now**: `#15` already reaches any OpenAI-compatible endpoint (vLLM, Ollama, OpenRouter)
 via `base_url`, for free. What is left is smaller than originally scoped:
@@ -877,14 +877,15 @@ measured at this commit rather than remembered from an earlier one:
 
 | file | main | here | |
 | --- | --- | --- | --- |
-| `tools.py` | 526 | 779 | past the ~700 "consider splitting" line |
+| `tools.py` | 526 | 801 | past the ~700 "consider splitting" line |
 | `model.py` | 362 | 648 | three backends in one module |
 | `loop.py` | 747 | 783 | was already past ~700 before this branch |
-| `cli.py` | 637 | 693 |  |
+| `evals.py` | 499 | 565 |  |
+| `cli.py` | 637 | 692 |  |
 
 `model.py` now carries three backends plus `content_blocks`, which `context.py` and
 `evals.py` both import (`_tools_for_history` is used only inside `model.py`). The hosted
-backend and its accumulator are ~220 separable lines of `tools.py`. No split was done
+backend and its accumulator are ~231 separable lines of `tools.py`. No split was done
 here — doing it in the same round as the feature would have made an already six-round
 review unreviewable — but all four are real, `loop.py` is the one REVIEW.md singles out
 by name, and none of it should reach the next person as a surprise.

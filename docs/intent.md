@@ -41,7 +41,7 @@ These can. Measure them; if one goes red, the change is what moved, not the crit
    answerable from `loop.py` and `tools.py` alone — `execute()` returns the error as the
    tool result, the loop hands it back to the model. If that answer starts requiring a
    third file, the error path has been spread too thin.
-3. **Evaluation stays free.** `uv run python -m teacup_agent.evals` runs 21 protocol
+3. **Evaluation stays free.** `uv run python -m teacup_agent.evals` runs 27 protocol
    cases with a scripted model: no API key, no network, nothing written into the repo
    (`run_dir=None`, `TEACUP_AGENT_SEARCH=offline`). CI runs it, plus the tests and the
    demo, on every pull request. The moment checking the loop costs money, people stop

@@ -64,6 +64,42 @@ prompt.
 
 ---
 
+## A third backend: Anthropic's Messages API
+
+`OpenAIModel` and `ResponsesModel` above are two shapes of one protocol; `AnthropicModel`
+is a different protocol behind the same `Model` Protocol, and the loop does not change.
+Five differences are sealed inside it, and the last two are the ones that would have
+leaked:
+
+1. The system prompt is a **parameter**, not a message.
+2. Tools are flat and carry `input_schema`, not a nested `function` with `parameters`.
+3. Output is a list of content blocks (`text`, `tool_use`), not one message plus a
+   separate `tool_calls` field.
+4. A tool result is a **`user` message** containing a `tool_result` block keyed by
+   `tool_use_id` — not a role of its own.
+5. **Consecutive same-role turns must be merged.** The loop writes several
+   `role: "system"` entries mid-run (status notes, completion push-backs) and can
+   produce a tool result immediately followed by one; this API accepts neither a system
+   role nor two user turns in a row.
+
+Only the *first* system entry becomes `system=`. The later ones stay where they are, as
+user turns, because they are feedback about the turn that just happened and hoisting
+them to the top moves them away from it.
+
+The wrap-up turn needed its own answer. The loop deliberately passes an empty tool list
+on the final turn ("wording can be ignored, an empty tool list cannot"), but this API
+rejects a request whose history contains `tool_use`/`tool_result` blocks and no `tools`
+array — so a run that called a tool and then hit any ceiling would have died on the turn
+meant to rescue its answer. The definitions are rebuilt **from the history** and sent
+with `tool_choice: none`. From the history, not from what the model object remembers: a
+resumed run constructs a fresh model over a history full of tool blocks, which is
+exactly the path a run that hit its ceiling takes next.
+
+Cost: Anthropic models are deliberately absent from `PRICES`. An invented rate that goes
+stale is worse than the honest table fallback plus a profile that states its own
+`price_input`/`price_cached`/`price_output` (#16) — with those three set, the accounting
+is exact.
+
 ## Model routing: one agent, several models
 
 An agent does not make one kind of model call. `loop.py`'s own turns are judgment —

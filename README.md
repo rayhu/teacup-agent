@@ -174,7 +174,8 @@ The core is not dated. An agent in 2026 is still this loop. The engineering arou
 come a long way: Responses API, prompt caching, context management, parallel execution,
 persistence and resume, an approval gate, trajectory scoring and MCP are all in place.
 Search has two backends now: a key-less DuckDuckGo scraper (`auto`, the default) and
-OpenAI's hosted search (`--search hosted`), which costs money per call. The flag
+OpenAI's hosted search (`--search hosted`), which costs money per call. (`auto` is
+the default under `--live`; the offline demo defaults to `offline`.) The flag
 is refused without `--live`; `agent.yaml`'s `runtime.search: hosted` is not, because a
 `--config` run is real by construction.
 

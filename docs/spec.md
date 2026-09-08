@@ -585,8 +585,10 @@ This is the observability contract; `cli.py` is one consumer of it.
 
 Two kinds, and conflating them is the mistake this repo names explicitly.
 
-**Protocol evals** — `uv run python -m teacup_agent.evals`. 22 cases against
-`ScriptedModel`: no API key, no network, `run_dir=None`, nothing written into the repo.
+**Protocol evals** — `uv run python -m teacup_agent.evals`. 27 cases, all but one
+against `ScriptedModel`: no API key, no network, `run_dir=None`, nothing written into
+the repo. (A `Case` may supply its own model via `model_factory`; that is how the
+Messages-API shape, which `ScriptedModel` cannot emit, is covered.)
 They pin the message protocol, the brakes, the wrap-up, compaction, the approval gate,
 the checklist, delegation and skills. They must stay green and must stay free.
 
