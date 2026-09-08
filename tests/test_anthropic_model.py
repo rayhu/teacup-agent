@@ -335,3 +335,31 @@ def test_the_wrap_up_works_on_a_fresh_model_as_a_resume_builds_one():
     assert "tools" in sent[0], "a resumed wrap-up dropped the tool definitions -> 400"
     assert [t["name"] for t in sent[0]["tools"]] == ["calculate"]
     assert sent[0]["tool_choice"] == {"type": "none"}
+
+
+def test_compaction_stays_possible_across_a_long_messages_history():
+    """The `tool_result` half of safe_cut_points' new branch, which had no test.
+
+    Deleting those five lines leaves the whole suite and every eval green, because the
+    only existing test covers the `tool_use` half. But without them `open_ids` never
+    empties, safe_cut_points collapses to a single early point, compact() finds no
+    candidate in its window and returns 0 every time — so --context-limit silently
+    stops working for every Anthropic run and the history grows until the API rejects
+    it. Nothing else in the branch would notice.
+    """
+    from teacup_agent import context as ctx
+
+    history = [{"role": "user", "content": "goal"}]
+    for i in range(3):
+        history.append(
+            {"role": "assistant", "content": [{"type": "tool_use", "id": f"t{i}", "name": "c", "input": {}}]}
+        )
+        history.append(
+            {"role": "user", "content": [{"type": "tool_result", "tool_use_id": f"t{i}", "content": "ok"}]}
+        )
+
+    points = ctx.safe_cut_points(history)
+    # one after the goal, then one after each completed call/result pair
+    assert points == [1, 3, 5, 7]
+    # and enough of them land inside compact()'s window for it to have anything to do
+    assert len([p for p in points if 2 < p <= len(history) - 2]) > 0

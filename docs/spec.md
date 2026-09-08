@@ -47,7 +47,7 @@ Environment variables:
 | `--max-tool-calls` | int | `3` | tool calls executed per turn; `0` = unlimited |
 | `--budget` | float | `0.05` | spending ceiling in USD |
 | `--deadline` | float | `600.0` | wall-clock ceiling in seconds; `0` = unlimited |
-| `--search` | `auto` \| `web` \| `hosted` \| `offline` | `auto` with `--live`, else `offline` | search backend mode. `hosted` costs money per call and is refused without `--live` (exit 2); the `--config` path takes it from `runtime.search` and needs no flag, since a config run is real by construction |
+| `--search` | `auto` \| `web` \| `hosted` \| `offline` | `auto` with `--live`, else `offline` | search backend mode. `hosted` costs money per call and is refused without `--live` (exit 1, with a normal `--json` object); the `--config` path takes it from `runtime.search` and needs no flag, since a config run is real by construction |
 | `--tool-timeout` | float | `30.0` | per-tool-call timeout in seconds |
 | `--context-limit` | int | `30000` | compact once the context exceeds this estimate |
 | `--run-dir` | str | `runs/<timestamp>` | state + externalized results; `off` disables both |

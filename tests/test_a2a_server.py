@@ -152,3 +152,21 @@ def test_cancel_is_honestly_unsupported(tmp_path, monkeypatch):
 
     with pytest.raises(NotImplementedError):
         asyncio.run(executor.cancel(None, None))
+
+
+def test_the_server_pins_its_search_mode_instead_of_inheriting_it(tmp_path, monkeypatch):
+    """The one entry point that runs unattended was the one that let an exported
+    TEACUP_AGENT_SEARCH through — so a remote peer could drive billed hosted searches
+    on a process with no TTY, and `search: offline` in the config could not stop it."""
+    import os
+
+    from teacup_agent import agent_config
+    from teacup_agent.a2a import server as server_mod
+
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+    monkeypatch.setenv("FAKE_KEY", "sk-test")
+    path = tmp_path / "agent.yaml"
+    path.write_text(MINIMAL.replace("  plan: off", "  search: offline\n  plan: off"), encoding="utf-8")
+    cfg = agent_config.load(path)
+    server_mod.TeacupAgentExecutor(cfg)
+    assert os.environ["TEACUP_AGENT_SEARCH"] == cfg.runtime.search == "offline"

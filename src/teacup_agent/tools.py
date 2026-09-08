@@ -234,38 +234,44 @@ class _SearchNotConfigured(RuntimeError):
     """The hosted backend cannot run until a human changes something — as opposed to
     the network being unhappy, which is worth retrying. The two must not read alike."""
 
+
+def _is_config_error(exc: Exception) -> bool:
+    """Whether a failure is permanent. A missing key raises _SearchNotConfigured, but a
+    *rejected* one surfaces as the SDK's AuthenticationError and was taking the "retry
+    later" branch — which is the same failure _SearchNotConfigured exists to prevent,
+    reached by a different route. Matched by name so the SDK stays an optional import.
+    """
+    return isinstance(exc, _SearchNotConfigured) or type(exc).__name__ in (
+        "AuthenticationError",
+        "PermissionDeniedError",
+    )
+
 # The loop's per-tool default is 30s and it cannot cancel a thread already inside an
 # HTTP call: on overrun the request still completes and still bills, while the model
 # gets an error and retries. A shorter client timeout is what actually stops that.
 _HOSTED_TIMEOUT = 20.0
 
-# What the hosted backend has spent since the loop last collected it. A tool function
-# has no access to `state`, and threading one in would put run state into every tool
-# signature for the sake of a single tool — so the spend is accumulated here and the
-# loop drains it after each step (loop.py). Without this the only tool in the repo that
-# costs money is invisible to `remaining_budget`, and a run can spend many times its
-# stated ceiling while `state.snapshot()` reports the ceiling untouched.
-_hosted_spend = 0.0
+# What the hosted backend has spent, per thread. Thread-local, not a module global,
+# and that is the whole design: `execute_calls` runs each tool in its own worker
+# thread, so a search credits the thread that made it and the run that owns that
+# thread collects it there. A plain global could not tell two concurrent runs apart —
+# a turn issuing `search_web` and `delegate` together has the parent's search
+# finishing while the child's nested `loop.run` is live, and the child charged the
+# parent's fee against its own budget. Two attempts at fixing that with a global (a
+# reset at run start, then a take-and-give-back bracket) both failed on the same
+# interleaving; the accumulator simply has to be per-thread.
+_hosted = threading.local()
+
+
+def _add_hosted_spend(amount: float) -> None:
+    _hosted.spend = round(getattr(_hosted, "spend", 0.0) + amount, 8)
 
 
 def take_hosted_spend() -> float:
-    """Hand the accumulated hosted-search spend to the caller and reset it."""
-    global _hosted_spend
-    spent, _hosted_spend = _hosted_spend, 0.0
+    """Hand this thread's accumulated hosted-search spend to the caller and reset it."""
+    spent = getattr(_hosted, "spend", 0.0)
+    _hosted.spend = 0.0
     return spent
-
-
-def add_hosted_spend(amount: float) -> None:
-    """Put spend back into the accumulator — the other half of `take_hosted_spend`.
-
-    Runs nest: subagent.py calls loop.run inside a parent run, and one turn can issue
-    `search_web` and `delegate` in parallel. A plain "reset at run start" therefore
-    either discards the parent's pending spend or lets the child absorb it and trip its
-    own budget brake on money it never spent. So a run *takes* what is pending on entry,
-    holds it, and gives it back on exit: each run charges only its own searches.
-    """
-    global _hosted_spend
-    _hosted_spend = round(_hosted_spend + amount, 8)
 
 
 def _search_hosted_backend(query: str, max_results: int) -> str:
@@ -293,7 +299,6 @@ def _search_hosted_backend(query: str, max_results: int) -> str:
             "hosted search needs OPENAI_API_KEY. Set it, or use "
             "TEACUP_AGENT_SEARCH=auto for the key-less backend"
         )
-    global _hosted_spend
     model = os.getenv(_HOSTED_MODEL_ENV, _HOSTED_DEFAULT_MODEL)
     resp = OpenAI(timeout=_HOSTED_TIMEOUT).responses.create(
         model=model,
@@ -323,7 +328,7 @@ def _search_hosted_backend(query: str, max_results: int) -> str:
     # several in one response, and a response that searched none should cost none. The
     # fee is charged after counting, so the "it never searched" branch below no longer
     # bills for a search that did not happen.
-    _hosted_spend += _HOSTED_CALL_FEE * done + _hosted_token_cost(resp, model)
+    _add_hosted_spend(_HOSTED_CALL_FEE * done + _hosted_token_cost(resp, model))
 
     if broken:
         # The API says the search itself failed or was cut short. This is the
@@ -472,21 +477,21 @@ def search_web(query: str, max_results: int = 5) -> str:
     if mode == "hosted":
         try:
             return _search_hosted_backend(query, max_results)
-        except _SearchNotConfigured as e:
-            # A missing key is permanent. Telling the model to "retry later" would send
-            # it back to a mode that cannot work until a human changes something, and
-            # it would keep going until the step ceiling.
+        except Exception as e:
+            if not _is_config_error(e):
+                return (
+                    f"ERROR: hosted search failed ({type(e).__name__}: {e}). This does "
+                    "**not** mean the information does not exist, only that the search "
+                    "channel is temporarily unavailable. Retry later, reword the query, "
+                    "or answer from what you already have and mark this item unverified."
+                )
+            # Permanent. Telling the model to "retry later" would send it back to a
+            # mode that cannot work until a human changes something, and it would keep
+            # going until the step ceiling.
             return (
                 f"ERROR: hosted search is not configured ({e}). This is a setup "
                 "problem, not a temporary one — retrying will not help. Answer from "
                 "what you already have and mark anything unverified as unverified."
-            )
-        except Exception as e:
-            return (
-                f"ERROR: hosted search failed ({type(e).__name__}: {e}). This does "
-                "**not** mean the information does not exist, only that the search "
-                "channel is temporarily unavailable. Retry later, reword the query, "
-                "or answer from what you already have and mark this item unverified."
             )
 
     try:

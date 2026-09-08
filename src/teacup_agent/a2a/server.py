@@ -31,6 +31,8 @@ from a2a.server.tasks import InMemoryTaskStore, TaskUpdater
 import a2a.server.routes as routes
 from starlette.applications import Starlette
 
+import os
+
 from teacup_agent import agent_config, loop
 from teacup_agent.a2a.card import build_agent_card
 from teacup_agent.cli import _make_approver, _resolve_plan
@@ -44,6 +46,13 @@ class TeacupAgentExecutor(AgentExecutor):
 
     def __init__(self, cfg: agent_config.AgentConfig) -> None:
         self._cfg = cfg
+        # Set it, rather than inheriting whatever the operator happened to export. Every
+        # other entry point assigns this (cli._main, cli._main_config, bench); this one
+        # did not, so an exported TEACUP_AGENT_SEARCH=hosted let remote peers drive
+        # billed searches on a process with no TTY and no --live, and a config saying
+        # `search: offline` could not stop them. "Deny by default when nobody is
+        # watching" applies most to the one path where nobody is, by construction.
+        os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
         self._model = agent_config.build_model(cfg.models[cfg.default_model])
         self._memory = Memory(cfg.runtime.memory)
         self._lock = asyncio.Lock()

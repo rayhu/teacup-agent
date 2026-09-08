@@ -431,7 +431,16 @@ def _main(args, project_root: pathlib.Path) -> int:
         # exit_code 2, which would KeyError any caller reading remaining_budget — and
         # contradicted the doc it cited as its reason for existing.
         if args.json:
-            refused = AgentState(goal=args.goal, status="error", answer=refusal)
+            # the run's real ceilings, not AgentState's defaults: integration.md calls
+            # remaining_budget "the ledger", and reporting 0.05 under --budget 1.5
+            # would be a wrong number in the field a caller trusts most.
+            refused = AgentState(
+                goal=args.goal,
+                status="error",
+                answer=refusal,
+                max_steps=args.max_steps,
+                remaining_budget=args.budget,
+            )
             payload = refused.snapshot()
             payload["answer"] = refusal
             payload["exit_code"] = 1

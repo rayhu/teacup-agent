@@ -509,6 +509,14 @@ answering from a local fixture is worse than one that says it failed, because th
 cannot tell the difference. That is the same rule the scraper path already followed —
 "the search failed" and "there is nothing to find" are completely different statements.
 
+**Verified**: `uv run pytest` (377 passed, was 345), `uv run python -m teacup_agent.evals`
+(27/27, was 26), `uv run teacup-agent` (0.06s, offline demo unaffected). The hosted
+backend itself is exercised only against a fake client — a live call costs money and
+needs a key, so "does OpenAI's web search return good results" stays an unverified
+claim. What *is* pinned is everything the harness controls: the forced search, the
+status-aware failure path, the withheld uncited summary, per-action billing, the
+per-thread accumulator, and the `--live` refusal.
+
 ---
 
 ### 12. Agent Skills — DONE (2026-08-26)
@@ -858,6 +866,13 @@ from it.
 Anthropic models are deliberately **not** added to `PRICES`. Inventing rates that go
 stale is worse than the honest fallback plus the override this same item just built —
 give the profile its three prices and the accounting is exact.
+
+**Verified**: `uv run pytest` (377 passed, was 345), `uv run python -m teacup_agent.evals`
+(27/27, was 26 — the new case runs a whole loop over the Messages shape, which
+`ScriptedModel` cannot emit), `uv run teacup-agent` (0.06s). No live Anthropic call was
+made: the SDK is an optional extra and is deliberately not installed, so the translation
+is verified by shape against the published API contract, not against a real response.
+That is the honest limit of this item.
 
 ---
 

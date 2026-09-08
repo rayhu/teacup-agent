@@ -433,30 +433,43 @@ def test_a_response_that_never_searched_is_not_billed_a_search_fee(monkeypatch):
     assert tools.take_hosted_spend() == 0.0
 
 
-def test_a_nested_run_neither_steals_nor_discards_its_parents_spend(monkeypatch):
-    """Runs nest — subagent.py calls loop.run inside a parent run — and the accumulator
-    is module state. The earlier "reset at run start" made the child either discard the
-    parent's pending spend or absorb it and trip its own budget brake on money it never
-    spent. This drives the real loop.run, because a test that called the helper directly
-    survived the bug it was named for.
+def test_spend_from_one_thread_is_invisible_to_another(monkeypatch):
+    """Thread isolation *is* the billing contract, and it is what the two earlier
+    designs lacked.
+
+    `execute_calls` runs each tool in its own worker thread, and `delegate` starts a
+    nested run inside one of them — so a turn issuing `search_web` and `delegate`
+    together has the parent's search finishing while the child is live. With a module
+    global the child's collection either wiped that fee or billed it to the child,
+    cutting a child funded for several steps down to one. Neither a reset-at-run-start
+    nor a take-and-give-back bracket fixed it; only a per-thread accumulator does.
+
+    (An end-to-end version that forces the interleaving was attempted and dropped: the
+    ordering could not be made deterministic, and a concurrency test that passes
+    whatever the design is worse than none.)
     """
-    from teacup_agent import loop, tools as tools_mod
-    from teacup_agent.memory import NullMemory
-    from teacup_agent.model import ScriptedModel, assistant_says
+    import threading
 
-    tools_mod.take_hosted_spend()  # start clean
-    tools_mod.add_hosted_spend(0.02)  # a parent search, not yet drained
+    from teacup_agent import tools as tools_mod
 
-    inner = loop.run(  # stands in for a subagent's nested run
-        "child task",
-        ScriptedModel([assistant_says("done")]),
-        memory=NullMemory(),
-        budget=0.05,
-        run_dir=None,
-        plan=False,
-    )
-    assert inner.remaining_budget == pytest.approx(0.05, abs=0.01)  # child paid nothing
-    assert tools_mod.take_hosted_spend() == pytest.approx(0.02)  # parent's, intact
+    seen = {}
+    added, main_has_read = threading.Event(), threading.Event()
+
+    def other_thread():
+        tools_mod._add_hosted_spend(0.05)  # a sibling run's search
+        added.set()
+        main_has_read.wait(timeout=5)  # hold it *pending* while this thread reads
+        seen["other"] = tools_mod.take_hosted_spend()
+
+    t = threading.Thread(target=other_thread)
+    t.start()
+    added.wait(timeout=5)
+    seen["this"] = tools_mod.take_hosted_spend()  # sibling's 0.05 is still pending here
+    main_has_read.set()
+    t.join(timeout=5)
+
+    assert seen["other"] == pytest.approx(0.05)  # the thread that spent it collects it
+    assert seen["this"] == 0.0  # and nobody else can
 
 
 def test_hosted_spend_reaches_the_budget_brake_through_the_loop(monkeypatch):
@@ -513,8 +526,9 @@ def test_hosted_spend_can_stop_a_run_mid_flight(monkeypatch):
 
 
 def test_a_search_on_the_final_step_is_still_charged(monkeypatch):
-    """The other drain. A run whose last step searches has no further loop iteration to
-    collect it, so without the post-loop drain the fee is silently never charged."""
+    """A search on the last step there is. Billing now happens inside execute_calls, in
+    the worker thread that made the call, so there is no "collected on a later
+    iteration" path left to get wrong — this pins that."""
     from teacup_agent import loop, tools as tools_mod
     from teacup_agent.memory import NullMemory
     from teacup_agent.model import ScriptedModel, assistant_calls
@@ -563,3 +577,56 @@ def test_a_truncated_response_is_not_reported_as_nothing_found(monkeypatch):
     assert out.startswith("ERROR: the hosted search did not complete")
     assert "max_output_tokens" in out
     assert "nothing found" not in out
+
+
+def test_an_unfinished_search_item_is_neither_billed_nor_counted_as_a_result():
+    """web_search_call has a status. in_progress, searching, or absent all mean the
+    search cannot be shown to have completed — so on a money path the safe reading is
+    the one that does not charge, and does not claim a result either."""
+    from teacup_agent import tools as tools_mod
+
+    for status in ("in_progress", "searching", None):
+        resp = SimpleNamespace(
+            output=[SimpleNamespace(type="web_search_call", status=status)], output_text=""
+        )
+        done, broken = tools_mod._search_actions(resp)
+        assert done == 0, f"{status!r} was counted as a completed search"
+        assert broken, f"{status!r} was silently ignored"
+
+
+def test_a_mixed_response_bills_its_completed_searches_and_still_reports_the_failure():
+    from teacup_agent import tools as tools_mod
+
+    resp = SimpleNamespace(
+        output=[
+            SimpleNamespace(type="web_search_call", status="completed"),
+            SimpleNamespace(type="web_search_call", status="failed"),
+        ],
+        output_text="",
+    )
+    done, broken = tools_mod._search_actions(resp)
+    assert done == 1  # the completed one is billable
+    assert "failed" in broken  # and the failure is not masked by it
+
+
+def test_a_rejected_key_is_permanent_not_transient(monkeypatch):
+    """A *missing* key raises _SearchNotConfigured; a *rejected* one surfaces as the
+    SDK's AuthenticationError and was taking the "retry later" branch — the same
+    failure _SearchNotConfigured exists to prevent, reached another way. The model
+    would keep retrying a mode that cannot work until a human intervenes."""
+    class AuthenticationError(Exception):
+        pass
+
+    class Boom:
+        def __init__(self, *a, **k):
+            raise AuthenticationError("invalid api key")
+
+    import openai
+
+    monkeypatch.setattr(openai, "OpenAI", Boom)
+    monkeypatch.setenv("OPENAI_API_KEY", "sk-revoked")
+    monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
+
+    out = tools.search_web("q")
+    assert "not configured" in out
+    assert "Retry later" not in out

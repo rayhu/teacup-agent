@@ -10,8 +10,9 @@ Start with [the README](../README.md) if you want to know what the project is. S
 
 ## The four search_web modes
 
-Web search goes through [`ddgs`](https://pypi.org/project/ddgs/) (DuckDuckGo) and
-needs **no API key**; `uv sync` installs it. Switch with the `TEACUP_AGENT_SEARCH`
+Three of the four go through [`ddgs`](https://pypi.org/project/ddgs/) (DuckDuckGo)
+or a local corpus and need **no API key**; `uv sync` installs it. The fourth,
+`hosted`, calls OpenAI and bills per search. Switch with the `TEACUP_AGENT_SEARCH`
 environment variable:
 
 | Value | Behaviour | Use for |

@@ -302,6 +302,19 @@ def deny_all(call: ToolCall, tool: Any) -> bool:
 EXTERNALIZE_OVER = 2000  # tool results longer than this go to disk, excerpt inline
 
 
+def _execute_and_bill(index: int, call: ToolCall, spend: dict[int, float]) -> str:
+    """Run one tool and record what it spent, in the worker thread that ran it.
+
+    The accumulator in tools.py is thread-local, so reading it here reads exactly this
+    call's spend — not a sibling call's, and not a nested run's.
+    """
+    tools_mod.take_hosted_spend()  # start from zero in this thread
+    try:
+        return tools_mod.execute(call.name, call.arguments)
+    finally:
+        spend[index] = tools_mod.take_hosted_spend()
+
+
 def execute_calls(
     state: AgentState,
     calls: list[ToolCall],
@@ -361,6 +374,9 @@ def execute_calls(
         # timeout, the remaining time wins. A tool may also declare its own limit —
         # a subagent legitimately runs longer than a page fetch.
         left = state.time_left()
+        # Filled by each worker thread under its own key, read after the pool has shut
+        # down — so a call that timed out still contributes what it spent.
+        tool_spend: dict[int, float] = {}
         with ThreadPoolExecutor(max_workers=len(to_run)) as pool:
             futures = {}
             limits = {}
@@ -370,7 +386,7 @@ def execute_calls(
                 if left is not None:
                     limit = min(limit, max(1.0, left))
                 emit("tool_call", name=call.name, arguments=call.arguments, step=state.step)
-                future = pool.submit(tools_mod.execute, call.name, call.arguments)
+                future = pool.submit(_execute_and_bill, i, call, tool_spend)
                 futures[future] = i
                 # An absolute deadline, so waiting on them one after another does not
                 # add the timeouts together.
@@ -389,6 +405,15 @@ def execute_calls(
                     future.cancel()
                 except Exception as e:  # execute() already catches; this is the net
                     results[i] = f"ERROR: {type(e).__name__}: {e}"
+
+        # Charged here, to the run that owns this execute_calls, rather than drained
+        # from a module global later: `delegate` starts a nested run in a sibling
+        # worker thread, and a global could not say which run a concurrent search
+        # belonged to.
+        billed = round(sum(tool_spend.values()), 8)
+        if billed:
+            state.charge(billed)
+            emit("tool_spend", tool="search_web", cost=billed, step=state.step)
 
     for i, call in enumerate(calls):  # strictly in the original order
         result = results[i]
@@ -558,20 +583,12 @@ def run(
     hidden = set(exclude_tools or [])
     specs = [s for s in tools_mod.specs() if s["function"]["name"] not in hidden]
 
-    # Runs nest — subagent.py calls run() inside a parent run, and a single turn can
-    # issue search_web and delegate in parallel — while the hosted-search accumulator is
-    # module state. Take whatever is pending on entry and hold it, so this run starts
-    # from zero and charges only its own searches; hand it back on the way out. A plain
-    # "reset at run start" instead either discarded the parent's pending spend or let
-    # the child absorb it and trip its own budget brake on money it never spent.
-    outer_spend = tools_mod.take_hosted_spend()
     try:
         return _loop(
             state, router, specs, emit, clock, started_at, context_limit,
             tool_timeout, run_dir, approve, memory, reflect,
         )
     finally:
-        tools_mod.add_hosted_spend(outer_spend)
         if subagents:
             subagent_mod.disable()
         if coding_tools:
@@ -580,21 +597,6 @@ def run(
             skills_mod.disable()
         if loaded_hooks:
             hooks_mod.unload()
-
-
-def _collect_tool_spend(state: AgentState, emit: Callable[..., None]) -> None:
-    """Charge whatever the money-spending tools have run up since the last collection.
-
-    A tool function has no access to `state`, and threading one into every tool
-    signature for the sake of one tool is a worse trade than collecting here. Charged
-    unnamed: it is not any model profile's spend, so putting it in the per-profile
-    breakdown would misattribute it to whichever profile happened to run the turn —
-    which is why `spend_by_profile` can sum to less than the budget consumed.
-    """
-    spent = tools_mod.take_hosted_spend()
-    if spent:
-        state.charge(spent)
-        emit("tool_spend", tool="search_web", cost=spent, step=state.step)
 
 
 def _loop(
@@ -750,7 +752,6 @@ def _loop(
         # — so it accumulates and the loop collects. Charged unnamed: it is not any
         # model profile's spend, and putting it in the per-profile breakdown would
         # misattribute it to whichever profile happened to run the turn.
-        _collect_tool_spend(state, emit)
 
         # ---- 5. persist: save every step, or there is nothing to resume from -
         # elapsed uses the value measured at the top of this turn, so we do not ask
@@ -761,13 +762,6 @@ def _loop(
         # is the difference between an agent and a single function call.
 
     state.elapsed = clock() - started_at
-    # Belt and braces, and deliberately not pinned by a test: every ordinary exit path
-    # has already run the in-loop drain above (the guards break at the *top* of an
-    # iteration, after the previous one collected). What is left is a tool thread the
-    # loop abandoned on timeout and that finishes before the run returns — a race, so a
-    # test asserting it would be asserting a scheduling accident. Removing this line
-    # leaves the suite green; that is a known gap, not an untested claim.
-    _collect_tool_spend(state, emit)
     if state.status != "done" and not state.answer:
         state.answer = f"(no final answer; stopped because: {state.status})"
     if reflect:
