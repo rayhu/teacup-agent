@@ -239,15 +239,33 @@ def _is_config_error(exc: Exception) -> bool:
     """Whether a failure is permanent. A missing key raises _SearchNotConfigured, but a
     *rejected* one surfaces as the SDK's AuthenticationError and was taking the "retry
     later" branch — the same failure _SearchNotConfigured exists to prevent, reached by
-    a different route. There are more routes than that one: TEACUP_AGENT_SEARCH_MODEL is
-    a live knob, so naming a model that does not exist, or one that cannot use the
-    web_search tool, raises NotFoundError/BadRequestError — equally permanent, equally
-    useless to retry. Telling the model "retry later" for any of these sends it back to
-    a mode that cannot work until a human edits something, until the step ceiling.
+    a different route. There is more than that one: TEACUP_AGENT_SEARCH_MODEL is a live
+    knob, so naming a model that does not exist raises NotFoundError — equally
+    permanent, equally useless to retry. Telling the model "retry later" for those sends
+    it back to a mode that cannot work until a human edits something, until the step
+    ceiling.
 
-    Matched by type name so the SDK stays an optional import. The names are pinned by a
-    test that imports the real openai classes, so a rename upstream fails loudly rather
-    than silently reopening the retry loop.
+    **The list is deliberately short, and two entries were tried and removed.** Adding a
+    class here is not free: this branch tells the model retrying cannot help *and* drops
+    the "reword the query" advice, so a wrong entry disables search for the rest of the
+    run.
+
+    - `BadRequestError` was here for one round and is not a permanence signal. Every
+      HTTP 400 becomes that one class — whether a given 400 is permanent lives in
+      `.code`, which a name match flattens away — and `query` is written by the model
+      and interpolated into the request, so a 400 provoked by the query text is
+      indistinguishable from a model that cannot use the web_search tool. Ambiguous
+      failures belong in the retryable branch.
+    - `ImportError`/`ModuleNotFoundError` were here too. `openai` is a hard dependency
+      (`pyproject.toml`), so "not installed" is near-unreachable — while a broken import
+      of *our own* code inside this backend would have reached the model as "this is a
+      setup problem" rather than as the bug it is.
+
+    Matched by type name rather than `isinstance` so this module never imports the SDK
+    at module scope — it is imported lazily inside the backend, and the offline paths
+    must not pay for it. The names are pinned by a test that imports the real openai
+    classes, so a rename upstream fails loudly rather than silently reopening the retry
+    loop.
     """
     return isinstance(exc, _SearchNotConfigured) or type(exc).__name__ in (
         "AuthenticationError",  # key rejected
@@ -497,8 +515,12 @@ def search_web(query: str, max_results: int = 5) -> str:
             # Permanent. Telling the model to "retry later" would send it back to a
             # mode that cannot work until a human changes something, and it would keep
             # going until the step ceiling.
+            # `_SearchNotConfigured` carries a written-for-humans message and is the
+            # commonest case here; prefixing it with our own class name is noise in
+            # model-facing prose. The SDK's classes say something the message does not.
+            detail = str(e) if isinstance(e, _SearchNotConfigured) else f"{type(e).__name__}: {e}"
             return (
-                f"ERROR: hosted search is not configured ({type(e).__name__}: {e}). "
+                f"ERROR: hosted search is not configured ({detail}). "
                 "This is a setup "
                 "problem, not a temporary one — retrying will not help. Answer from "
                 "what you already have and mark anything unverified as unverified."

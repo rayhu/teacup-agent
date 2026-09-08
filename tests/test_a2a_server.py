@@ -15,6 +15,10 @@ import httpx
 from teacup_agent import agent_config, model as model_mod
 from teacup_agent.a2a.server import build_app
 
+# `search: offline` is not decoration: build_app() pins the process's search mode from
+# this config, so a fixture without it would switch every test that builds an app to the
+# live scraper for the rest of that test — the invariant AGENTS.md's verification
+# standard names ("unit tests make no network calls").
 MINIMAL = """
 models:
   default: main
@@ -23,6 +27,7 @@ models:
       model: gpt-5
       api_key_env: FAKE_KEY
 runtime:
+  search: offline
   plan: off
   reflect: off
   run_dir: off
@@ -170,7 +175,7 @@ def test_serving_pins_the_search_mode_instead_of_inheriting_it(tmp_path, monkeyp
     monkeypatch.setenv("TEACUP_AGENT_SEARCH", "hosted")
     monkeypatch.setenv("FAKE_KEY", "sk-test")
     path = tmp_path / "agent.yaml"
-    path.write_text(MINIMAL.replace("  plan: off", "  search: offline\n  plan: off"), encoding="utf-8")
+    path.write_text(MINIMAL, encoding="utf-8")
 
     from teacup_agent import agent_config
 
@@ -191,6 +196,8 @@ def test_building_an_executor_does_not_touch_the_environment(tmp_path, monkeypat
     monkeypatch.setenv("TEACUP_AGENT_SEARCH", "offline")
     monkeypatch.setenv("FAKE_KEY", "sk-test")
     path = tmp_path / "agent.yaml"
-    path.write_text(MINIMAL, encoding="utf-8")  # no `search:` key, so it would default to auto
+    # `search: web` rather than the fixture's offline, so "did not touch it" is
+            # distinguishable from "happened to write the same value"
+    path.write_text(MINIMAL.replace("  search: offline", "  search: web"), encoding="utf-8")
     server_mod.TeacupAgentExecutor(agent_config.load(path))
     assert os.environ["TEACUP_AGENT_SEARCH"] == "offline"

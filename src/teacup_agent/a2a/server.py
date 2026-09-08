@@ -97,18 +97,20 @@ class TeacupAgentExecutor(AgentExecutor):
 
 
 def build_app(cfg: agent_config.AgentConfig, url: str) -> Starlette:
-    # Pinned here rather than in main(): build_app is public, and an embedder mounting
-    # it in their own ASGI app is still starting a server. Doing it in main() only
-    # covered the console-script path and left that one inheriting whatever the process
-    # exported — narrower than the constructor version it replaced, which is the wrong
-    # direction. Not in the executor's __init__ either: constructing an object must not
-    # mutate process-global state, and doing so switched tests that built one to the
-    # live scraper for the rest of the test.
+    # Set rather than inherited: this is the entry point that runs with nobody watching,
+    # and an exported TEACUP_AGENT_SEARCH=hosted otherwise let remote peers drive billed
+    # searches on a process with no TTY and no --live, with `search: offline` in the
+    # config unable to stop them.
     #
-    # Set rather than inherited because this is the entry point that runs with nobody
-    # watching: an exported TEACUP_AGENT_SEARCH=hosted otherwise let remote peers drive
-    # billed searches on a process with no TTY and no --live, and a config saying
-    # `search: offline` could not stop them.
+    # Here rather than in main() because build_app is public — an embedder mounting it
+    # in their own ASGI app is still starting a server, and pinning only in main() left
+    # that path inheriting the environment. Here rather than in the executor's __init__
+    # because constructing an object should not mutate process-global state.
+    #
+    # It is still a global write from a function, so it has the same shape of cost one
+    # level up: a test that calls build_app changes the search mode for the rest of that
+    # test. That is why the tests below pass `search: offline` explicitly instead of
+    # relying on conftest's pin — do the same in any new one.
     os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
 
     skills = discover_skills(cfg.skills_dir) if cfg.skills_dir else []
@@ -138,17 +140,6 @@ def main(argv: list[str] | None = None) -> int:
     args = p.parse_args(argv)
 
     cfg = agent_config.load(args.config)
-    # In main(), where cli._main, cli._main_config and bench.py all do it — not in the
-    # executor's constructor, which would make importing or building the app mutate
-    # process-global state. Building one in a test then silently switched the rest of
-    # that test to the live scraper, which is exactly the invariant AGENTS.md's
-    # verification standard pins ("unit tests make no network calls").
-    #
-    # Set rather than inherited, because this is the one entry point that runs with
-    # nobody watching: an exported TEACUP_AGENT_SEARCH=hosted otherwise let remote peers
-    # drive billed searches on a process with no TTY and no --live, and a config saying
-    # `search: offline` could not stop them.
-    os.environ["TEACUP_AGENT_SEARCH"] = cfg.runtime.search
     url = f"http://{args.host}:{args.port}"
     app = build_app(cfg, url)
 

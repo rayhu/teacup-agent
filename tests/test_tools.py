@@ -366,6 +366,8 @@ def test_hosted_search_without_a_key_says_it_is_configuration_not_weather(monkey
     # a permanent config error must not be dressed up as a transient one, or the model
     # keeps retrying a mode that can never work
     assert "Retry later" not in out
+    # ...and the message is the human-written one, not prefixed with our own class name
+    assert "_SearchNotConfigured" not in out
 
 
 def test_auto_never_reaches_for_the_paid_backend(monkeypatch):
@@ -674,7 +676,10 @@ def test_a_broken_import_inside_the_backend_is_not_read_as_misconfiguration(monk
 
     out = tools.search_web("q")
     assert "not configured" not in out
-    assert "ImportError" in out  # the real failure reaches the model, named
+    # the transient branch, and the real class named in it — asserting only the class
+    # name would pass against the permanent branch too, which also prints it now
+    assert "Retry later" in out
+    assert "ImportError" in out
 
 
 def test_spend_is_attributed_to_the_tool_that_incurred_it(monkeypatch):
@@ -697,7 +702,7 @@ def test_spend_is_attributed_to_the_tool_that_incurred_it(monkeypatch):
     )
     try:
         events = []
-        loop.run(
+        state = loop.run(
             "spend after a denied call",
             ScriptedModel(
                 [
@@ -720,6 +725,13 @@ def test_spend_is_attributed_to_the_tool_that_incurred_it(monkeypatch):
         )
     finally:
         tools_mod.REGISTRY.pop("bill_something", None)
+
+    # The index claim only means something while index 0 really is skipped. Without
+    # this, granting approval makes a positional-index bug pass unnoticed.
+    denied = [d for n, d in events if n == "tool_skipped"] or [
+        t for t in state.trace if t.skip_reason
+    ]
+    assert denied, "index 0 was not skipped, so this no longer tests the index"
 
     spend = [d for n, d in events if n == "tool_spend"]
     assert spend, "the tool's spend was never charged"
