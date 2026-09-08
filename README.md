@@ -17,14 +17,9 @@ MIT licensed. Fork it, take the parts you want, and see
 [docs/intent.md](docs/intent.md) says what a fork owes the original, and how to publish one.
 
 **[This repo's own coding tools have been used, unattended, to patch this repo's own
-source](docs/case-studies.md).** Seven real attempts, in order, with the failures included:
-a sandbox that hung for 630 seconds asking a question nobody could answer, a model that
-gave up after one denial, a model that reached for a shell command instead of the tool
-built for the job. Every fix is a merged pull request with its own commit and its own test
-run, linked from that file. It's a living log, not a highlight reel — updated the moment
-the next attempt finds something new.
+source](docs/case-studies.md).**
 
-## Quick start
+ ## Quick start
 
 ```bash
 uv sync                        # create the environment (.venv + uv.lock)
