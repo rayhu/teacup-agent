@@ -10,8 +10,9 @@ Nothing is stubbed out: every part does real work, and each is kept to a few doz
 so you can replace them one at a time. The control loop — `_loop()` in `loop.py` — is
 117 lines of code, 172 with the comments that mark its traps, and reads in one sitting.
 That is the point of the whole project: a harness you can read before you trust it.
-([docs/intent.md](docs/intent.md) holds it to a ceiling of 100 and currently records it as
-over — the number here is measured, not aspirational.)
+(62 of those lines are control flow; 42 are four completion checks that grew inside the
+loop and belong in `plan.py`. [docs/intent.md](docs/intent.md) §6.1 measures it, holds the
+ceiling at 100, and records it as crossed; `docs/roadmap.md` #24 is the way back under.)
 
 MIT licensed. Fork it, take the parts you want, and see
 [CONTRIBUTING.md](CONTRIBUTING.md) for where the seams are —

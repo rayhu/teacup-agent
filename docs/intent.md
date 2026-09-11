@@ -141,15 +141,47 @@ in one head, and the next capability belongs in a backend class or a module.
 awk '/^def _loop/{f=1} f' src/teacup_agent/loop.py | grep -vc '^\s*#\|^\s*$'
 ```
 
-Threshold: ≤ 100. **Measured: 117. Status: RED.** The loop has grown past its own ceiling
-and both this file and `README.md` had been quoting 79 since before it did; the numbers are
-corrected here rather than the ceiling raised, because raising a ceiling to meet the code
-is how the criterion stops meaning anything. Nothing is scheduled yet — the next change to
-`loop.py` either moves something out or argues the ceiling was wrong.
+Threshold: ≤ 100. **Measured: 117. Status: RED.**
 
-(`awk` rather than `sed -n '/^def _loop/,$p'`: both give the same answer today only because
-`_loop` happens to be the last function in the file. The first function appended after it
-would silently inflate the count.)
+The ceiling was re-argued rather than moved, because "the code is 117, so the limit is
+120" is how a criterion stops meaning anything. What the argument turned on is *where* the
+117 lines are:
+
+| Block | Code lines | What it is |
+| --- | ---: | --- |
+| the signature | 13 | twelve parameters `run()` threads through |
+| the control flow | 62 | guards, status note, model call, protocol, tool execution, persist |
+| the completion checks | 42 | four `elif` branches deciding whether a model saying "done" is believed |
+
+```bash
+# the second block, measured on its own
+awk '/outstanding = plan_mod\.pending/{f=1} f && /^ +state\.answer = reply\.text/{exit} f' \
+  src/teacup_agent/loop.py | grep -vc '^\s*#\|^\s*$'
+```
+
+So the loop as control flow is 62 lines and was never close to the ceiling. What crossed
+it is 42 lines of **policy over `AgentState`** — is the checklist clear, did the last
+command fail, were files written but never run, were any files written at all — living
+inside the loop's `if not reply.tool_calls` branch. Every one of those branches is a
+recorded field patch, and together they are what `AGENTS.md` rule 5 — *nothing is silently
+half-done* — actually is at runtime; four eval cases pin them. They earned their place in
+the *project*. They did not earn it in the *loop*, and `AGENTS.md`'s own rule says so:
+push shape differences into the modules, keep `loop.py` readable.
+
+(Noted while measuring, and left for a decision rather than taken: rule 5 is guarded by
+evals and treated here as non-negotiable, but it is **not** one of the five invariants in
+§5 above. Either it is a sixth invariant a fork must keep, or §5's list is deliberately
+narrower than AGENTS.md's rules and should say so.)
+
+The honest reason they are there anyway is the weak one: each arrived while chasing the
+failure it fixes, and extending an `elif` chain already in front of you is a smaller diff
+than opening a second file. Four times in a row, that was the cheaper move.
+
+So the ceiling stands at 100, the criterion stays RED, and the remedy is named rather than
+implied: `docs/roadmap.md` #24 extracts the cascade into `plan.py`, which already owns the
+checklist half of the same decision. Expected after the move: **75** — green with the
+twelve-parameter signature still counted, which is the next thing to look at and not this
+criterion's business.
 
 **6.2 Two files answer the central question.** "What happens when a tool fails?" must be
 answerable from `loop.py` and `tools.py` alone — `execute()` returns the error as the tool
