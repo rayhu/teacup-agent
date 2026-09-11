@@ -8,9 +8,10 @@ Agent = Model + State + Tools + Control Loop + Memory/Evals
 
 Nothing is stubbed out: every part does real work, and each is kept to a few dozen lines
 so you can replace them one at a time. The control loop — `_loop()` in `loop.py` — is
-about 80 lines of code, 115 with the comments that mark its traps, and reads in one
-sitting. That is the point of the whole project: a harness you can read before you trust
-it.
+117 lines of code, 172 with the comments that mark its traps, and reads in one sitting.
+That is the point of the whole project: a harness you can read before you trust it.
+([docs/intent.md](docs/intent.md) holds it to a ceiling of 100 and currently records it as
+over — the number here is measured, not aspirational.)
 
 MIT licensed. Fork it, take the parts you want, and see
 [CONTRIBUTING.md](CONTRIBUTING.md) for where the seams are —
