@@ -18,8 +18,10 @@ intent  ->  phase  ->  plan  ->  implement  ->  independent review  ->  answer  
 
 **1. Intent.** What the project is for, and what a change can fail against. Stated once,
 not per change; `README.md` says what this is, and the success criteria a fork owes it
-belong in `docs/intent.md`. *(That file is drafted on a branch and is the one artifact in
-this table not yet on `main`.)*
+belong in `docs/intent.md`. That file is upstream of `docs/spec.md`: the spec's sections
+are the contracts for the capabilities intent names, so a spec section that traces to no
+line of intent is a feature nobody asked for, and a capability with no section is
+unspecified. `docs/intent.md` says how to check both directions.
 
 **2. Phase.** One item from `docs/roadmap.md`, ordered by payoff over cost. An item is
 the unit of work: it names what to change, what counts as done, and where to read more.
@@ -62,6 +64,7 @@ record of why the code looks like this.
 | Step | Artifact | What it holds |
 | --- | --- | --- |
 | Intent | `README.md`, `docs/intent.md` | what this is for, and the criteria a change can fail |
+| Spec | `docs/spec.md` | the contract for each capability intent names: values, shapes, interfaces |
 | Static context | `AGENTS.md` (imported by `CLAUDE.md`) | conventions, hard rules, how to verify, what to ask before spending money |
 | Phase and plan | `docs/roadmap.md` | the item: what to change, what counts as done, and afterwards what happened |
 | Implementation | code, `tests/`, `evals.py` | the change and its contract |
