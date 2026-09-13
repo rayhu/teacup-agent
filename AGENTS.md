@@ -11,8 +11,11 @@ wrong twice; delete one when it stops being true.
 
 A minimal, readable AI agent — `Agent = Model + State + Tools + Control Loop +
 Memory/Evals` — built to be **shared, forked, improved and shared again**. Its value is
-that the ~80-line control loop in `loop.py` fits in one head. Every feature is weighed
-against that: a capability that makes the loop unreadable costs more than it adds.
+that the control loop in `loop.py` fits in one head. Every feature is weighed against
+that: a capability that makes the loop unreadable costs more than it adds. The ceiling is
+a number with a command behind it, in `docs/intent.md` §6.1 — deliberately not repeated
+here, because this file carried a line count long enough for `_loop()` to outgrow it
+without anyone noticing. A measurement belongs in the one file that re-runs it.
 
 Working docs: `README.md` (what it is and how to run it), `docs/intent.md` (what the
 project is for, and what a fork owes it), `docs/spec.md` (the technical contract:

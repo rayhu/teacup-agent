@@ -6,7 +6,9 @@ was roughly where the field stood in late 2023 / early 2024.
 Stage C. #22 and #23 are new and not started: both are about the seam with teacup-run
 rather than about this agent, which is the shape most remaining work here should have —
 the ecosystem belongs in the other repo, and this one's value is that the loop still fits
-in one head. Twelve items that were never on the roadmap were added after reviewing real runs
+in one head. #24 is what that last clause currently costs: `_loop()` measures 117 lines
+against the ceiling `docs/intent.md` §6.1 sets for it, and the way back under is to move
+the completion checks out, not to move the ceiling. Twelve items that were never on the roadmap were added after reviewing real runs
 (see "Field patches" at the end). #11 (hosted search backend) and #16 (per-profile price
 overrides, a native Anthropic path) landed 2026-09-08 after seven independent review
 rounds — the numbers, and what is still not verified, are in each item's own Verified
@@ -1716,10 +1718,64 @@ renaming one fails here rather than in a consumer.
 
 ---
 
+### 24. Get `_loop()` back under its own ceiling
+
+**Now**: `docs/intent.md` §6.1 holds `_loop()` to 100 lines of code and it measures 117, so
+the criterion is red. The measurement is not the problem and neither is the ceiling — the
+117 lines are in three unequal piles:
+
+```bash
+awk '/^def _loop/{f=1} f' src/teacup_agent/loop.py | grep -vc '^\s*#\|^\s*$'          # 117
+awk '/outstanding = plan_mod\.pending/{f=1} f && /^ +state\.answer = reply\.text/{exit} f' \
+  src/teacup_agent/loop.py | grep -vc '^\s*#\|^\s*$'                                 # 42
+```
+
+13 lines of signature, **62 lines of control flow**, and **42 lines of completion checks** —
+the four-branch `elif` cascade inside `if not reply.tool_calls` that decides whether a
+model saying "done" is believed: an open checklist item, a last command that failed, files
+written with nothing run against them, no files written at all.
+
+Those four branches are not the problem either. Each is a field patch from a real run
+(#20's coding tools shipped a red suite three times with a confident summary on top; a
+later run stopped at step 8 of 30 having made no edits, with an intention filed as a
+result), each is pinned by an eval, and together they are what "nothing is silently
+half-done" means at runtime. What is wrong is where they live. They are policy over
+`AgentState` — no control flow, no protocol, no I/O — sitting in the one function this
+project asks people to read first.
+
+The honest reason they are there is the weak one, and it is worth writing down because it
+will happen again: each arrived while chasing the failure it fixes, and extending an
+`elif` chain already on screen is a smaller diff than opening a second file. Four times in
+a row, the cheaper move won.
+
+**What to change**: move the cascade into `plan.py`, which already owns the checklist half
+of the same decision — something with the shape of
+
+```python
+def completion_nudge(state: AgentState, specs: list[dict]) -> Nudge | None:
+    """The checks that outrank a model's own "done". None means: believe it."""
+```
+
+returning the check name, the message and the pending item names, so the loop keeps the
+four lines that append it and `continue`s. Behaviour identical; the ordering rule the
+comment in `loop.py` guards — each condition tracked by name, firing at most once, and
+*not* alternatives to each other — moves with the code and stays commented, because a
+single shared flag for all four is exactly the bug this already had.
+
+**Definition of done**: the first command above prints ≤ 100 (expected 75); the four eval
+cases that pin this behaviour pass **unchanged** — an eval edited to accommodate the move
+means the move changed behaviour; `uv run pytest` and the offline demo stay green; and
+`docs/intent.md` §6.1, `README.md` and `AGENTS.md` stop describing the ceiling as crossed.
+
+Not in scope, and the next thing to look at once this lands: `_loop()` takes twelve
+parameters, which is the other 13 lines and a different argument.
+
+---
+
 ## Deliberately not doing
 
 - **No agent framework** (LangGraph and friends). The value of this repo is that the
-  80-line loop is **yours** and fits on one screen. Wrap it in a framework and the
+  loop is **yours** and fits on one screen (#24 is what keeps it that way). Wrap it in a framework and the
   learning value drops to zero.
 - **No multi-tenancy or web UI.** That is a different project. The one narrow exception
   is #18's optional A2A server: a second console script behind a separate install extra,
