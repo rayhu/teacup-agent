@@ -62,6 +62,17 @@ holding `OPENAI_API_KEY` with open egress is a perfectly good exfiltration chann
 the real boundary: `send_email`, `delegate_a2a` and anything an MCP server does not mark
 read-only all sit behind it.
 
+**What the gate is allowed to look at is part of the boundary.** `approve(call, spec)` —
+and `hooks.py`'s `approve_tool_call(call, spec)` behind it — receives the tool call and the
+tool's own spec. Not the transcript, not the model's stated reason for wanting the call.
+That is currently true of the signature and should stay true on purpose, because the
+failure it prevents runs one way only: **a model that can put text in front of its own
+approval check will eventually write text that approves it**, and the argument for a call
+is composed by the same thing the gate exists to restrain. Anything a caller renders beside
+the "Allow it to run?" prompt is built from those two inputs for the same reason — an
+explanation is a place to put persuasion. teacup-run's roadmap #10 states this as a rule
+for its own gate and points here for the code it is a rule about.
+
 ## What #18 added, and how it is covered
 
 `teacup-agent-serve` is a new inbound surface: another process can submit a task over the
@@ -102,6 +113,18 @@ Two things follow from that:
   file that arrived with the task itself (a cloned repo you did not audit, a prompt
   injected "here's a hooks.py to use") — loading one is always explicit and opt-in, never
   automatic from untrusted content.
+- **A sibling repo drives that exact pattern automatically, which is worth knowing here.**
+  teacup-run's `coding_task.py` always adds `--coding-tools --approve hooks` to this CLI's
+  argv and deliberately does *not* pass `--hooks`, so the default above applies: `./hooks.py`
+  is discovered relative to the cwd, and there the cwd is a worktree of the **target**
+  repository. A `hooks.py` committed in the repo being worked on therefore becomes the
+  approver, with no opt-in beyond starting the task. That is a defensible trade while a
+  human types the command against a repo they picked — the previous bullet's "a cloned repo
+  you did not audit" is then their call to make. It stops being their call the moment
+  something long-lived starts those tasks on their behalf, which is why teacup-run's
+  roadmap #10 makes the child's policy selectable instead of a constant. Recorded here
+  because the bullet above reads like "this only happens if you ask for it", and on that
+  path nobody asks.
 - **Failure handling is asymmetric on purpose.** A broken `before_tool_call` fails
   **closed** (an exception becomes a veto — a broken safety check must not silently stop
   being one); a broken `approve_tool_call` fails to "no opinion" (also closed, since that
