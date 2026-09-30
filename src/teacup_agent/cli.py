@@ -136,6 +136,14 @@ def _make_approver(policy: str, quiet: bool):
     hook has no opinion (returns None — including when no hooks.py was loaded at
     all), it falls through to auto's own behaviour below, so "hooks" is safe to
     leave on even for calls the project never mentioned.
+
+    The approver sees `call` and `spec` and nothing else — not the transcript, not
+    the model's stated reason for wanting the call. Keep it that way deliberately
+    rather than by accident of this signature: a model that can put text in front of
+    its own approval check will eventually write text that approves it, and the
+    argument for a call is written by the same thing the gate exists to restrain.
+    The prompt printed below is built from the same two inputs for the same reason.
+    See docs/threat-model.md, "The approval gate is the real boundary".
     """
 
     def approve(call, spec) -> bool:
